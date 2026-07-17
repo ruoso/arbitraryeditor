@@ -17,11 +17,23 @@ endif()
 # Catch2 rather than declaring a second one; and we keep the library's own test
 # suite out of our build (its tests/ is gated on BUILD_TESTING).
 include(FetchContent)
-set(ARBC_SOURCE_DIR "/home/ruoso/devel/arbitrarycomposer"
-    CACHE STRING "Local libarbc checkout for co-development")
+# Default: fetch the released library from GitHub (works on CI + the act runner).
+# For co-development against a local checkout, set -DARBC_SOURCE_DIR=/path/to/lib
+# (overrides the git fetch) or point ARBC_GIT_TAG at a branch.
+set(ARBC_GIT_REPOSITORY "https://github.com/ruoso/arbitrarycomposer.git"
+    CACHE STRING "libarbc git remote")
+set(ARBC_GIT_TAG "v0.1.0" CACHE STRING "libarbc git ref")
+set(ARBC_SOURCE_DIR "" CACHE STRING "Local libarbc checkout (overrides the git fetch)")
 set(_editor_build_testing "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(arbc SOURCE_DIR "${ARBC_SOURCE_DIR}")
+if(ARBC_SOURCE_DIR)
+  FetchContent_Declare(arbc SOURCE_DIR "${ARBC_SOURCE_DIR}")
+else()
+  FetchContent_Declare(arbc
+    GIT_REPOSITORY "${ARBC_GIT_REPOSITORY}"
+    GIT_TAG "${ARBC_GIT_TAG}"
+    GIT_SHALLOW TRUE)
+endif()
 FetchContent_MakeAvailable(arbc)
 set(BUILD_TESTING "${_editor_build_testing}" CACHE BOOL "" FORCE)
 
