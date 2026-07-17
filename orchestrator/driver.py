@@ -87,10 +87,10 @@ AUTO_FORMAT_STEP: tuple[str, list[str]] = (
 # here. ci.yml stays the single source of truth for the steps — the lane
 # list below only selects which matrix legs to run. The `msvc-debug` leg is
 # excluded: there is no local Windows container runtime.
-ACT_RUNNER_IMAGE = "arbitrarycomposer/act-runner:latest"
+ACT_RUNNER_IMAGE = "arbitraryeditor/act-runner:latest"
 ACT_RUNNER_DOCKERFILE = REPO_ROOT / ".github" / "act" / "runner.Dockerfile"
 ACT_EVENT_FILE = STATE_DIR / "act-event.json"
-ACT_CCACHE_VOLUME = "arbitrarycomposer-act-ccache"
+ACT_CCACHE_VOLUME = "arbitraryeditor-act-ccache"
 
 # ci.yml `build-test` matrix legs runnable locally (all but msvc-debug).
 CI_BUILD_LANES: list[str] = [
@@ -99,7 +99,6 @@ CI_BUILD_LANES: list[str] = [
     "clang-debug",
     "clang-asan",
     "gcc-tsan",
-    "clang-rtsan",
 ]
 
 
@@ -139,11 +138,14 @@ def act_argv(*args: str) -> list[str]:
 
 
 VERIFICATION_STEPS: list[tuple[str, list[str]]] = [
-    # Fast host-side pre-check (dev preset, incremental build) so the
-    # common failure modes short-circuit before any container spins up.
+    # Fast host-side pre-check (dev preset, incremental build) so the common
+    # failure modes short-circuit before any container spins up. This is the
+    # editor's universal gate (docs/01-architecture.md §9): check_levels ·
+    # clang-format · configure · build · ctest.
     ("gate", ["scripts/gate"]),
-    # Ensure the runner image exists / picks up Dockerfile edits. Cached
-    # docker layers make this near-instant when nothing changed.
+    # Then replay the real per-push CI (.github/workflows/ci.yml) locally with
+    # `act` inside docker, so every check GitHub runs also gates each iteration.
+    # ci.yml stays the single source of truth; the lane list only selects legs.
     (
         "ci-image",
         [

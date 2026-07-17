@@ -1,0 +1,89 @@
+# Per-push CI for the editor (mirrors libarbc's model, doc 16). Trunk-based:
+# this is the net, not the gate — a red main is fix-forward or revert.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # clang-format pinned to the same version as local tooling (doc 16).
+      - run: pip install clang-format==19.1.7
+      - name: format
+        run: git ls-files '*.cpp' '*.hpp' | xargs -r clang-format --dry-run -Werror
+      - name: levelization
+        run: python3 scripts/check_levels.py
+
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: gcc-debug, os: ubuntu-latest, cxx: g++, preset: dev }
+          - { name: gcc-release, os: ubuntu-latest, cxx: g++, preset: release }
+          - { name: clang-debug, os: ubuntu-latest, cxx: clang++, preset: dev }
+          # ASan+UBSan (doc 16): catches memory + UB. clang's is complete here.
+          - { name: clang-asan, os: ubuntu-latest, cxx: clang++, preset: asan }
+          # TSan (doc 16): the UI↔driver threading (frame_sync/multi_canvas)
+          # is the editor's own concurrency worth racing under ThreadSanitizer.
+          - { name: gcc-tsan, os: ubuntu-latest, cxx: g++, preset: tsan }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install clang
+        if: startsWith(matrix.cxx, 'clang')
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: configure
+        shell: bash
+        run: |
+          if [[ -n "${{ matrix.cxx }}" ]]; then export CXX="${{ matrix.cxx }}"; fi
+          cmake --preset ${{ matrix.preset }}
+      - name: build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel 4
+      - name: test
+        run: ctest --preset ${{ matrix.preset }}
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install gcovr diff-cover
+      - name: configure
+        run: CXX=g++ cmake --preset coverage
+      - name: build
+        run: cmake --build --preset coverage --parallel 4
+      - name: test
+        run: ctest --preset coverage
+      - name: coverage report
+        run: gcovr --root . --filter 'src/' --xml -o coverage.xml
+          --gcov-ignore-parse-errors=negative_hits.warn_once_per_file
+          build/coverage
+      # Hard diff-coverage gate on changed lines (doc 16). Skipped when no
+      # comparable base exists (first push, forced push).
+      - name: diff coverage gate
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="origin/${{ github.base_ref }}"
+          elif [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]] \
+               && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            base="${{ github.event.before }}"
+          else
+            echo "no comparable base; skipping diff-coverage gate"
+            exit 0
+          fi
+          diff-cover coverage.xml --compare-branch="$base" --fail-under=90

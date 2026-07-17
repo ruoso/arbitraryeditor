@@ -1,0 +1,26 @@
+# Style guide for the editor (mirrors the libarbc style, doc 16). clang-format
+# major version pinned by CI (19).
+BasedOnStyle: LLVM
+Standard: c++20
+ColumnLimit: 100
+IndentWidth: 2
+PointerAlignment: Left
+DerivePointerAlignment: false
+InsertNewlineAtEOF: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Own-component headers first among the angle-bracket groups.
+  - Regex: '^<ace/'
+    Priority: 2
+  - Regex: '^<arbc/'
+    Priority: 3
+  - Regex: '^<catch2/'
+    Priority: 4
+  - Regex: '^<imgui'
+    Priority: 5
+  - Regex: '^<SDL'
+    Priority: 5
+  - Regex: '^<[a-z_]+>$'
+    Priority: 7
+  - Regex: '.*'
+    Priority: 8

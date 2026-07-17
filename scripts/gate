@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# The universal per-task gate (docs/01-architecture.md §9). The orchestrator runs
+# this after every task; every leaf's definition of done is: this passes.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+preset="${ACE_GATE_PRESET:-dev}"
+
+# Pick a C++ compiler if the environment did not name one (this box exposes only
+# versioned names, e.g. g++-14, with no unversioned g++/c++ symlink).
+if [ -z "${CXX:-}" ]; then
+  for cand in g++-14 g++-13 g++ clang++-19 clang++ c++; do
+    if command -v "$cand" >/dev/null 2>&1; then export CXX="$cand"; break; fi
+  done
+fi
+echo "gate: CXX=${CXX:-<cmake default>}"
+
+echo "gate: check_levels"
+python3 scripts/check_levels.py
+
+echo "gate: clang-format"
+mapfile -t files < <(git ls-files --cached --others --exclude-standard '*.cpp' '*.hpp' '*.h' 2>/dev/null || true)
+if command -v clang-format >/dev/null 2>&1 && [ "${#files[@]}" -gt 0 ]; then
+  clang-format --dry-run --Werror "${files[@]}"
+else
+  echo "  (clang-format unavailable or no sources — skipped)"
+fi
+
+echo "gate: configure ($preset)"
+cmake --preset "$preset" >/dev/null
+
+echo "gate: build ($preset)"
+cmake --build --preset "$preset" --parallel "$(nproc)"
+
+echo "gate: test ($preset)"
+ctest --preset "$preset"
+
+echo "gate: OK"
