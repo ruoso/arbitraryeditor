@@ -1,5 +1,6 @@
 #include <ace/app/probe.hpp>
 #include <ace/app/shell.hpp>
+#include <ace/dock/dock.hpp>
 #include <ace/gl/gl.hpp>
 
 #include <SDL3/SDL.h>
@@ -148,7 +149,14 @@ int run_editor(const ShellOptions& opts) {
   // (refinement Constraint 8). Owned here in the app layer, not in the shell.
   ProbeView probe;
   probe.upload();
-  shell.set_draw_content([&probe]() { probe.draw(); });
+  // The dockspace host (editor.dock.dockspace) owns the shell's whole draw:
+  // it tiles the main viewport with the placeholder panes, and the render_probe
+  // pane is drawn afterward as the canvas stand-in (DockBuilder docks it by id).
+  ace::dock::Dockspace dockspace(ace::dock::default_layout());
+  shell.set_draw_content([&dockspace, &probe]() {
+    dockspace.draw();
+    probe.draw();
+  });
   while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
     shell.new_frame();
     shell.draw_ui();

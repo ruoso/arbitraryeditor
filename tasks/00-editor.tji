@@ -62,8 +62,9 @@ task editor "Editor — host GUI over libarbc" {
     task dockspace "Split-tree + tabs over ImGui docking" {
       effort 3d
       allocate team
+      complete 100
       depends editor.foundation.app_shell
-      note "A fully-uniform dockspace on ImGui's docking branch: recursive split containers, tabbed views, drag-to-dock, resize. No privileged editor area, no keep-a-canvas guardrail. Design: docs/00-design.md D18. Refinement: tasks/refinements/dockspace.md"
+      note "A fully-uniform dockspace on ImGui's docking branch: recursive split containers, tabbed views, drag-to-dock, resize. No privileged editor area, no keep-a-canvas guardrail. Design: docs/00-design.md D18. Refinement: tasks/refinements/editor/dockspace.md"
     }
     task view_registry "View abstraction: open / close / reopen" {
       effort 2d
