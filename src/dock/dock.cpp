@@ -1,11 +1,13 @@
 #include <ace/dock/dock.hpp>
 #include <ace/dockmodel/tool_rail.hpp>
 #include <ace/dockmodel/view_registry.hpp>
+#include <ace/dockmodel/workspaces.hpp>
 #include <ace/views/views.hpp>
 
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder* (the WIP docking-builder API)
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -79,6 +81,35 @@ void draw_tool_rail(Dockspace& dockspace) {
     if (ImGui::Selectable(label.c_str(), entry.is_open)) {
       dockspace.open(entry.type);
     }
+  }
+
+  // Saved workspaces (D18/D21): a one-click switcher over the built-in and user
+  // presets plus a "Save current as…" / "Delete" pair, when a store is wired.
+  // Applying a preset replaces the layout and re-seeds the ImGui tree
+  // (Dockspace::apply_layout). Each preset name is its own stable widget id so
+  // the e2e can click it; built-in names never collide with a view/tool title.
+  ace::dockmodel::WorkspaceStore* store = dockspace.workspace_store();
+  if (store == nullptr) {
+    return;
+  }
+  ImGui::Separator();
+  ImGui::TextUnformatted("Workspaces");
+  for (const ace::dockmodel::WorkspacePreset& preset : store->presets()) {
+    if (ImGui::Selectable(preset.name.c_str())) {
+      if (std::optional<ace::dockmodel::DockLayout> layout = store->apply(preset.name)) {
+        dockspace.apply_layout(*layout);
+      }
+    }
+  }
+  ImGui::InputText("##workspace_name", dockspace.save_name_buffer(),
+                   static_cast<std::size_t>(dockspace.save_name_buffer_size()));
+  const std::string name(dockspace.save_name_buffer());
+  if (ImGui::Button("Save current as") && !name.empty()) {
+    store->save(name, dockspace.layout());
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Delete") && !name.empty()) {
+    store->remove(name);
   }
 }
 
@@ -187,5 +218,11 @@ std::string Dockspace::reopen(ViewType type) {
 }
 
 bool Dockspace::close(std::string_view view_id) { return registry_.close(layout_, view_id); }
+
+void Dockspace::apply_layout(const ace::dockmodel::DockLayout& layout) {
+  layout_ = layout;
+  registry_.adopt(layout_); // no restored slug#N can be re-minted (D-view-registry-4)
+  rebuild_ = true;          // re-seed the live ImGui tree next draw() (D-workspaces-5)
+}
 
 } // namespace ace::dock

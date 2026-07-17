@@ -83,8 +83,9 @@ task editor "Editor — host GUI over libarbc" {
     task workspaces "Saved layout presets (local UI state)" {
       effort 2d
       allocate team
+      complete 100
       depends !dockspace, editor.foundation.platform_services
-      note "Named workspace presets (Paint/Compose/Review) switchable in a click; the layout tree persists as LOCAL UI state in workspace/ or global prefs, never in the portable project.arbc. Design: D18 / §9. Refinement: tasks/refinements/workspaces.md"
+      note "Named workspace presets (Paint/Compose/Review) switchable in a click; the layout tree persists as LOCAL UI state in workspace/ or global prefs, never in the portable project.arbc. Design: D18 / §9. Refinement: tasks/refinements/editor.dock/workspaces.md"
     }
   }
 

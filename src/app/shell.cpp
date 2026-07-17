@@ -2,7 +2,9 @@
 #include <ace/app/shell.hpp>
 #include <ace/dock/dock.hpp>
 #include <ace/dockmodel/view_registry.hpp>
+#include <ace/dockmodel/workspaces.hpp>
 #include <ace/gl/gl.hpp>
+#include <ace/platform/filesystem.hpp>
 #include <ace/views/views.hpp>
 
 #include <SDL3/SDL.h>
@@ -11,6 +13,8 @@
 #include <imgui_impl_sdl3.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <string_view>
 
 namespace ace::app {
@@ -23,6 +27,22 @@ constexpr const char* k_window_title = "Arbitrary Composer";
 bool fail(const char* what) {
   std::fprintf(stderr, "shell: %s failed: %s\n", what, SDL_GetError());
   return false;
+}
+
+// The per-user prefs root the WorkspaceStore persists named presets under (D21 —
+// cross-project, so prefs not the per-project workspace/). The store takes a root
+// path (A3: WASM swaps XDG for the File System Access API), so directory
+// resolution is L4 app-wiring detail, not a design decision: prefer
+// $XDG_CONFIG_HOME, else ~/.config, else the OS temp dir. No directory is created
+// here — the store seeds parents lazily on the first save.
+std::filesystem::path workspace_prefs_root() {
+  const char* xdg = std::getenv("XDG_CONFIG_HOME");
+  const char* home = std::getenv("HOME");
+  std::filesystem::path base = (xdg != nullptr && *xdg != '\0') ? std::filesystem::path(xdg)
+                               : (home != nullptr && *home != '\0')
+                                   ? std::filesystem::path(home) / ".config"
+                                   : std::filesystem::temp_directory_path();
+  return base / "arbitraryeditor" / "workspaces";
 }
 
 } // namespace
@@ -162,6 +182,13 @@ int run_editor(const ShellOptions& opts) {
   // it renders each open view by its instance id and syncs the tab ✕ back into
   // the authoritative DockLayout.
   ace::dock::Dockspace dockspace;
+  // The saved-workspace preset store (editor.dock.workspaces): persisted through
+  // the native FileSystem seam under the per-user prefs root. Wired into the
+  // dockspace so the rail's switcher can list/apply/save/delete presets. Both
+  // outlive the draw loop below; no preset file is touched until a user saves.
+  ace::platform::NativeFileSystem filesystem;
+  ace::dockmodel::WorkspaceStore workspace_store(workspace_prefs_root(), filesystem);
+  dockspace.set_workspace_store(&workspace_store);
   shell.set_draw_content([&dockspace]() { dockspace.draw(); });
   while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
     shell.new_frame();

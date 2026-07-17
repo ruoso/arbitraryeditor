@@ -4,9 +4,14 @@
 #include <ace/dockmodel/tool_rail.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 
+#include <array>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace ace::dockmodel {
+class WorkspaceStore; // the L1 preset store; the switcher drives it by reference
+}
 
 namespace ace::dock {
 
@@ -53,6 +58,23 @@ public:
   // The authoritative layout (the set of open views is layout().view_ids()).
   const ace::dockmodel::DockLayout& layout() const { return layout_; }
 
+  // Replace the whole layout with `layout` (a saved workspace preset) and mark
+  // the live ImGui tree for a re-seed next draw() (D-workspaces-5, reusing the
+  // once-guarded DockBuilder path). Adopts the registry counters first so a
+  // restored slug#N can never be re-minted (D-view-registry-4).
+  void apply_layout(const ace::dockmodel::DockLayout& layout);
+
+  // The per-user preset store the switcher drives (workspaces). Null until the
+  // app wires one at bootstrap; when null the rail omits the Workspaces section.
+  void set_workspace_store(ace::dockmodel::WorkspaceStore* store) { workspace_store_ = store; }
+  ace::dockmodel::WorkspaceStore* workspace_store() const { return workspace_store_; }
+
+  // The editable "Save current as…" name buffer the rail's InputText writes and
+  // the Save/Delete buttons read (a plain char buffer — the build ships no
+  // imgui_stdlib std::string overload).
+  char* save_name_buffer() { return save_name_.data(); }
+  int save_name_buffer_size() const { return static_cast<int>(save_name_.size()); }
+
   // The rail's active-tool selection (A11). Observable UI state the tool rail
   // mutates on click; nothing on the canvas reads it yet (D-tool_rail-4). The e2e
   // reads it through this accessor to assert the active tool after a click.
@@ -63,9 +85,12 @@ private:
   ace::dockmodel::ViewRegistry registry_;
   ace::dockmodel::DockLayout layout_;
   ace::dockmodel::ToolSelection tools_; // the rail's active-tool selection (A11)
-  bool built_ = false;                  // DockBuilder seeded at least once
-  bool rebuild_ = false;                // a programmatic open/reopen needs a re-seed
-  unsigned int dockspace_id_ = 0;       // ImGuiID; assigned on first draw()
+  ace::dockmodel::WorkspaceStore* workspace_store_ =
+      nullptr;                       // preset store (app-wired, may be null)
+  std::array<char, 64> save_name_{}; // "Save current as…" name buffer
+  bool built_ = false;               // DockBuilder seeded at least once
+  bool rebuild_ = false;             // a programmatic open/reopen needs a re-seed
+  unsigned int dockspace_id_ = 0;    // ImGuiID; assigned on first draw()
 };
 
 // The stable ImGui window id of the fixed tool rail — exposed so the e2e can

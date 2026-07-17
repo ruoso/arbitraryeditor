@@ -127,4 +127,17 @@ bool ViewRegistry::close(DockLayout& layout, std::string_view view_id) {
 
 std::string ViewRegistry::reopen(DockLayout& layout, ViewType type) { return open(layout, type); }
 
+void ViewRegistry::adopt(const DockLayout& layout) {
+  for (const std::string& id : layout.view_ids()) {
+    const std::optional<ParsedViewId> parsed = parse_view_id(id);
+    if (!parsed || parsed->index == 0) {
+      continue; // singletons carry no counter (index 0)
+    }
+    int& counter = next_index_[index_of(parsed->type)];
+    if (parsed->index > counter) {
+      counter = parsed->index; // monotonic: next mint yields index+1, no alias
+    }
+  }
+}
+
 } // namespace ace::dockmodel

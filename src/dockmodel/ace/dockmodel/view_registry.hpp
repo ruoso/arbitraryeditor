@@ -89,6 +89,13 @@ public:
   // layout seeds a fresh root leaf. Equivalent to open() for a singleton.
   std::string reopen(DockLayout& layout, ViewType type);
 
+  // Re-seed each per-type counter from the ids already present in `layout` so a
+  // subsequent mint_id can never alias a restored pane — used when adopting a
+  // persisted / preset layout (editor.dock.workspaces, preserving
+  // D-view-registry-4). For every multi-instance id `slug#N` present, advances
+  // that type's counter to at least N; monotonic, never lowered.
+  void adopt(const DockLayout& layout);
+
 private:
   // Per-type "next index" — advanced only for multi-instance types. Monotonic
   // and never decremented, so a stale id can never alias a freshly opened pane.
