@@ -31,13 +31,14 @@ task editor "Editor — host GUI over libarbc" {
     task build "CMake, deps, presets, CI" {
       effort 2d
       allocate team
-      note "Bootstraps the whole project AND the universal definition of done. CMakeLists.txt: FetchContent libarbc from a git ref (link arbc::arbc) + Dear ImGui (docking branch) + SDL3; native presets (Linux/macOS/Windows). Stand up: the src/ directory-per-component skeleton (§7/§8 levels); the check_levels lint over the level DAG; the test harness (Catch2 for L1 units + ImGui Test Engine for e2e + an offscreen-GL headless smoke); and a single scripts/gate (check_levels · clang-format · build · ctest) that the orchestrator runs after every task. Acceptance: an empty but green gate, a window that opens, check_levels passing on the skeleton. Arch A1/A2/A8/A9. Design: docs/01-architecture.md §7-§9. Refinement: tasks/refinements/foundation_build.md"
+      complete 100
+      note "Bootstrapped BY HAND (the loop cannot produce its own gate). CMakeLists.txt FetchContents libarbc as a subproject — arbc::arbc linked, binding proven by a Catch2 test — plus presets (dev/release/asan/tsan/coverage); the src/ 12-component skeleton (§7/§8 levels); scripts/check_levels.py enforcing the level DAG AND the A8 seam (the L1 core carries no ImGui/GL/SDL/libarbc leak); the Catch2 L1 test harness; scripts/gate (check_levels · clang-format · build · ctest); and the GitHub CI (ci.yml lint + gcc/clang × debug/release/asan/tsan + coverage) with the act runner for the orchestrator's in-loop replay. All green. SDL3 + Dear ImGui (docking) + the window/dockspace + the ImGui Test Engine harness land with app_shell. Arch A1/A2/A8/A9. Design: docs/01-architecture.md §7-§9. Refinement: tasks/refinements/foundation_build.md"
     }
     task app_shell "SDL3 window + GL context + ImGui + main loop" {
       effort 2d
       allocate team
       depends !build
-      note "Open a window, create an OpenGL context targeting the GLES3/WebGL2-common subset, init Dear ImGui with the SDL3+GL backends, run the frame loop. Self-rendered UI only (no native widgets) so the WASM target stays reachable. Arch A2/A3. Refinement: tasks/refinements/app_shell.md"
+      note "FetchContent SDL3 + Dear ImGui (docking branch). Open a window, create an OpenGL context targeting the GLES3/WebGL2-common subset, init Dear ImGui with the SDL3+GL backends, run the frame loop. Self-rendered UI only (no native widgets) so the WASM target stays reachable. Being the FIRST ImGui surface, also stand up the ImGui Test Engine e2e harness + an offscreen-GL headless smoke — the DoD's UI-test rig every later view leaf uses. Arch A2/A3/A9. Refinement: tasks/refinements/app_shell.md"
     }
     task platform_services "PlatformServices seam (file / threads / clock)" {
       effort 2d

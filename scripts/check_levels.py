@@ -36,16 +36,21 @@ ALLOWED = {
     },
 }
 
-# The seam (A8): which components may include which external UI stacks.
+# The seam (A8): which components may include which external stack. The
+# UI-agnostic core never sees ImGui/GL/SDL; and libarbc enters only through the
+# components that own the document / rendering, never base/platform/gl/dockmodel.
 EXTERNAL_ALLOWED = {
     "imgui": {"views", "dock", "app"},
     "sdl": {"app"},
     "gl_api": {"gl", "render", "views", "dock", "app"},
+    "arbc": {"project", "scene", "interact", "commands", "render",
+             "views", "dock", "app"},
 }
 EXTERNAL_RE = {
     "imgui": re.compile(r'#\s*include\s*[<"]imgui'),
     "sdl": re.compile(r'#\s*include\s*[<"]SDL'),
     "gl_api": re.compile(r'#\s*include\s*[<"](GL/|GLES|glad|SDL_opengl)'),
+    "arbc": re.compile(r'#\s*include\s*[<"]arbc/'),
 }
 ACE_INCLUDE_RE = re.compile(r'#\s*include\s*<ace/([a-z_]+)/')
 

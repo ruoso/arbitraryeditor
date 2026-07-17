@@ -9,13 +9,28 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-# One static library per levelized component (docs/01-architecture.md §8). The
-# level DAG is the source of truth in scripts/check_levels.py; the CMake link
-# edges below follow it. libarbc, Dear ImGui, and SDL3 arrive via FetchContent
-# in later foundation leaves (render_probe / app_shell); this skeleton links
-# only the internal graph so the gate is green from the start.
+# ---- libarbc (external dependency, docs/01-architecture.md A1) --------------
+# Consumed as a CMake subproject. Default to a local checkout for co-development
+# (arch A2: "a local checkout during co-development, a released tag once the
+# editor-facing API stabilizes"); override ARBC_SOURCE_DIR / ARBC_GIT_* to point
+# elsewhere. libarbc fetches Catch2 itself (a shipped artifact), so we reuse ITS
+# Catch2 rather than declaring a second one; and we keep the library's own test
+# suite out of our build (its tests/ is gated on BUILD_TESTING).
+include(FetchContent)
+set(ARBC_SOURCE_DIR "/home/ruoso/devel/arbitrarycomposer"
+    CACHE STRING "Local libarbc checkout for co-development")
+set(_editor_build_testing "${BUILD_TESTING}")
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(arbc SOURCE_DIR "${ARBC_SOURCE_DIR}")
+FetchContent_MakeAvailable(arbc)
+set(BUILD_TESTING "${_editor_build_testing}" CACHE BOOL "" FORCE)
+
+# ---- levelized components (docs/01-architecture.md §8) ----------------------
+# One static library per component; the level DAG is enforced by
+# scripts/check_levels.py, the CMake link edges below follow it. SDL3 + Dear
+# ImGui arrive with the window/dockspace work below.
 function(ace_component name)
-  cmake_parse_arguments(C "" "" "DEPENDS" ${ARGN})
+  cmake_parse_arguments(C "" "" "DEPENDS;LIBS" ${ARGN})
   file(GLOB _srcs CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/${name}/*.cpp")
   add_library(ace_${name} STATIC ${_srcs})
   add_library(ace::${name} ALIAS ace_${name})
@@ -25,14 +40,17 @@ function(ace_component name)
     list(TRANSFORM C_DEPENDS PREPEND ace_)
     target_link_libraries(ace_${name} PUBLIC ${C_DEPENDS})
   endif()
+  if(C_LIBS)
+    target_link_libraries(ace_${name} PUBLIC ${C_LIBS})
+  endif()
 endfunction()
 
 # L0
 ace_component(base)
 ace_component(platform DEPENDS base)
 ace_component(gl DEPENDS base)
-# L1 — the UI-agnostic core
-ace_component(project DEPENDS base platform)
+# L1 — the UI-agnostic core (project owns the libarbc Document)
+ace_component(project DEPENDS base platform LIBS arbc::arbc)
 ace_component(scene DEPENDS base project)
 ace_component(interact DEPENDS base scene)
 ace_component(commands DEPENDS base project scene)
@@ -47,17 +65,9 @@ ace_component(dock DEPENDS dockmodel views)
 add_executable(arbitraryeditor src/app/main.cpp)
 target_link_libraries(arbitraryeditor PRIVATE ace::dock)
 
-include(CTest)
-if(BUILD_TESTING)
-  include(FetchContent)
-  FetchContent_Declare(
-    Catch2
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG v3.7.1
-    GIT_SHALLOW TRUE)
-  FetchContent_MakeAvailable(Catch2)
-
-  add_executable(ace_tests tests/interact_test.cpp)
-  target_link_libraries(ace_tests PRIVATE ace::interact Catch2::Catch2WithMain)
-  add_test(NAME ace_tests COMMAND ace_tests)
-endif()
+# ---- tests (Catch2 comes from libarbc) -------------------------------------
+enable_testing()
+add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp)
+target_link_libraries(ace_tests PRIVATE ace::interact ace::project arbc::arbc
+                                        Catch2::Catch2WithMain)
+add_test(NAME ace_tests COMMAND ace_tests)

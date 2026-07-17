@@ -191,10 +191,11 @@ Verification is **layered**, not one gate:
 
 **Definition of done — encoded in every task, not a separate one.** The harness
 and the levelization check are **not standalone leaves**; they are **acceptance
-criteria on every leaf**. `foundation.build` stands up the harness (Catch2 +
-ImGui Test Engine + offscreen-GL smoke), the `check_levels` lint, the component
-skeleton, and a single `scripts/gate` — so from the first task onward every
-leaf's definition of done is:
+criteria on every leaf**. `foundation.build` stands up the Catch2 harness, the
+`check_levels` lint, the component skeleton, and a single `scripts/gate`;
+`app_shell` (the first ImGui surface) adds the **ImGui Test Engine** e2e harness
++ the offscreen-GL smoke. So from the first task onward every leaf's definition
+of done is:
 
 - **respects the levelization DAG** (`check_levels` clean);
 - **lands its tests** — L1 logic → Catch2 unit; renders → golden; has UI → an
