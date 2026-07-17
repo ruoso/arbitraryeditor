@@ -51,8 +51,9 @@ task editor "Editor — host GUI over libarbc" {
     task render_probe "Render a trivial Document into a canvas texture" {
       effort 2d
       allocate team
+      complete 100
       depends !app_shell
-      note "Build a trivial libarbc Document in-process, render it into a CPU surface, upload as a GL texture, display it in one ImGui pane. Proves the binding + display path end to end and surfaces any library gap early. Arch A1/A6. Refinement: tasks/refinements/render_probe.md"
+      note "Build a trivial libarbc Document in-process, render it into a CPU surface, upload as a GL texture, display it in one ImGui pane. Proves the binding + display path end to end and surfaces any library gap early. Arch A1/A6. Refinement: tasks/refinements/foundation/render_probe.md"
     }
   }
 

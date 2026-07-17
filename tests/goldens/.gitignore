@@ -1,0 +1,3 @@
+# Triage dumps written next to a golden on a byte-compare mismatch
+# (tests/golden_support.hpp). The committed goldens themselves are tracked.
+*.actual

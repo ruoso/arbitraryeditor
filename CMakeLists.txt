@@ -145,8 +145,9 @@ ace_component(commands DEPENDS base project scene)
 ace_component(dockmodel DEPENDS base platform)
 # L2
 ace_component(render DEPENDS base project scene gl)
-# L3 — the ImGui layer
-ace_component(views DEPENDS scene interact commands render dockmodel)
+# L3 — the ImGui layer. views draws the render_probe pane, so it links Dear ImGui
+# (the A8 seam already whitelists imgui in views, scripts/check_levels.py).
+ace_component(views DEPENDS scene interact commands render dockmodel LIBS imgui)
 ace_component(dock DEPENDS dockmodel views)
 
 # L4 — the app. The shell logic lives in a static library (ace::app) so the
@@ -167,9 +168,13 @@ target_link_libraries(arbitraryeditor PRIVATE ace::app)
 # ---- tests (Catch2 comes from libarbc) -------------------------------------
 enable_testing()
 add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
-                         tests/platform_test.cpp)
-target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::platform
+                         tests/platform_test.cpp tests/render_probe_test.cpp)
+target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         arbc::arbc Catch2::Catch2WithMain)
+# The render_offline golden compares against raw sRGB8 bytes under tests/goldens
+# (D-render_probe-6); the byte-compare helper resolves them by absolute path.
+target_compile_definitions(ace_tests PRIVATE
+  ACE_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/goldens")
 add_test(NAME ace_tests COMMAND ace_tests)
 
 # The app_shell test suite (docs §9): the pure frame-loop predicate (Catch2

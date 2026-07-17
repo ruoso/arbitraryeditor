@@ -1,3 +1,4 @@
+#include <ace/app/probe.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/gl/gl.hpp>
 
@@ -14,7 +15,6 @@ namespace {
 // GLES3 GLSL for ImGui's OpenGL3 backend (matches IMGUI_IMPL_OPENGL_ES3).
 constexpr const char* k_glsl_version = "#version 300 es";
 constexpr const char* k_window_title = "Arbitrary Composer";
-constexpr const char* k_placeholder_id = "Placeholder";
 
 bool fail(const char* what) {
   std::fprintf(stderr, "shell: %s failed: %s\n", what, SDL_GetError());
@@ -95,13 +95,12 @@ void Shell::new_frame() {
 }
 
 void Shell::draw_ui() {
-  // Only ImGui chrome today: a single placeholder pane. The button gives the e2e
-  // a stable widget id to drive; the dockspace and real Document come later.
-  ImGui::SetNextWindowSize(ImVec2(320, 200), ImGuiCond_FirstUseEver);
-  ImGui::Begin(k_window_title);
-  ImGui::TextUnformatted("Arbitrary Composer Editor \xE2\x80\x94 shell");
-  ImGui::Button(k_placeholder_id);
-  ImGui::End();
+  // The generic shell owns no panes: the render_probe pane (which replaces the
+  // former placeholder) is installed by the app layer via set_draw_content, so
+  // arbc/GL/view orchestration stays out of the shell (A8 / D-render_probe-1).
+  if (draw_content_) {
+    draw_content_();
+  }
 }
 
 void Shell::render(const std::function<void()>& before_present) {
@@ -144,11 +143,18 @@ int run_editor(const ShellOptions& opts) {
   if (!shell.init(opts)) {
     return 1;
   }
+  // The probe texture is created once (GL context current after init), drawn
+  // every frame, and destroyed before shutdown while the context is still valid
+  // (refinement Constraint 8). Owned here in the app layer, not in the shell.
+  ProbeView probe;
+  probe.upload();
+  shell.set_draw_content([&probe]() { probe.draw(); });
   while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
     shell.new_frame();
     shell.draw_ui();
     shell.render();
   }
+  probe.destroy();
   shell.shutdown();
   return 0;
 }

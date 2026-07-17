@@ -3,6 +3,7 @@
 #include <ace/app/app_loop.hpp>
 
 #include <functional>
+#include <utility>
 
 // Forward declarations keep SDL/ImGui headers out of consumers of the shell API;
 // the .cpp owns the real includes (the SDL/ImGui seam lives in `app`, A8).
@@ -41,7 +42,13 @@ public:
   bool init(const ShellOptions& opts);
 
   void new_frame(); // poll SDL events, then ImGui NewFrame
-  void draw_ui();   // build the shell chrome (the placeholder pane)
+  void draw_ui();   // build the shell chrome (invokes the installed content, if any)
+
+  // Install the per-frame content the shell draws inside draw_ui(). The app
+  // layer installs the render_probe pane here (editor.foundation.render_probe),
+  // keeping the arbc/GL/view orchestration out of the generic shell (A8). Empty
+  // by default — the piecewise smoke drives a bare shell with no content.
+  void set_draw_content(std::function<void()> content) { draw_content_ = std::move(content); }
   // ImGui::Render + GL clear + present. `before_present`, if set, runs after the
   // draw data is submitted and before the buffer swap — the seam the e2e uses to
   // read back the frame (screenshot baseline) while the back buffer is valid.
@@ -54,6 +61,7 @@ public:
 
 private:
   ShellOptions opts_{};
+  std::function<void()> draw_content_;
   SDL_Window* window_ = nullptr;
   void* gl_ctx_ = nullptr; // SDL_GLContext (an opaque pointer)
   ImGuiContext* imgui_ctx_ = nullptr;

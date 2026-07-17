@@ -11,4 +11,11 @@ const char* name();
 void set_viewport(int width, int height);
 void clear(float r, float g, float b, float a);
 
+// Create a GLES3 texture from tightly-packed straight-alpha RGBA8 pixels
+// (w*h*4 bytes, no stride) and return its handle (a GLuint). This is A6's
+// tile→GL step — editor.canvas.view reuses the identical primitive for settled
+// tiles. A GL context must be current. `destroy_texture` releases the handle.
+unsigned int upload_rgba8(const void* pixels, int width, int height);
+void destroy_texture(unsigned int texture);
+
 } // namespace ace::gl
