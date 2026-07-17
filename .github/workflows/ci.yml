@@ -29,9 +29,13 @@ jobs:
         include:
           - { name: gcc-debug, os: ubuntu-latest, cxx: g++, preset: dev }
           - { name: gcc-release, os: ubuntu-latest, cxx: g++, preset: release }
-          - { name: clang-debug, os: ubuntu-latest, cxx: clang++, preset: dev }
+          # clang lanes pin clang 20: noble's default clang 18 ships no static
+          # ASan/UBSan runtime, so the asan lane can't link. clang 20 (from
+          # apt.llvm.org, with libclang-rt-20-dev) has it; both clang lanes ride
+          # the same version. "install clang-20" below provisions it when absent.
+          - { name: clang-debug, os: ubuntu-latest, cxx: clang++-20, preset: dev }
           # ASan+UBSan (doc 16): catches memory + UB. clang's is complete here.
-          - { name: clang-asan, os: ubuntu-latest, cxx: clang++, preset: asan }
+          - { name: clang-asan, os: ubuntu-latest, cxx: clang++-20, preset: asan }
           # TSan (doc 16): the UI↔driver threading (frame_sync/multi_canvas)
           # is the editor's own concurrency worth racing under ThreadSanitizer.
           - { name: gcc-tsan, os: ubuntu-latest, cxx: g++, preset: tsan }
@@ -39,9 +43,33 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: install clang
+      # app_shell FetchContents + builds SDL3 from source and runs the offscreen
+      # smoke / ImGui Test Engine e2e against software GL (Mesa llvmpipe): install
+      # the SDL build deps + the EGL/GLES3 + llvmpipe runtime so the displayless
+      # lanes can create an ES3 context.
+      - name: install graphics stack (SDL3 build + offscreen software GL)
+        # Skipped when already present — the local act runner image bakes these
+        # in (a cached Docker layer), so this step is a no-op under `act` instead
+        # of re-running apt every lane. GitHub-hosted runners lack them, so the
+        # install still runs there. Keep the list in sync with .github/act/runner.Dockerfile.
+        run: |
+          pkgs="libegl-dev libgles-dev libgl1-mesa-dri libgbm-dev libdrm-dev \
+                libx11-dev libxext-dev libwayland-dev libxkbcommon-dev"
+          if ! dpkg -s $pkgs >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends $pkgs
+          fi
+      # Skipped when clang-20 is already present (e.g. the local act runner
+      # image pre-installs it, keeping orchestrator iterations offline-fast).
+      - name: install clang-20
         if: startsWith(matrix.cxx, 'clang')
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: |
+          if ! command -v ${{ matrix.cxx }} >/dev/null 2>&1; then
+            wget -q https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            sudo ./llvm.sh 20
+            sudo apt-get install -y libclang-rt-20-dev
+          fi
       - name: configure
         shell: bash
         run: |
@@ -50,6 +78,11 @@ jobs:
       - name: build
         run: cmake --build --preset ${{ matrix.preset }} --parallel 4
       - name: test
+        # Suppress the Mesa software-GL driver's process-lifetime allocations that
+        # LSan reports on the offscreen clang-asan lane (see tests/lsan.supp). Set
+        # for every lane; it is a no-op wherever LSan isn't linked.
+        env:
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan.supp
         run: ctest --preset ${{ matrix.preset }}
 
   coverage:
@@ -62,6 +95,18 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install gcovr diff-cover
+      - name: install graphics stack (SDL3 build + offscreen software GL)
+        # Skipped when already present — the local act runner image bakes these
+        # in (a cached Docker layer), so this step is a no-op under `act` instead
+        # of re-running apt every lane. GitHub-hosted runners lack them, so the
+        # install still runs there. Keep the list in sync with .github/act/runner.Dockerfile.
+        run: |
+          pkgs="libegl-dev libgles-dev libgl1-mesa-dri libgbm-dev libdrm-dev \
+                libx11-dev libxext-dev libwayland-dev libxkbcommon-dev"
+          if ! dpkg -s $pkgs >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends $pkgs
+          fi
       - name: configure
         run: CXX=g++ cmake --preset coverage
       - name: build
@@ -69,7 +114,18 @@ jobs:
       - name: test
         run: ctest --preset coverage
       - name: coverage report
-        run: gcovr --root . --filter 'src/' --xml -o coverage.xml
+        # The coverage preset instruments every target, including the FetchContent
+        # deps (SDL3/ImGui/Catch2/libarbc). Those build with -ffile-prefix-map, so
+        # gcov records their sources as relative paths (e.g. src/catch2/...) that
+        # gcovr cannot resolve to a working directory — a hard error that aborts
+        # the whole report. We only measure our own src/ (--filter), so tell gcovr
+        # to skip (not fail on) the unresolvable third-party data. Directory-based
+        # exclusion does NOT work here because the recorded path is remapped away
+        # from _deps; the --gcov-ignore-errors below is the supported remedy.
+        run: gcovr --root . --filter 'src/'
+          --gcov-ignore-errors=no_working_dir_found
+          --gcov-ignore-errors=source_not_found
+          --xml -o coverage.xml
           --gcov-ignore-parse-errors=negative_hits.warn_once_per_file
           build/coverage
       # Hard diff-coverage gate on changed lines (doc 16). Skipped when no

@@ -37,8 +37,9 @@ task editor "Editor — host GUI over libarbc" {
     task app_shell "SDL3 window + GL context + ImGui + main loop" {
       effort 2d
       allocate team
+      complete 100
       depends !build
-      note "FetchContent SDL3 + Dear ImGui (docking branch). Open a window, create an OpenGL context targeting the GLES3/WebGL2-common subset, init Dear ImGui with the SDL3+GL backends, run the frame loop. Self-rendered UI only (no native widgets) so the WASM target stays reachable. Being the FIRST ImGui surface, also stand up the ImGui Test Engine e2e harness + an offscreen-GL headless smoke — the DoD's UI-test rig every later view leaf uses. Arch A2/A3/A9. Refinement: tasks/refinements/app_shell.md"
+      note "FetchContent SDL3 + Dear ImGui (docking branch). Open a window, create an OpenGL context targeting the GLES3/WebGL2-common subset, init Dear ImGui with the SDL3+GL backends, run the frame loop. Self-rendered UI only (no native widgets) so the WASM target stays reachable. Being the FIRST ImGui surface, also stand up the ImGui Test Engine e2e harness + an offscreen-GL headless smoke — the DoD's UI-test rig every later view leaf uses. Arch A2/A3/A9. Refinement: tasks/refinements/editor/app_shell.md"
     }
     task platform_services "PlatformServices seam (file / threads / clock)" {
       effort 2d

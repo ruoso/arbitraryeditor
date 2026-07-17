@@ -1,0 +1,19 @@
+# LeakSanitizer suppressions for the offscreen software-GL test lane (clang-asan).
+#
+# The headless smoke/e2e tests boot SDL's `offscreen` video driver against Mesa's
+# software GL (EGL + llvmpipe). Two families of allocations made *inside the Mesa
+# driver* are never released to the process and LSan reports them as leaks. They
+# are NOT editor bugs: Shell::shutdown() runs the full teardown (ImGui backends →
+# ImGui context → GL context → window → SDL_Quit), and the tests invoke it — the
+# bytes are owned by the driver, which no application-level call can free:
+#
+#   * eglInitialize caches its _EGLDisplay/driver-private for the process lifetime
+#     and does not free it on eglTerminate (offscreen/software GL).
+#   * llvmpipe allocates JIT'd shader + rasterizer state on the first draw call,
+#     also kept for the process lifetime.
+#
+# Matches are scoped to the two named entry frames (resolvable because the runner
+# image ships llvm-symbolizer); the driver frames themselves are stripped Mesa
+# .so's. This keeps LSan fully active for the editor's own allocations.
+leak:SDL_EGL_InitializeOffscreen
+leak:ImGui_ImplOpenGL3_RenderDrawData

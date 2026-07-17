@@ -127,8 +127,14 @@ def act_argv(*args: str) -> list[str]:
         # output to the per-step log, and without this every red step in the
         # fixer loop would leak a stopped container + workspace volume.
         "--rm",
+        # Cap nofile to a GitHub-hosted-runner-like limit. Docker inherits the
+        # host's RLIMIT_NOFILE, which under systemd is ~1e9 ("infinity"); the
+        # sanitizer runtime forks llvm-symbolizer and the child close()s every
+        # fd up to that limit before exec, so an ASan/UBSan test that symbolizes
+        # spins for ~1e9 close() syscalls instead of finishing. 65536 matches the
+        # hosted runner and makes that loop instant.
         "--container-options",
-        f"-v {ACT_CCACHE_VOLUME}:/ccache",
+        f"-v {ACT_CCACHE_VOLUME}:/ccache --ulimit nofile=65536:65536",
         "--env",
         "CCACHE_DIR=/ccache",
         "--env",

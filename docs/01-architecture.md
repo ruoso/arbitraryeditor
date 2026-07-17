@@ -204,8 +204,45 @@ of done is:
 
 The orchestrator runs `scripts/gate` after every task; each refinement's
 Acceptance-criteria section names the *specific* tests that instantiate this DoD
-for that leaf. *(Open: the ImGui Test Engine license — resolve when
-`foundation.build` wires it.)*
+for that leaf. *(The ImGui Test Engine license is resolved — free under the OSI
+open-source carve-out; see decision A10.)*
+
+### 9.1 The offscreen software-GL ASan lane
+
+The `clang-asan` CI lane runs the headless smoke/e2e tests (SDL3 `offscreen`
+driver + Mesa `llvmpipe` software GL) under AddressSanitizer/UBSan. Three
+environment requirements make it work; each masked the next when it was missing,
+so they are recorded here rather than rediscovered:
+
+1. **clang 20, not the distro clang 18.** Ubuntu noble's default clang 18 ships
+   **no static ASan/UBSan runtime**, so the `asan` preset fails to *link*
+   (`libclang_rt.asan*.a` not found). The clang lanes pin **clang 20** with
+   `libclang-rt-20-dev` (from apt.llvm.org). This is set in *both*
+   `.github/act/runner.Dockerfile` (the local `act` image) and the ci.yml
+   "install clang-20" step, so GitHub and the orchestrator use the same toolchain.
+
+2. **`llvm-symbolizer` on `PATH` in the runner image.** Without it, sanitizer
+   reports are `<unknown module>` frames — undebuggable, and LSan suppressions
+   (which match on function names) cannot match. The image installs `llvm-20`
+   and exposes the unversioned `llvm-symbolizer` name the runtime auto-discovers.
+
+3. **A sane `RLIMIT_NOFILE` on the `act` container.** Docker inherits the host's
+   systemd `nofile` (~1e9, "infinity"). The sanitizer forks `llvm-symbolizer`,
+   whose child `close()`s every fd up to that limit before `exec` — so a
+   symbolizing ASan test spins through ~1e9 `close()` syscalls and looks hung.
+   `orchestrator/driver.py` passes `--ulimit nofile=65536:65536` to `act`.
+   GitHub-hosted runners already have a sane limit, so this is act-only.
+
+**Mesa driver leaks are suppressed, not fixed.** LSan reports residual leaks that
+are **not** editor bugs: `Shell::shutdown()` does the full teardown (ImGui
+backends → ImGui context → GL context → window → `SDL_Quit`) and the tests invoke
+it. The bytes are owned by the Mesa driver, which no application call can free —
+`eglInitialize` caches its `_EGLDisplay` past `eglTerminate`, and `llvmpipe`
+keeps first-draw JIT/rasterizer state for the process lifetime. `tests/lsan.supp`
+suppresses these, scoped to the two named entry frames
+(`SDL_EGL_InitializeOffscreen`, `ImGui_ImplOpenGL3_RenderDrawData`) so LSan stays
+fully active for the editor's own allocations; it is wired in via `LSAN_OPTIONS`
+in the ci.yml test step.
 
 ## Decisions log
 
@@ -220,6 +257,7 @@ for that leaf. *(Open: the ImGui Test Engine license — resolve when
 | A7 | **Process-per-project**: one process = one project (opening a project is a new `exec`); the app owns exactly one `Document` for its lifetime — no multi-doc management, GC root-set is that document. Selection + shared panels are **project-level**; canvases are only cameras (D19). |
 | A8 | **Levelized components enforce the testability seam**: the editor has its own component DAG (§8); the UI-agnostic L1 core (project/scene/interact/commands/dockmodel) is structurally forbidden from including ImGui/GL/SDL, enforced by a `check_levels` lint. Only L3 (views/dock) sees ImGui. |
 | A9 | **Layered testing as per-task acceptance criteria**: Catch2 L1 units + `render_offline` goldens + **ImGui Test Engine** headless e2e + ASan/TSan. The harness + `check_levels` + `scripts/gate` are stood up by `foundation.build` and are the **definition of done on every leaf**, not standalone tasks. |
+| A10 | **ImGui Test Engine license — resolved: free under the OSI open-source carve-out.** `ocornut/imgui_test_engine` is dual-licensed (the `imgui_test_engine/` folder under the *Dear ImGui Test Engine License*; everything else MIT). That license is **permissive, not copyleft** — it imposes no terms on our own source and does not "infect" the editor; redistribution only requires carrying its copyright + license text. Its free tier explicitly covers software *released publicly under an OSI-approved open-source license*, **and** any entity with <$2M USD annual turnover; a paid license (from DISCO HELLO, after a 45-day trial) is required only by a **>$2M-turnover entity**. So as long as the editor ships under an OSI open-source license, linking the engine into the shipped binary (`IMGUI_ENABLE_TEST_ENGINE`, current build) is within the free terms — no test-only-link split needed. **Revisit only** if the editor is later distributed **closed-source by a >$2M-turnover entity**, in which case: buy a license or move the engine to a test-only link (the hooks are inert without an engine context). Supersedes the parking-lot entry (was D-app_shell-5). |
 
 ## Open / next
 
@@ -228,6 +266,7 @@ for that leaf. *(Open: the ImGui Test Engine license — resolve when
   Catch2 + ImGui Test Engine harness, and `scripts/gate` — then a runnable window
   rendering a trivial `Document` (proving binding + display). This bootstraps the
   DoD every later leaf inherits (§9).
-- **ImGui Test Engine license** — resolve when wiring the harness.
+- ~~**ImGui Test Engine license**~~ — resolved: free under the OSI open-source
+  carve-out (decision A10).
 - **Extensibility** — runtime plugin-kind loading surfaced in "insert cell".
 - **The WASM port** — deferred; the seams (A3) are what keep it a port.
