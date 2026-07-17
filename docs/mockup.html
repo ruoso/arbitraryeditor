@@ -1,0 +1,434 @@
+<style>
+  :root {
+    --bg:#12151b; --void:#0c0e13; --panel:#171b22; --panel-2:#1e232c; --raise:#252b36;
+    --line:#2b323d; --line-soft:#232932; --ink:#e7eaf0; --ink-dim:#97a1b0; --ink-faint:#616b7a;
+    --accent:#33d1c1; --accent-2:#1f9c92; --accent-ink:#04120f;
+    --good:#5cc27d; --warn:#e7b24e; --crit:#e2605f;
+    --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 30px rgba(0,0,0,.35);
+    --paper:#e8e2d6;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light){ :root{
+    --bg:#e7ebf1; --void:#c9d0da; --panel:#f7f9fc; --panel-2:#eef1f6; --raise:#ffffff;
+    --line:#d3dae3; --line-soft:#e2e7ee; --ink:#1a1f27; --ink-dim:#586373; --ink-faint:#8b95a4;
+    --accent:#0f9c8f; --accent-2:#0c7d73; --accent-ink:#fff;
+    --good:#2f9d57; --warn:#b6801f; --crit:#c94442;
+    --shadow:0 1px 2px rgba(20,30,50,.12), 0 10px 30px rgba(20,30,50,.10);
+  }}
+  :root[data-theme="dark"]{
+    --bg:#12151b; --void:#0c0e13; --panel:#171b22; --panel-2:#1e232c; --raise:#252b36;
+    --line:#2b323d; --line-soft:#232932; --ink:#e7eaf0; --ink-dim:#97a1b0; --ink-faint:#616b7a;
+    --accent:#33d1c1; --accent-2:#1f9c92; --good:#5cc27d; --warn:#e7b24e; --crit:#e2605f;
+    --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 30px rgba(0,0,0,.35);
+  }
+  :root[data-theme="light"]{
+    --bg:#e7ebf1; --void:#c9d0da; --panel:#f7f9fc; --panel-2:#eef1f6; --raise:#ffffff;
+    --line:#d3dae3; --line-soft:#e2e7ee; --ink:#1a1f27; --ink-dim:#586373; --ink-faint:#8b95a4;
+    --accent:#0f9c8f; --accent-2:#0c7d73; --good:#2f9d57; --warn:#b6801f; --crit:#c94442;
+    --shadow:0 1px 2px rgba(20,30,50,.12), 0 10px 30px rgba(20,30,50,.10);
+  }
+
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--font); font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1300px; margin:0 auto; padding:28px 22px 46px; }
+
+  .lede { display:flex; align-items:baseline; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+  .lede h1 { font-size:19px; font-weight:640; letter-spacing:-.01em; margin:0; }
+  .lede h1 b { color:var(--accent); font-weight:640; }
+  .lede p { margin:0; color:var(--ink-dim); font-size:13px; max-width:60ch; }
+  .mono-label { font-family:var(--mono); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); }
+  .toggle { font-family:var(--mono); font-size:11px; letter-spacing:.06em; color:var(--ink-dim); background:var(--panel); border:1px solid var(--line); padding:5px 10px; border-radius:7px; cursor:pointer; }
+  .toggle:hover { color:var(--ink); border-color:var(--ink-faint); }
+
+  /* shell */
+  .appscroll { overflow-x:auto; overflow-y:hidden; border:1px solid var(--line); border-radius:12px; box-shadow:var(--shadow); }
+  .app {
+    display:grid;
+    grid-template-columns: 46px 1fr 270px;
+    grid-template-rows: 42px 1fr 30px;
+    grid-template-areas: "top top top" "rail center side" "status status status";
+    height:720px; min-width:1000px; background:var(--panel); border-radius:12px; overflow:hidden;
+  }
+
+  /* top bar */
+  .top { grid-area:top; display:flex; align-items:center; gap:14px; padding:0 12px; background:var(--panel-2); border-bottom:1px solid var(--line); }
+  .brand { display:flex; align-items:center; gap:8px; font-weight:620; font-size:13px; }
+  .brand .dot { width:14px; height:14px; border-radius:4px; background:linear-gradient(135deg,var(--accent),var(--accent-2)); }
+  .proj { font-family:var(--mono); font-size:12px; color:var(--ink-dim); }
+  .proj .clean { color:var(--good); }
+  .menu { display:flex; gap:2px; margin-left:4px; }
+  .menu span { padding:4px 8px; border-radius:6px; color:var(--ink-dim); font-size:12.5px; }
+  .menu span:hover { background:var(--raise); color:var(--ink); }
+  .top .spacer { flex:1; }
+  .ws { font-family:var(--mono); font-size:11px; color:var(--ink-dim); border:1px solid var(--line); border-radius:7px; padding:4px 9px; }
+  .ws b { color:var(--accent); }
+
+  /* tool rail + launcher */
+  .rail { grid-area:rail; background:var(--panel-2); border-right:1px solid var(--line); display:flex; flex-direction:column; align-items:center; gap:3px; padding:8px 0; }
+  .tool { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; color:var(--ink-dim); cursor:pointer; border:1px solid transparent; }
+  .tool svg { width:18px; height:18px; }
+  .tool:hover { background:var(--raise); color:var(--ink); }
+  .tool[aria-pressed="true"] { background:color-mix(in srgb,var(--accent) 20%,transparent); color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%,transparent); }
+  .rail .sep { width:22px; height:1px; background:var(--line); margin:5px 0; }
+  .rail .spring { flex:1; }
+  .rail .launch { color:var(--accent); }
+  .rail .lbl { font-family:var(--mono); font-size:7.5px; letter-spacing:.08em; color:var(--ink-faint); text-transform:uppercase; }
+
+  /* center: split of canvas panes */
+  .center { grid-area:center; display:flex; min-width:0; background:var(--void); }
+  .cvpane { flex:1 1 0; min-width:0; display:flex; flex-direction:column; }
+  .cvpane.hero { flex:0 0 41%; }
+  .vsplit { width:6px; flex:none; background:var(--panel-2); border-inline:1px solid var(--line); cursor:col-resize; position:relative; }
+  .vsplit::after { content:""; position:absolute; left:1px; top:50%; transform:translateY(-50%); height:26px; border-left:2px dotted var(--ink-faint); }
+
+  .tabs { display:flex; align-items:stretch; height:30px; background:var(--panel-2); border-bottom:1px solid var(--line); padding:0 4px; gap:2px; }
+  .tabs.sm { height:27px; }
+  .tab { display:inline-flex; align-items:center; gap:6px; padding:0 9px; font-size:11.5px; color:var(--ink-dim); cursor:pointer; border-radius:7px 7px 0 0; position:relative; white-space:nowrap; }
+  .tabs.sm .tab { font-size:11px; padding:0 8px; }
+  .tab:hover { color:var(--ink); }
+  .tab.active { color:var(--ink); background:var(--panel); }
+  .tab.active::after { content:""; position:absolute; left:6px; right:6px; bottom:0; height:2px; background:var(--accent); border-radius:2px; }
+  .tab.ghost { color:var(--ink-faint); }
+  .tab .x { font-size:12px; color:var(--ink-faint); }
+  .tab .cdot { color:var(--accent); }
+  .tabs .add { margin-left:auto; align-self:center; color:var(--ink-faint); font-size:15px; padding:0 6px; cursor:pointer; }
+  .tabs .add:hover { color:var(--accent); }
+
+  .cvbody { position:relative; flex:1; min-height:0; overflow:hidden; background:radial-gradient(130% 130% at 50% 0%, color-mix(in srgb,var(--void) 82%,var(--panel)) 0%, var(--void) 72%); }
+  .cvbody.hero { background:#07090d; display:grid; place-items:center; }
+  .cvbody svg { position:absolute; inset:0; width:100%; height:100%; }
+  .cvbody.hero svg { position:static; width:100%; height:100%; }
+
+  .cv-chip { position:absolute; font-family:var(--mono); font-size:10px; letter-spacing:.02em; padding:3px 7px; border-radius:6px; background:color-mix(in srgb,var(--panel) 80%,transparent); border:1px solid var(--line); color:var(--ink-dim); backdrop-filter:blur(3px); white-space:nowrap; }
+  .cv-chip b { color:var(--ink); font-weight:600; }
+  .c-tool { top:9px; left:9px; } .c-tool b{ color:var(--accent);}
+  .c-refine { top:9px; right:9px; } .c-refine .pulse{ color:var(--accent); }
+  .c-scale { left:9px; bottom:9px; display:flex; align-items:center; gap:7px; }
+  .c-health { right:9px; bottom:9px; color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent); }
+  .c-hero { top:9px; left:9px; color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%,transparent); }
+  .c-live { top:9px; right:9px; color:var(--good); border-color:color-mix(in srgb,var(--good) 40%,transparent); }
+
+  /* side dock column */
+  .side { grid-area:side; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+  .pane { border-bottom:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+  .pane.grow { flex:1 1 176px; min-height:158px; }
+  .pane.insp .body { max-height:270px; }
+  .pane .body { padding:4px 11px 11px; overflow:auto; }
+
+  /* inspector */
+  .insp-head { display:flex; align-items:center; gap:8px; margin:3px 0 3px; }
+  .insp-head .ic { width:22px;height:22px;border-radius:6px; flex:none; display:grid; place-items:center; background:var(--panel-2); border:1px solid var(--line); }
+  .hd-txt { flex:1; min-width:0; }
+  .hd-txt .nm { font-weight:620; font-size:13px; line-height:1.15; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hd-txt .sub { font-family:var(--mono); font-size:9px; letter-spacing:.04em; color:var(--ink-faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .badge { font-family:var(--mono); font-size:9px; letter-spacing:.05em; text-transform:uppercase; flex:none; padding:2px 6px; border-radius:5px; border:1px solid var(--line); color:var(--ink-dim); background:var(--panel-2); }
+  .badge.borrow { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent); }
+  .ig { display:flex; align-items:center; gap:8px; margin:9px 0 1px; }
+  .ig .t { font-family:var(--mono); font-size:8.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); flex:none; }
+  .ig .ln { flex:1; height:1px; background:var(--line); }
+  .ig .act { font-family:var(--mono); font-size:9px; color:var(--accent); cursor:pointer; }
+  .pgrid { display:grid; grid-template-columns:1fr 1fr; column-gap:16px; }
+  .prop { display:flex; align-items:baseline; justify-content:space-between; gap:6px; min-width:0; padding:2px 0; border-bottom:1px solid var(--line-soft); }
+  .prop.wide { grid-column:1 / -1; }
+  .prop .k { font-family:var(--mono); font-size:9px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-faint); flex:none; }
+  .prop .v { font-family:var(--mono); font-size:12px; color:var(--ink); font-variant-numeric:tabular-nums; text-align:right; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .prop .v.dim { color:var(--ink-dim); }
+  .hl { display:flex; align-items:flex-start; gap:7px; font-size:11px; color:var(--ink-dim); padding:6px 0 2px; line-height:1.35; }
+  .hl .hdot { width:8px;height:8px;border-radius:50%; background:var(--warn); flex:none; margin-top:3px; }
+  .hl b { color:var(--warn); font-weight:600; }
+  .hint { font-size:11px; color:var(--ink-dim); padding:1px 0; }
+  .hint b { color:var(--ink); font-weight:600; }
+
+  /* lists */
+  .row { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:7px; cursor:pointer; }
+  .row:hover { background:var(--panel-2); }
+  .row.sel { background:color-mix(in srgb,var(--accent) 15%,transparent); box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent); }
+  .row.indent { margin-left:15px; }
+  .sw { width:15px; height:15px; border-radius:3px; flex:none; border:1px solid var(--line); }
+  .row .ic { width:15px; flex:none; color:var(--ink-dim); display:grid; place-items:center; }
+  .row.sel .ic { color:var(--accent); }
+  .row .nm { flex:1; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .tag { font-family:var(--mono); font-size:8.5px; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-faint); }
+  .row .tag.cam { color:var(--accent); }
+  .row .eye { color:var(--ink-faint); display:grid; place-items:center; }
+  .cam-rule { display:flex; align-items:center; gap:7px; margin:6px 2px 4px; }
+  .cam-rule .ln { height:1px; background:var(--line); flex:1; }
+
+  /* overview */
+  .ov svg { width:100%; height:142px; display:block; border-radius:8px; border:1px solid var(--line); background:var(--void); }
+  .ovcap { display:flex; gap:10px; flex-wrap:wrap; margin-top:7px; }
+  .ovcap span { display:inline-flex; align-items:center; gap:5px; font-size:10px; color:var(--ink-dim); }
+  .ovcap i { width:12px;height:9px;border-radius:2px; display:inline-block; }
+
+  /* status */
+  .status { grid-area:status; background:var(--panel-2); border-top:1px solid var(--line); display:flex; align-items:center; gap:16px; padding:0 12px; font-family:var(--mono); font-size:11px; color:var(--ink-dim); font-variant-numeric:tabular-nums; }
+  .status .s { display:flex; align-items:center; gap:6px; } .status .s b{ color:var(--ink); font-weight:600; }
+  .status .spacer{ flex:1; }
+  .status .live::before{ content:""; width:7px;height:7px;border-radius:50%; background:var(--accent); display:inline-block; }
+  .dot-good::before{ content:""; width:7px;height:7px;border-radius:50%; background:var(--good); display:inline-block; margin-right:6px; }
+
+  /* legend */
+  .legend { display:grid; grid-template-columns:repeat(auto-fit,minmax(216px,1fr)); gap:12px; margin-top:18px; }
+  .lcard { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:11px 13px; }
+  .lcard .n { font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:var(--accent); }
+  .lcard h3 { margin:5px 0 3px; font-size:13px; font-weight:620; }
+  .lcard p { margin:0; font-size:12px; color:var(--ink-dim); line-height:1.45; }
+  .foot { margin-top:16px; color:var(--ink-faint); font-size:11.5px; }
+  .foot code{ font-family:var(--mono); color:var(--ink-dim); }
+
+  @media (prefers-reduced-motion:no-preference){ .pulse-dot{ animation:bl 1.6s ease-in-out infinite; } @keyframes bl{ 0%,100%{opacity:.35} 50%{opacity:1} } }
+  :focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+</style>
+
+<div class="wrap">
+  <div class="lede">
+    <div>
+      <h1>Arbitrary Composer <b>Editor</b> — dockspace &amp; two-canvas split</h1>
+      <p>A uniform dockspace: any view in any container. The canvas is a view too — so you can <b>paint through the Viewport</b> beside a canvas that <b>looks through the Hero shot</b> and previews its export live.</p>
+    </div>
+    <button class="toggle" id="themeBtn" type="button">◐ theme</button>
+  </div>
+
+  <div class="appscroll">
+  <div class="app">
+    <!-- TOP -->
+    <div class="top">
+      <div class="brand"><span class="dot"></span> Composer</div>
+      <div class="proj">Portrait&nbsp;study · <span class="clean">saved</span></div>
+      <div class="menu"><span>File</span><span>Edit</span><span>Cell</span><span>Camera</span><span>View</span></div>
+      <div class="spacer"></div>
+      <div class="ws">workspace <b>Paint</b> ▾</div>
+    </div>
+
+    <!-- RAIL (tools + view launcher = home base) -->
+    <div class="rail" role="toolbar" aria-label="Tools and panels">
+      <div class="tool" aria-pressed="true" title="Select / move (V)" data-tool="Select"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l6 15 2-6 6-2z"/></svg></div>
+      <div class="tool" title="Brush (B)" data-tool="Brush"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20c2 0 4-1 4-4 0-1.5-1-2.5-2.5-2.5S3 15 3 16.5c0 .8 0 3.5 1 3.5z"/><path d="M8.5 13.5L18 4a2 2 0 0 1 3 3l-9.5 9.5"/></svg></div>
+      <div class="tool" title="Eyedropper (I)" data-tool="Eyedropper"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20l1-4 9-9 3 3-9 9z"/><path d="M14 5l3-3a2 2 0 0 1 3 3l-3 3"/></svg></div>
+      <div class="sep"></div>
+      <div class="tool" title="Place camera (C)" data-tool="Camera"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="12" rx="2"/><path d="M8 7l1.5-2.5h5L16 7"/><circle cx="12" cy="13" r="3"/></svg></div>
+      <div class="tool" title="Import / place file" data-tool="Import"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 16l5-4 4 3 3-2 6 5"/><circle cx="9" cy="9" r="1.6"/></svg></div>
+      <div class="sep"></div>
+      <div class="tool" title="Pan view (Space)" data-tool="Pan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-1.5a5 5 0 0 1-4-2l-3-4a1.6 1.6 0 0 1 2.4-2L9 13"/></svg></div>
+      <div class="spring"></div>
+      <div class="sep"></div>
+      <div class="tool launch" title="Views — open or reopen any panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg></div>
+      <div class="lbl">views</div>
+    </div>
+
+    <!-- CENTER: two canvas views, one split -->
+    <div class="center">
+      <!-- Canvas A: the active Viewport camera -->
+      <div class="cvpane">
+        <div class="tabs">
+          <span class="tab active"><span class="cdot">◎</span> Viewport <span class="x">×</span></span>
+          <span class="tab ghost">◉ Thumb <span class="x">×</span></span>
+          <span class="add" title="Split / new canvas">+</span>
+        </div>
+        <div class="cvbody">
+          <svg viewBox="0 0 820 560" preserveAspectRatio="xMidYMid slice" aria-label="Viewport camera — editing">
+            <defs>
+              <linearGradient id="gPhoto" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6f88ad"/><stop offset=".55" stop-color="#c9a68c"/><stop offset="1" stop-color="#8a5a4e"/></linearGradient>
+              <linearGradient id="gLogo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2d3746"/><stop offset="1" stop-color="#404f63"/></linearGradient>
+            </defs>
+            <!-- scene -->
+            <rect x="120" y="86" width="516" height="360" rx="2" fill="var(--paper)"/>
+            <path d="M214 250 q26 -22 60 -10 t62 -6" fill="none" stroke="#7a4a3c" stroke-width="7" stroke-linecap="round" opacity=".55"/>
+            <path d="M224 276 q30 10 74 2" fill="none" stroke="#9c6b4e" stroke-width="5" stroke-linecap="round" opacity=".5"/>
+            <g transform="rotate(-5 322 244)">
+              <rect x="176" y="150" width="292" height="188" rx="2" fill="url(#gPhoto)"/>
+              <rect x="176" y="150" width="292" height="188" rx="2" fill="none" stroke="#000" stroke-opacity=".18"/>
+              <rect x="176" y="150" width="292" height="188" fill="none" stroke="var(--accent)" stroke-width="1.6"/>
+              <circle cx="322" cy="244" r="3.2" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+              <line x1="322" y1="239" x2="322" y2="249" stroke="var(--accent)" stroke-width="1.2"/><line x1="317" y1="244" x2="327" y2="244" stroke="var(--accent)" stroke-width="1.2"/>
+              <g fill="var(--void)" stroke="var(--accent)" stroke-width="1.5">
+                <rect x="171" y="145" width="10" height="10"/><rect x="317" y="145" width="10" height="10"/><rect x="463" y="145" width="10" height="10"/>
+                <rect x="171" y="239" width="10" height="10"/><rect x="463" y="239" width="10" height="10"/>
+                <rect x="171" y="333" width="10" height="10"/><rect x="317" y="333" width="10" height="10"/><rect x="463" y="333" width="10" height="10"/>
+              </g>
+              <circle cx="482" cy="131" r="5.5" fill="var(--void)" stroke="var(--accent)" stroke-width="1.5"/>
+            </g>
+            <g>
+              <rect x="470" y="322" width="118" height="86" rx="2" fill="url(#gLogo)"/>
+              <path d="M486 386 l16 -30 12 20 10 -14 14 24" fill="none" stroke="#8ea2bb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </g>
+            <!-- Hero shot frame within the viewport -->
+            <rect x="150" y="118" width="392" height="220" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+            <g stroke="var(--accent)" stroke-width="2" fill="none"><path d="M150 132V118H164M528 118H542V132M542 324V338H528M164 338H150V324"/></g>
+            <text x="153" y="112" font-family="var(--mono)" font-size="11" fill="var(--accent)">◉ HERO · shot</text>
+            <rect x="500" y="360" width="96" height="96" fill="none" stroke="var(--ink-faint)" stroke-width="1.2" stroke-dasharray="4 3"/>
+            <!-- brush ring -->
+            <circle cx="316" cy="252" r="27" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+            <circle cx="316" cy="252" r="1.6" fill="var(--accent)"/>
+          </svg>
+          <div class="cv-chip c-tool"><b>Brush</b> · Size 6% of view · ≈48px on Retouch</div>
+          <div class="cv-chip c-refine"><span class="pulse pulse-dot">refining…</span></div>
+          <div class="cv-chip c-scale"><svg width="54" height="8" aria-hidden="true"><line x1="1" y1="4" x2="53" y2="4" stroke="var(--ink-dim)"/><line x1="1" y1="1" x2="1" y2="7" stroke="var(--ink-dim)"/><line x1="53" y1="1" x2="53" y2="7" stroke="var(--ink-dim)"/></svg><span>50 u</span></div>
+          <div class="cv-chip c-health">Photo · 1.4× · soft</div>
+        </div>
+      </div>
+
+      <div class="vsplit" title="Drag to resize"></div>
+
+      <!-- Canvas B: looking through the Hero shot — export preview -->
+      <div class="cvpane hero">
+        <div class="tabs">
+          <span class="tab active"><span class="cdot">◉</span> Hero <span class="x">×</span></span>
+          <span class="add" title="Split / new canvas">+</span>
+        </div>
+        <div class="cvbody hero">
+          <svg viewBox="150 118 392 220" preserveAspectRatio="xMidYMid meet" aria-label="Hero shot — export preview">
+            <defs>
+              <linearGradient id="gPhotoB" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6f88ad"/><stop offset=".55" stop-color="#c9a68c"/><stop offset="1" stop-color="#8a5a4e"/></linearGradient>
+              <linearGradient id="gLogoB" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2d3746"/><stop offset="1" stop-color="#404f63"/></linearGradient>
+            </defs>
+            <rect x="120" y="86" width="516" height="360" fill="var(--paper)"/>
+            <path d="M214 250 q26 -22 60 -10 t62 -6" fill="none" stroke="#7a4a3c" stroke-width="7" stroke-linecap="round" opacity=".55"/>
+            <path d="M224 276 q30 10 74 2" fill="none" stroke="#9c6b4e" stroke-width="5" stroke-linecap="round" opacity=".5"/>
+            <g transform="rotate(-5 322 244)"><rect x="176" y="150" width="292" height="188" rx="2" fill="url(#gPhotoB)"/></g>
+            <g><rect x="470" y="322" width="118" height="86" rx="2" fill="url(#gLogoB)"/><path d="M486 386 l16 -30 12 20 10 -14 14 24" fill="none" stroke="#8ea2bb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></g>
+          </svg>
+          <div class="cv-chip c-hero">◉ Hero — 1920×1080 · export preview</div>
+          <div class="cv-chip c-live">● live</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SIDE: three dock containers, each tabbed -->
+    <div class="side">
+      <!-- container 1 -->
+      <div class="pane insp">
+        <div class="tabs sm"><span class="tab active">Inspector</span><span class="tab ghost">Color</span><span class="tab ghost">History</span></div>
+        <div class="body">
+          <div class="insp-head">
+            <span class="ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink-dim)" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-4 4 3 3-2 6 5"/></svg></span>
+            <div class="hd-txt"><div class="nm">Photo.jpg</div><div class="sub">referenced image · JPEG · sRGB</div></div>
+            <span class="badge borrow">borrowed</span>
+          </div>
+          <div class="ig"><span class="t">Transform · units</span><span class="ln"></span></div>
+          <div class="pgrid">
+            <div class="prop"><span class="k">X</span><span class="v">412.0</span></div><div class="prop"><span class="k">Y</span><span class="v">208.0</span></div>
+            <div class="prop"><span class="k">W</span><span class="v">340.0</span></div><div class="prop"><span class="k">H</span><span class="v">219.0</span></div>
+            <div class="prop"><span class="k">Rot</span><span class="v">−5.0°</span></div><div class="prop"><span class="k">Shear</span><span class="v">0.0°</span></div>
+          </div>
+          <div class="ig"><span class="t">Appearance &amp; stacking</span><span class="ln"></span></div>
+          <div class="pgrid">
+            <div class="prop"><span class="k">Opacity</span><span class="v">100%</span></div><div class="prop"><span class="k">Blend</span><span class="v">Normal</span></div>
+            <div class="prop wide"><span class="k">Z-order</span><span class="v">2 of 4 <span class="dim">front → back&nbsp; ▴▾</span></span></div>
+          </div>
+          <div class="ig"><span class="t">Source · referenced</span><span class="ln"></span><span class="act">Reveal</span></div>
+          <div class="pgrid">
+            <div class="prop"><span class="k">Pixels</span><span class="v">4000×3000</span></div><div class="prop"><span class="k">On disk</span><span class="v dim">3.9 MB</span></div>
+            <div class="prop wide"><span class="k">File</span><span class="v dim">…/portrait_017.jpg</span></div>
+          </div>
+          <div class="hl"><span class="hdot"></span><span>Sampled <b>1.4×</b> by Hero — soft · <b>source-limited</b> (the file is the floor).</span></div>
+          <div class="hint">↳ <b>Retouch:</b> stack a paint layer above — the photo is never edited in place.</div>
+        </div>
+      </div>
+
+      <!-- container 2 -->
+      <div class="pane grow">
+        <div class="tabs sm"><span class="tab active">Layers</span><span class="tab ghost">Assets</span></div>
+        <div class="body">
+          <div class="cam-rule"><span class="mono-label">Cameras</span><span class="ln"></span></div>
+          <div class="row" style="box-shadow:inset 2px 0 0 var(--accent);">
+            <span class="ic" style="color:var(--accent)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/></svg></span>
+            <span class="nm">Viewport</span><span class="tag cam">1440×900 · active</span>
+            <span class="eye"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.5"/></svg></span>
+          </div>
+          <div class="row"><span class="ic"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="12" rx="2"/><circle cx="12" cy="13" r="3"/></svg></span><span class="nm">Hero</span><span class="tag cam">1920×1080 · shot</span><span class="eye"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.5"/></svg></span></div>
+          <div class="row"><span class="ic"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="12" rx="2"/><circle cx="12" cy="13" r="3"/></svg></span><span class="nm">Thumb</span><span class="tag cam">512²</span><span class="eye"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.5"/></svg></span></div>
+
+          <div class="cam-rule"><span class="mono-label">Layers · front → back</span><span class="ln"></span></div>
+          <div class="row indent"><span class="sw" style="background:repeating-linear-gradient(90deg,#7fb0a8 0 2px,transparent 2px 5px);"></span><span class="ic"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20c2 0 4-1 4-4 0-1.4-1-2.4-2.4-2.4S3.2 15 3.2 16.4C3.2 17 3 20 4 20z"/><path d="M8.5 13.5L18 4a2 2 0 0 1 3 3l-9.5 9.5"/></svg></span><span class="nm">Retouch</span><span class="tag" style="color:var(--good)">owned · paint</span><span class="eye"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.5"/></svg></span></div>
+          <div class="row indent sel"><span class="sw" style="background:repeating-linear-gradient(45deg,#c79a6d 0 2px,transparent 2px 5px);"></span><span class="ic"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-4 4 3 3-2 6 5"/></svg></span><span class="nm">Photo.jpg</span><span class="tag" style="color:var(--warn)">borrowed →</span><span class="eye"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.5"/></svg></span></div>
+          <div class="row indent"><span class="sw" style="background:repeating-linear-gradient(135deg,#8ea2bb 0 2px,transparent 2px 5px);"></span><span class="ic"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg></span><span class="nm">Logo</span><span class="tag">nested ▸</span><span class="eye"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.5"/></svg></span></div>
+          <div class="row indent"><span class="sw" style="background:repeating-linear-gradient(0deg,#b9a48c 0 2px,transparent 2px 5px);"></span><span class="ic"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></span><span class="nm">Backdrop</span><span class="tag">solid</span><span class="eye"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.5"/></svg></span></div>
+        </div>
+      </div>
+
+      <!-- container 3 -->
+      <div class="pane">
+        <div class="tabs sm"><span class="tab active">Overview</span><span class="tab ghost">Export</span></div>
+        <div class="body ov">
+          <svg viewBox="0 0 240 150" aria-label="Schematic overview of the whole composition">
+            <defs>
+              <pattern id="pBack" width="7" height="7" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#b9a48c" fill-opacity=".10"/><line x1="0" y1="0" x2="7" y2="0" stroke="#b9a48c" stroke-width="1.3" stroke-opacity=".5"/></pattern>
+              <pattern id="pLogo" width="7" height="7" patternTransform="rotate(135)" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#8ea2bb" fill-opacity=".12"/><line x1="0" y1="0" x2="0" y2="7" stroke="#8ea2bb" stroke-width="1.3" stroke-opacity=".6"/></pattern>
+              <pattern id="pPhoto" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#c79a6d" fill-opacity=".14"/><line x1="0" y1="0" x2="0" y2="7" stroke="#c79a6d" stroke-width="1.4" stroke-opacity=".7"/></pattern>
+              <pattern id="pRet" width="6" height="6" patternTransform="rotate(90)" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="#7fb0a8" fill-opacity=".16"/><line x1="0" y1="0" x2="0" y2="6" stroke="#7fb0a8" stroke-width="1.4" stroke-opacity=".75"/></pattern>
+            </defs>
+            <rect x="26" y="24" width="150" height="104" fill="var(--void)"/><rect x="26" y="24" width="150" height="104" fill="url(#pBack)"/>
+            <g transform="rotate(-5 92 70)"><rect x="40" y="40" width="96" height="60" fill="var(--void)"/><rect x="40" y="40" width="96" height="60" fill="url(#pPhoto)"/></g>
+            <rect x="150" y="92" width="40" height="30" fill="var(--void)"/><rect x="150" y="92" width="40" height="30" fill="url(#pLogo)"/>
+            <rect x="54" y="52" width="66" height="44" fill="var(--void)"/><rect x="54" y="52" width="66" height="44" fill="url(#pRet)"/>
+            <g fill="none" stroke-width="1" stroke-dasharray="2 2">
+              <rect x="26" y="24" width="150" height="104" stroke="#b9a48c" stroke-opacity=".8"/>
+              <g transform="rotate(-5 92 70)"><rect x="40" y="40" width="96" height="60" stroke="#c79a6d"/></g>
+              <rect x="150" y="92" width="40" height="30" stroke="#8ea2bb"/><rect x="54" y="52" width="66" height="44" stroke="#7fb0a8"/>
+            </g>
+            <rect x="60" y="42" width="86" height="48" fill="none" stroke="var(--accent)" stroke-width="1.3"/>
+            <text x="61" y="39" font-family="ui-monospace,monospace" font-size="6.5" fill="var(--accent)">◉ HERO</text>
+            <rect x="150" y="104" width="28" height="28" fill="none" stroke="var(--ink-faint)" stroke-width="1" stroke-dasharray="3 2"/>
+            <text x="150" y="101" font-family="ui-monospace,monospace" font-size="6.5" fill="var(--ink-faint)">THUMB</text>
+            <rect x="22" y="22" width="150" height="110" fill="color-mix(in srgb,var(--accent) 7%,transparent)" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="5 3"/>
+            <text x="23" y="18" font-family="ui-monospace,monospace" font-size="6.5" fill="var(--accent)">◎ VIEWPORT · active</text>
+          </svg>
+          <div class="ovcap">
+            <span><i style="background:repeating-linear-gradient(45deg,#c79a6d 0 2px,transparent 2px 4px);border:1px solid #c79a6d"></i>fill = z-order</span>
+            <span><i style="border:1px dashed var(--ink-dim)"></i>dotted = extent</span>
+            <span><i style="border:1px dashed var(--accent)"></i>◎ viewport</span>
+            <span><i style="border:1px solid var(--accent)"></i>◉ shots</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STATUS -->
+    <div class="status">
+      <span class="s">x <b>418.2</b> y <b>203.6</b> u</span>
+      <span class="s">scale <b>1 u : 11.4 px</b></span>
+      <span class="s live">Viewport · active camera</span>
+      <span class="spacer"></span>
+      <span class="s dot-good">tiles 214 · 2 refining</span>
+      <span class="s">linear · sRGB display</span>
+    </div>
+  </div>
+  </div>
+
+  <div class="legend">
+    <div class="lcard"><div class="n">DOCKSPACE</div><h3>Any view, any container</h3><p>A uniform split-tree of tabbed containers — no privileged editor area. The tool rail is home base: close anything, reopen it from <b>Views</b>.</p></div>
+    <div class="lcard"><div class="n">TWO CANVASES</div><h3>Viewport ‖ Hero</h3><p>Because the canvas is a view and the viewport is a camera, you paint through <b>Viewport</b> while a second canvas <b>looks through Hero</b> and previews its 1920×1080 export live.</p></div>
+    <div class="lcard"><div class="n">OVERVIEW</div><h3>Patterned z-order</h3><p>Render-free map: a front cell's fill occludes the one behind; dotted borders stay on top so extents read. The pattern is each layer's shared identity with the list.</p></div>
+    <div class="lcard"><div class="n">BRUSH</div><h3>Size in % of view</h3><p>Measured against the camera, not a pixel grid — the ring is the truth; “≈48px on Retouch” is only the effect on that cell.</p></div>
+    <div class="lcard"><div class="n">RESOLUTION</div><h3>On cells &amp; cameras</h3><p>No document resolution. A cell emits detail; a camera samples it. The health chip flags when a camera out-resolves a cell.</p></div>
+  </div>
+
+  <p class="foot">Mockup for <code>docs/00-design.md</code> (D1–D18). Illustrative UI — not a running build. Theme toggle up top.</p>
+</div>
+
+<script>
+  (function(){
+    var root = document.documentElement;
+    document.getElementById('themeBtn').addEventListener('click', function(){
+      var cur = root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark':'light');
+      root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+    });
+    document.querySelectorAll('.tool[data-tool]').forEach(function(t){
+      t.addEventListener('click', function(){
+        document.querySelectorAll('.tool[data-tool]').forEach(function(x){ x.setAttribute('aria-pressed','false'); });
+        t.setAttribute('aria-pressed','true');
+      });
+    });
+    document.querySelectorAll('.tabs').forEach(function(strip){
+      strip.querySelectorAll('.tab').forEach(function(tab){
+        tab.addEventListener('click', function(e){
+          if(e.target.classList.contains('x')) return;
+          strip.querySelectorAll('.tab').forEach(function(x){ x.classList.remove('active'); x.classList.add('ghost'); });
+          tab.classList.add('active'); tab.classList.remove('ghost');
+        });
+      });
+    });
+  })();
+</script>

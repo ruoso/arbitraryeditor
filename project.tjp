@@ -1,0 +1,31 @@
+# arbitraryeditor — Work Breakdown Structure
+#
+# The structured decomposition of the Arbitrary Composer Editor (docs/00-01).
+# Not used for real scheduling — a single placeholder resource, no calendars.
+# tj3 parses it so structure and dependencies stay valid, and writes one HTML
+# report to `report/` (gitignored).
+#
+# libarbc is an EXTERNAL dependency (CMake FetchContent from a git ref), not part
+# of this WBS. Conventions mirror the library repo: one include per work stream,
+# numbered so listings sort in rough build order; leaf notes reference the
+# governing design/architecture decision.
+
+project arbceditor "arbitraryeditor" 2026-07-17 +2y {
+  timezone "America/New_York"
+  numberformat "-" "" "," "." 1
+  currencyformat "(" ")" "," "." 0
+  outputdir "report"
+}
+
+taskreport gantt "Gantt Chart" {
+  formats html
+  headline "arbitraryeditor Work Breakdown"
+  columns bsi, name, status, chart
+  loadunit hours
+}
+
+# Single placeholder resource; effort-based tasks need one to be valid.
+resource team "Team"
+
+include "tasks/00-editor.tji"
+include "tasks/99-milestones.tji"

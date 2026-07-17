@@ -1,0 +1,295 @@
+# 00 — Editor (host GUI over libarbc)
+#
+# The Arbitrary Composer Editor: a native C++ desktop application that uses
+# libarbc (v0.1+) as a still-image compositor where cells are placed by
+# arbitrary affine and observed by cameras. Design is fully specified in
+# docs/00-design.md (D1-D19) and docs/01-architecture.md (A1-A7); each leaf note
+# cites the governing decision. Refinements land under tasks/refinements/.
+#
+# libarbc is an EXTERNAL dependency, consumed via CMake FetchContent from a git
+# ref (github.com/ruoso/arbitrarycomposer) — it is not part of this WBS. A leaf
+# that needs a library capability the released surface does not yet expose files
+# that gap as a task in the LIBRARY repo, releases it, and consumes it here.
+#
+# Build order flows roughly top-to-bottom: foundation -> dockspace -> project &
+# app state -> canvas -> cameras/cells -> panels/paint/import -> packaging.
+#
+# DEFINITION OF DONE (every leaf — docs/01-architecture.md §9, A8/A9 — NOT
+# standalone leaves): respects the levelization DAG (check_levels clean); lands
+# its tests (L1 logic -> Catch2 unit; renders -> render_offline golden; has UI ->
+# an ImGui Test Engine e2e; threads -> ASan/TSan-clean); clang-format + build
+# clean; scripts/gate green. foundation.build stands up the harness, the
+# check_levels lint, the component skeleton, and scripts/gate so this bar is
+# satisfiable from the first task. Each refinement's Acceptance-criteria section
+# names the SPECIFIC tests that instantiate the DoD for its leaf.
+
+task editor "Editor — host GUI over libarbc" {
+  note "Every leaf carries the universal DEFINITION OF DONE (see file header / docs/01-architecture.md §9): levelization (check_levels) + layered tests (Catch2 L1 unit, render_offline goldens, ImGui Test Engine e2e for UI, ASan/TSan for threads) + format/build, all via scripts/gate. These are acceptance criteria on every task, not separate leaves."
+
+  # ---- Foundation & scaffold (A1/A2/A3) ----
+  task foundation "Foundation & scaffold" {
+    task build "CMake, deps, presets, CI" {
+      effort 2d
+      allocate team
+      note "Bootstraps the whole project AND the universal definition of done. CMakeLists.txt: FetchContent libarbc from a git ref (link arbc::arbc) + Dear ImGui (docking branch) + SDL3; native presets (Linux/macOS/Windows). Stand up: the src/ directory-per-component skeleton (§7/§8 levels); the check_levels lint over the level DAG; the test harness (Catch2 for L1 units + ImGui Test Engine for e2e + an offscreen-GL headless smoke); and a single scripts/gate (check_levels · clang-format · build · ctest) that the orchestrator runs after every task. Acceptance: an empty but green gate, a window that opens, check_levels passing on the skeleton. Arch A1/A2/A8/A9. Design: docs/01-architecture.md §7-§9. Refinement: tasks/refinements/foundation_build.md"
+    }
+    task app_shell "SDL3 window + GL context + ImGui + main loop" {
+      effort 2d
+      allocate team
+      depends !build
+      note "Open a window, create an OpenGL context targeting the GLES3/WebGL2-common subset, init Dear ImGui with the SDL3+GL backends, run the frame loop. Self-rendered UI only (no native widgets) so the WASM target stays reachable. Arch A2/A3. Refinement: tasks/refinements/app_shell.md"
+    }
+    task platform_services "PlatformServices seam (file / threads / clock)" {
+      effort 2d
+      allocate team
+      depends !app_shell
+      note "A thin interface over directory/file access, thread spawn, and clock; native implementation (std filesystem + threads). The one seam the future web port swaps (File System Access / OPFS / Emscripten pthreads) without touching app or UI code. Arch A3. Refinement: tasks/refinements/platform_services.md"
+    }
+    task render_probe "Render a trivial Document into a canvas texture" {
+      effort 2d
+      allocate team
+      depends !app_shell
+      note "Build a trivial libarbc Document in-process, render it into a CPU surface, upload as a GL texture, display it in one ImGui pane. Proves the binding + display path end to end and surfaces any library gap early. Arch A1/A6. Refinement: tasks/refinements/render_probe.md"
+    }
+  }
+
+  # ---- Dockspace shell (D18) ----
+  task dock "Dockspace shell" {
+    task dockspace "Split-tree + tabs over ImGui docking" {
+      effort 3d
+      allocate team
+      depends editor.foundation.app_shell
+      note "A fully-uniform dockspace on ImGui's docking branch: recursive split containers, tabbed views, drag-to-dock, resize. No privileged editor area, no keep-a-canvas guardrail. Design: docs/00-design.md D18. Refinement: tasks/refinements/dockspace.md"
+    }
+    task view_registry "View abstraction: open / close / reopen" {
+      effort 2d
+      allocate team
+      depends !dockspace
+      note "Register view types (Canvas, Layers, Inspector, Overview, Color, History, Assets, Export) and instantiate them into any container; a view can be closed and reopened. Underpins 'anything can be closed'. Design: D18. Refinement: tasks/refinements/view_registry.md"
+    }
+    task tool_rail "Fixed tool rail + view launcher (home base)" {
+      effort 1.5d
+      allocate team
+      depends !view_registry
+      note "The thin left rail: modal tools (select/brush/eyedropper/camera/import/pan) plus the view launcher that reopens any closed view. Since anything (even every canvas) can be closed, the rail is the home base that can never leave you empty. Design: D18. Refinement: tasks/refinements/tool_rail.md"
+    }
+    task workspaces "Saved layout presets (local UI state)" {
+      effort 2d
+      allocate team
+      depends !dockspace, editor.foundation.platform_services
+      note "Named workspace presets (Paint/Compose/Review) switchable in a click; the layout tree persists as LOCAL UI state in workspace/ or global prefs, never in the portable project.arbc. Design: D18 / §9. Refinement: tasks/refinements/workspaces.md"
+    }
+  }
+
+  # ---- Project & app state (A4/A7, D16/D19) ----
+  task project "Project & app state" {
+    task open "Open a project directory; new project" {
+      effort 2d
+      allocate team
+      depends editor.foundation.render_probe
+      note "Open a project DIRECTORY (project.arbc + assets/ + workspace/): map the workspace or load the canonical doc; create a new project scaffolding the directory. Design: D16. Refinement: tasks/refinements/project_open.md"
+    }
+    task app_state "Project-level state; single Document per process; command dispatch" {
+      effort 3d
+      allocate team
+      depends !open
+      note "The app owns exactly ONE libarbc Document for its lifetime (process-per-project). Project-level selection and active tool; a command/action dispatch that turns UI actions into library transactions. Design: D19 / arch A4/A7. Refinement: tasks/refinements/app_state.md"
+    }
+    task exec_new "Open-another-project = exec a new instance" {
+      effort 1d
+      allocate team
+      depends !app_state
+      note "Opening a different project execs a fresh editor process (its own Document/workspace/threads/window). No multi-project-in-one-window, no in-process switching. Design: D19. Refinement: tasks/refinements/exec_new.md"
+    }
+    task save "Save = re-dump project.arbc + assets; dirty state" {
+      effort 1.5d
+      allocate team
+      depends !app_state
+      note "Save re-emits the canonical project.arbc (+ changed owned tiles) from the live workspace — a publish step, not a crash race (the workspace is durable by default). Dirty indicator = workspace-vs-snapshot drift. Design: D16 §9. Refinement: tasks/refinements/project_save.md"
+    }
+    task undo "Undo/redo wired to library transactions" {
+      effort 2d
+      allocate team
+      depends !app_state
+      note "Undo/redo IS libarbc's transaction journal (doc 14), not a reimplementation; continuous gestures (a stroke, a drag) coalesce into one step. Viewport-camera navigation is transient (not undoable); a saved shot's framing is scene data (undoable). Design: D15. Refinement: tasks/refinements/undo.md"
+    }
+    task gc "Clean up (GC) + consolidate + relink" {
+      effort 2d
+      allocate team
+      depends !save
+      note "Clean up runs the library's gc_project_directory over assets/ (roots = this one document); Consolidate copies borrowed files in + relativizes URIs for a portable bundle; missing borrow -> placeholder + relink. GC never touches workspace/ or borrowed files. Design: D13. Refinement: tasks/refinements/gc_consolidate.md"
+    }
+  }
+
+  # ---- Canvas & rendering (A4/A5/A6) ----
+  task canvas "Canvas & rendering" {
+    task view "Canvas view = HostViewport + InteractiveRenderer; tile -> GL" {
+      effort 3d
+      allocate team
+      depends editor.project.app_state
+      note "A canvas view drives a libarbc HostViewport + InteractiveRenderer over the shared Document and uploads settled CPU tiles as GL textures. A GPU Backend later needs no editor change (behind the Backend seam). Arch A4/A6. Refinement: tasks/refinements/canvas_view.md"
+    }
+    task frame_sync "UI-thread <-> driver frame handoff; edit submission" {
+      effort 3d
+      allocate team
+      depends !view
+      note "The driver renders off the UI thread; the UI displays the latest frame (double-buffer) and SUBMITS edits, never touching the cache. Honors the library's single-writer / leaf-only-dispatch contract. Arch A4. Refinement: tasks/refinements/frame_sync.md"
+    }
+    task multi_canvas "N canvases over one Document sharing one WorkerPool" {
+      effort 2d
+      allocate team
+      depends !frame_sync
+      note "Multiple canvas views = multiple HostViewport/InteractiveRenderer over the one Document sharing one library WorkerPool; each cache render-thread-confined, so no new locking. This is 'paint through Viewport | look through Hero'. Arch A5 / D18. Refinement: tasks/refinements/multi_canvas.md"
+    }
+    task nav "Pan / zoom the viewport camera; scale bar; deep zoom" {
+      effort 2d
+      allocate team
+      depends !view
+      note "Pan/zoom drives the active viewport camera (transient); a scale bar in composition units (no phantom %); deep-zoom rebasing surfaced from HostViewport. Design: D2. Refinement: tasks/refinements/camera_nav.md"
+    }
+  }
+
+  # ---- Cameras (D2/D9/D14) ----
+  task cameras "Cameras" {
+    task model "Viewport + shot cameras in the document; create" {
+      effort 2d
+      allocate team
+      depends editor.canvas.view
+      note "Cameras are libarbc Viewports persisted as scene objects: the active viewport camera (screen-sized) plus saved shot cameras (own export resolution). Create / name / 'new shot from view'. Design: D2. Refinement: tasks/refinements/camera_model.md"
+    }
+    task manip "Frame resize (hold resolution), aspect-lock, dutch, resolution inspector" {
+      effort 2d
+      allocate team
+      depends !model
+      note "Resize = re-crop (aspect-locked to resolution, holds resolution); resolution (pixel count + aspect) edited separately; dutch rotation modifier-gated. Design: D9. Refinement: tasks/refinements/camera_manip.md"
+    }
+    task look_through "Activate a shot; multi-canvas look-through" {
+      effort 1.5d
+      allocate team
+      depends !model, editor.canvas.multi_canvas
+      note "Make a shot the active camera of a canvas ('look through Hero'); a second canvas can look through a shot for a live export preview beside the editing Viewport. Design: D18. Refinement: tasks/refinements/look_through.md"
+    }
+    task export "Export via cameras (render_offline); PNG; batch; contact sheet" {
+      effort 3d
+      allocate team
+      depends !model
+      note "A camera IS the export spec: pick camera(s) -> library render_offline each at its resolution -> file(s). PNG (working->sRGB8); batch (one file per camera) + contact sheet fall out; transparent/filled bg, N-times scale multiplier; async with progress. Design: D14. Refinement: tasks/refinements/export.md"
+    }
+  }
+
+  # ---- Cells & manipulation (D3/D7/D8) ----
+  task cells "Cells & manipulation" {
+    task model "Insert cell (image/raster/nested/solid) via Registry" {
+      effort 2d
+      allocate team
+      depends editor.canvas.view
+      note "Insert a cell of any registered kind (org.arbc.image/raster/nested/solid) off the library Registry::ids(); place it in the composition by affine. Design: D3. Refinement: tasks/refinements/cell_model.md"
+    }
+    task selection "Project-level selection; hit-test; marquee; select-behind" {
+      effort 2.5d
+      allocate team
+      depends !model, editor.cameras.model
+      note "One project-level selection (canvases are only cameras): click a cell BODY, a camera BORDER/label (interior click-through); marquee multi-select; Cmd/Ctrl-click select-behind. Shared across canvas/list/overview. Design: D7/D19. Refinement: tasks/refinements/selection.md"
+    }
+    task gizmo "Transform gizmo: move / scale / rotate / shear; pivot; snapping" {
+      effort 3d
+      allocate team
+      depends !selection
+      note "Move (body), scale (corners proportional-by-default, edges 1D), rotate (Shift 15deg), shear (modifier), draggable pivot; snapping to cell edges/centers, camera frames, grid. Handle-drag is PLACEMENT, never resample. Design: D7/D8. Refinement: tasks/refinements/transform_gizmo.md"
+    }
+    task resolution "Cell resolution display; resample-to-crisp; health badge" {
+      effort 2d
+      allocate team
+      depends !selection
+      note "Show a cell's native/working resolution separately from placement; 'resample to crisp' grows a raster's grid; a referenced image is source-limited (the file is the floor). The health badge flags a camera out-resolving a cell. Design: D8. Refinement: tasks/refinements/resolution_ops.md"
+    }
+  }
+
+  # ---- Info panels (D5/D6/D10/D11) ----
+  task panels "Info panels" {
+    task inspector "Dense property sheet (transform / appearance / z-order / source)" {
+      effort 2.5d
+      allocate team
+      depends editor.cells.selection, editor.dock.view_registry
+      note "A dense property sheet for the project selection: transform (units), appearance & stacking (opacity/blend/z-order), source (referenced/owned info + health). Design: D7 (density) / D11. Refinement: tasks/refinements/inspector.md"
+    }
+    task layers "Layers list (+ cameras); reorder; referenced-vs-painted; nested expand / enter" {
+      effort 3d
+      allocate team
+      depends !inspector, editor.cells.model
+      note "The layer list (cameras section + layers front->back); reorder = z-order; the borrowed/owned (referenced-vs-painted) distinction shown; a nested cell can be expanded (peek) or entered (isolation scope + breadcrumb). Design: D6/D11/D17. Refinement: tasks/refinements/layers.md"
+    }
+    task overview "Patterned-fill wireframe overview; z-order occlusion; editable" {
+      effort 4d
+      allocate team
+      depends !layers, editor.cameras.model
+      note "The render-free overview: each cell a hatch pattern (shared identity with the list), front fills occlude back with always-on-top dotted borders (z-order without a list), cameras as frames, the live viewport highlighted; editable (drag to place) + navigator + export/shot map. Design: D6/§5. Refinement: tasks/refinements/overview.md"
+    }
+    task color "sRGB picker; eyedropper (through camera); linear boundary" {
+      effort 2d
+      allocate team
+      depends editor.dock.view_registry, editor.paint.brush
+      note "A conventional sRGB/HSV/hex picker + straight-alpha opacity; the editor is the invisible translator to/from the library's premultiplied-linear working space. Eyedropper samples the displayed sRGB through the active camera. Design: D10. Refinement: tasks/refinements/color.md"
+    }
+  }
+
+  # ---- Painting (D4/D5/D12) ----
+  task paint "Painting" {
+    task brush "Brush tool; %-of-view size + ring; dab into org.arbc.raster" {
+      effort 3d
+      allocate team
+      depends editor.cells.model
+      note "The brush tool: size in % of view (shorter edge, log slider) with an on-canvas ring; strokes dab into an org.arbc.raster cell's editable facet, coalesced into one undo step. Design: D5. Refinement: tasks/refinements/brush.md"
+    }
+    task paint_res "Cell-fixed resolution painting; screen->cell mapping; detail-floor readout" {
+      effort 2d
+      allocate team
+      depends !brush
+      note "Dabs rasterize into the CELL's fixed working grid; the brush footprint maps camera px -> composition units -> cell px by affine composition. The '~N px on <cell>' readout doubles as the resolution-health / detail-floor cue. Design: D4/D5. Refinement: tasks/refinements/paint_res.md"
+    }
+    task retouch_stack "Add-paint-layer-above a referenced photo (non-destructive)" {
+      effort 1.5d
+      allocate team
+      depends !brush, editor.import.image
+      note "Attempting to paint a read-only (referenced) photo offers a one-gesture 'add a retouch layer above' — a new owned raster over its bounds; the original is never edited in place. Design: D12. Refinement: tasks/refinements/retouch_stack.md"
+    }
+  }
+
+  # ---- Import & assets (D11/D12/D13) ----
+  task import "Import & assets" {
+    task image "Drop / place an image -> borrowed cell (1:1 px->units)" {
+      effort 2d
+      allocate team
+      depends editor.cells.model
+      note "Drop or Place an image file -> a borrowed (referenced) read-only org.arbc.image cell at the drop point, sized native px -> composition units 1:1 so pixel dimensions carry real relative scale. Design: D11/D12. Refinement: tasks/refinements/import_image.md"
+    }
+    task paste "Paste / clipboard bitmap -> owned image" {
+      effort 1.5d
+      allocate team
+      depends !image
+      note "A pasted bitmap has no source file to borrow, so the project MINTS it as an owned read-only image in assets/; otherwise it behaves like an import. Design: D11/D12. Refinement: tasks/refinements/import_paste.md"
+    }
+    task nested "Place another .arbc -> nested composition cell" {
+      effort 2d
+      allocate team
+      depends !image
+      note "Place another project (.arbc) -> an org.arbc.nested cell referencing it (the library's external nested reference). Design: D12. Refinement: tasks/refinements/import_nested.md"
+    }
+  }
+
+  # ---- Packaging & CI (native ship) ----
+  task packaging "Packaging & CI" {
+    task ci "Editor CI lanes (Linux / macOS / Windows)" {
+      effort 2d
+      allocate team
+      depends editor.foundation.build
+      note "Per-platform CI building the editor and running a headless smoke (window init + one rendered frame), matching the library's compiler matrix. Refinement: tasks/refinements/ci.md"
+    }
+    task package "Installable editor artifacts per platform" {
+      effort 3d
+      allocate team
+      depends editor.panels.overview, editor.panels.color, editor.cameras.export, editor.paint.paint_res, editor.paint.retouch_stack, editor.import.paste, editor.import.nested, editor.cells.gizmo, editor.cells.resolution, editor.canvas.nav, editor.cameras.manip, editor.cameras.look_through, editor.project.exec_new, editor.project.undo, editor.project.gc, editor.dock.tool_rail, editor.dock.workspaces
+      note "Bundle the editor as an installable artifact per platform (AppImage/.dmg/.msi or CPack equivalents), embedding fonts/icons and staging the runtime. Gathers the feature-complete editor. Refinement: tasks/refinements/package.md"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+# 99 — Milestones
+#
+# Zero-duration milestone(s) marking when the editor's capability is in place.
+
+task milestones "Milestones" {
+  task m9_editor "M9E: Editor — host GUI over libarbc" {
+    milestone
+    depends editor.foundation, editor.dock, editor.project, editor.canvas, editor.cameras, editor.cells, editor.panels, editor.paint, editor.import, editor.packaging
+    note "The Arbitrary Composer Editor: a native C++ desktop GUI (Dear ImGui docking + SDL3 + OpenGL) that uses libarbc (v0.1+, consumed via CMake FetchContent from a git ref) as a still-image compositor — cells placed by arbitrary affine, observed by cameras, each camera owning a resolution and a framing. Fully specified in docs/00-design.md (D1-D19) and docs/01-architecture.md (A1-A7): a fully-uniform dockspace, the two-canvas split (paint through Viewport | look through Hero), the % of view brush over cell-fixed resolution, the patterned-fill overview, borrowed/owned assets, project-as-a-directory with the in-project mmap workspace, process-per-project, undo = library transactions, and multi-canvas as N HostViewport/InteractiveRenderer over one Document sharing one WorkerPool. Native first; the WASM target is kept reachable by construction (self-rendered UI, platform seam, GLES3/WebGL2 subset) but is not scoped here."
+  }
+}
