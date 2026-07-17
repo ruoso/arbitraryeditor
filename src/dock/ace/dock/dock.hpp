@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ace/dockmodel/dockmodel.hpp>
+#include <ace/dockmodel/tool_rail.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 
 #include <string>
@@ -52,12 +53,31 @@ public:
   // The authoritative layout (the set of open views is layout().view_ids()).
   const ace::dockmodel::DockLayout& layout() const { return layout_; }
 
+  // The rail's active-tool selection (A11). Observable UI state the tool rail
+  // mutates on click; nothing on the canvas reads it yet (D-tool_rail-4). The e2e
+  // reads it through this accessor to assert the active tool after a click.
+  ace::dockmodel::ToolSelection& tools() { return tools_; }
+  const ace::dockmodel::ToolSelection& tools() const { return tools_; }
+
 private:
   ace::dockmodel::ViewRegistry registry_;
   ace::dockmodel::DockLayout layout_;
-  bool built_ = false;            // DockBuilder seeded at least once
-  bool rebuild_ = false;          // a programmatic open/reopen needs a re-seed
-  unsigned int dockspace_id_ = 0; // ImGuiID; assigned on first draw()
+  ace::dockmodel::ToolSelection tools_; // the rail's active-tool selection (A11)
+  bool built_ = false;                  // DockBuilder seeded at least once
+  bool rebuild_ = false;                // a programmatic open/reopen needs a re-seed
+  unsigned int dockspace_id_ = 0;       // ImGuiID; assigned on first draw()
 };
+
+// The stable ImGui window id of the fixed tool rail — exposed so the e2e can
+// drive the rail's buttons under the same id the rail draws under (Constraint 7).
+const char* tool_rail_title();
+
+// Draw the fixed left tool rail (D18 / §10 "home base"): the view launcher (one
+// entry per view_catalog() type, click to open/focus via Dockspace::open) plus
+// the modal tools (Select/Brush/Eyedropper/Pan over `dockspace.tools()`). Chrome,
+// not a view: always present, never closable/dockable (D-tool_rail-3). Called by
+// Dockspace::draw() inside the fixed left rail window; the dockspace host fills
+// the work area to its right, so the rail reserves space and nothing overlaps it.
+void draw_tool_rail(Dockspace& dockspace);
 
 } // namespace ace::dock

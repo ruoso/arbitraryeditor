@@ -127,7 +127,7 @@ arbitraryeditor/
 │   ├── scene/          cells · cameras · selection · z-order      (L1)
 │   ├── interact/       hit-test · gizmo · snapping · brush math   (L1, UI-agnostic)
 │   ├── commands/       actions → libarbc transactions · undo      (L1)
-│   ├── dockmodel/      view registry + layout data                (L1)
+│   ├── dockmodel/      view registry + layout + tool selection    (L1)
 │   ├── render/         HostViewport/InteractiveRenderer · tile→GL (L2)
 │   ├── views/          ImGui panels (canvas/layers/inspector/…)   (L3)
 │   ├── dock/           dockspace shell + tool rail (ImGui docking)(L3)
@@ -258,6 +258,7 @@ in the ci.yml test step.
 | A8 | **Levelized components enforce the testability seam**: the editor has its own component DAG (§8); the UI-agnostic L1 core (project/scene/interact/commands/dockmodel) is structurally forbidden from including ImGui/GL/SDL, enforced by a `check_levels` lint. Only L3 (views/dock) sees ImGui. |
 | A9 | **Layered testing as per-task acceptance criteria**: Catch2 L1 units + `render_offline` goldens + **ImGui Test Engine** headless e2e + ASan/TSan. The harness + `check_levels` + `scripts/gate` are stood up by `foundation.build` and are the **definition of done on every leaf**, not standalone tasks. |
 | A10 | **ImGui Test Engine license — resolved: free under the OSI open-source carve-out.** `ocornut/imgui_test_engine` is dual-licensed (the `imgui_test_engine/` folder under the *Dear ImGui Test Engine License*; everything else MIT). That license is **permissive, not copyleft** — it imposes no terms on our own source and does not "infect" the editor; redistribution only requires carrying its copyright + license text. Its free tier explicitly covers software *released publicly under an OSI-approved open-source license*, **and** any entity with <$2M USD annual turnover; a paid license (from DISCO HELLO, after a 45-day trial) is required only by a **>$2M-turnover entity**. So as long as the editor ships under an OSI open-source license, linking the engine into the shipped binary (`IMGUI_ENABLE_TEST_ENGINE`, current build) is within the free terms — no test-only-link split needed. **Revisit only** if the editor is later distributed **closed-source by a >$2M-turnover entity**, in which case: buy a license or move the engine to a test-only link (the hooks are inert without an engine context). Supersedes the parking-lot entry (was D-app_shell-5). |
+| A11 | **`dockmodel` owns headless UI state incl. active-tool.** `dockmodel` (L1, ImGui/GL/SDL/libarbc-free) is the headless UI-state model — view catalog + layout **+ the tool rail's active-tool selection** (a `ToolId` enum, a `tool_catalog()`, and a trivial `ToolSelection` holder). Placing the active-tool state here (not in `interact`) lets **`dock` own the *whole* rail** — modal tools **and** the view launcher — within the existing `dock → {dockmodel, views}` edges, with **no `interact` edge and no new component/DAG edge**. `interact` stays pure math (hit-test/gizmo/snapping/brush). The **tool→interaction dispatch** (active tool actually driving canvas behavior) is **promoted into `interact` when a canvas consumer exists** (`editor.canvas.tool_dispatch`, D20). Rail chrome is L3 `dock` per §7. |
 
 ## Open / next
 

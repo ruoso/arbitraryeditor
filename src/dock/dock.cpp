@@ -1,4 +1,5 @@
 #include <ace/dock/dock.hpp>
+#include <ace/dockmodel/tool_rail.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/views/views.hpp>
 
@@ -12,8 +13,14 @@
 namespace ace::dock {
 namespace {
 
+using ace::dockmodel::LauncherEntry;
 using ace::dockmodel::SplitOrientation;
+using ace::dockmodel::ToolDescriptor;
 using ace::dockmodel::ViewType;
+
+// The fixed rail width: enough to hold the widest text label ("Eyedropper") this
+// leaf — icon art is deferred to editor.packaging (Open questions / Constraint).
+constexpr float k_rail_width = 140.0f;
 
 // Recursively translate a DockLayout subtree into ImGui dock nodes rooted at
 // `node_id`: a split creates two children (H → left|right, V → top|bottom) and
@@ -43,6 +50,38 @@ std::vector<ViewType> default_initial_views() {
   return {ViewType::Canvas, ViewType::Inspector, ViewType::Layers, ViewType::Overview};
 }
 
+const char* tool_rail_title() { return "Tool Rail"; }
+
+void draw_tool_rail(Dockspace& dockspace) {
+  // Modal tools (D20): a single active-tool selection over the tool catalog. The
+  // selection is observable state ONLY — nothing on the canvas reads it yet
+  // (D-tool_rail-4). Each button carries a stable text id so the e2e can click it.
+  ImGui::TextUnformatted("Tools");
+  const ace::dockmodel::ToolId active = dockspace.tools().active();
+  for (const ToolDescriptor& tool : ace::dockmodel::tool_catalog()) {
+    const std::string label(tool.title);
+    if (ImGui::Selectable(label.c_str(), tool.id == active)) {
+      dockspace.tools().select(tool.id);
+    }
+  }
+
+  ImGui::Separator();
+
+  // The view launcher (§10 :446-450, the home base): one entry per view type,
+  // click to open — or, for a singleton already present, focus — via the existing
+  // Dockspace surface (Dockspace::open is idempotent for singletons, mints a fresh
+  // canvas#N for the multi-instance Canvas). `is_open` reflects the authoritative
+  // layout (D-tool_rail-5), so with the layout empty one click restores the view —
+  // the home-base guarantee that nothing can be lost.
+  ImGui::TextUnformatted("Views");
+  for (const LauncherEntry& entry : ace::dockmodel::launcher_entries(dockspace.layout())) {
+    const std::string label(ace::dockmodel::view_title(entry.type));
+    if (ImGui::Selectable(label.c_str(), entry.is_open)) {
+      dockspace.open(entry.type);
+    }
+  }
+}
+
 Dockspace::Dockspace(std::vector<ViewType> initial) {
   if (initial.empty()) {
     return;
@@ -62,11 +101,46 @@ Dockspace::Dockspace(std::vector<ViewType> initial) {
 }
 
 void Dockspace::draw() {
-  const ImGuiViewport* viewport = ImGui::GetMainViewport();
-  // Full-window uniform dockspace over the main viewport, no reserved central
-  // node — every node is a peer (D18 / D-dockspace-5). The returned id is stable
-  // per viewport, so it is safe to build against.
-  dockspace_id_ = ImGui::DockSpaceOverViewport(0, viewport, ImGuiDockNodeFlags_None);
+  ImGuiViewport* viewport = ImGui::GetMainViewport();
+  const ImVec2 work_pos = viewport->WorkPos;
+  const ImVec2 work_size = viewport->WorkSize;
+
+  // The fixed left tool rail (home base): a real, non-dockable window pinned to
+  // the left of the work area, sized deterministically each frame (no viewport
+  // work-inset feedback — that lags a frame and jitters the docked geometry). It
+  // reserves k_rail_width; the dockspace host below fills the remainder, so no
+  // view ever overlaps the rail. Chrome — NoTitleBar/NoResize/NoMove/NoDocking —
+  // so it can never be closed or docked (D-tool_rail-3).
+  ImGui::SetNextWindowPos(work_pos);
+  ImGui::SetNextWindowSize(ImVec2(k_rail_width, work_size.y));
+  const ImGuiWindowFlags rail_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                                      ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings;
+  if (ImGui::Begin(tool_rail_title(), nullptr, rail_flags)) {
+    draw_tool_rail(*this);
+  }
+  ImGui::End();
+
+  // The uniform dockspace host fills the work area to the RIGHT of the rail — a
+  // borderless, immovable host window carrying the DockSpace node, no reserved
+  // central node so every node is a peer (D18 / D-dockspace-5). NoBringToFront so
+  // the docked view windows always render above the host.
+  const ImVec2 host_size(work_size.x - k_rail_width, work_size.y);
+  ImGui::SetNextWindowPos(ImVec2(work_pos.x + k_rail_width, work_pos.y));
+  ImGui::SetNextWindowSize(host_size);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  const ImGuiWindowFlags host_flags =
+      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+  ImGui::Begin("##dockspace_host", nullptr, host_flags);
+  ImGui::PopStyleVar(3);
+  // The node id is hashed against the host window; it is stable per frame and is
+  // what the DockBuilder seed + every view's DockBuilderDockWindow target.
+  dockspace_id_ = ImGui::GetID("dockspace");
+  ImGui::DockSpace(dockspace_id_, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
 
   if (!layout_.empty() && (!built_ || rebuild_)) {
     // Seed / re-seed the live tree from the authoritative DockLayout: on the
@@ -74,12 +148,13 @@ void Dockspace::draw() {
     // per the model (the model is the source of truth — D-view-registry-6).
     ImGui::DockBuilderRemoveNode(dockspace_id_);
     ImGui::DockBuilderAddNode(dockspace_id_, ImGuiDockNodeFlags_DockSpace);
-    ImGui::DockBuilderSetNodeSize(dockspace_id_, viewport->WorkSize);
+    ImGui::DockBuilderSetNodeSize(dockspace_id_, host_size);
     build_node(dockspace_id_, layout_.root());
     ImGui::DockBuilderFinish(dockspace_id_);
     built_ = true;
     rebuild_ = false;
   }
+  ImGui::End(); // ##dockspace_host
 
   // Draw every open view by its instance id; a cleared p_open (the tab ✕) routes
   // through the L1 close so the model stays authoritative.

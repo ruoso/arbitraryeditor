@@ -76,8 +76,9 @@ task editor "Editor — host GUI over libarbc" {
     task tool_rail "Fixed tool rail + view launcher (home base)" {
       effort 1.5d
       allocate team
+      complete 100
       depends !view_registry
-      note "The thin left rail: modal tools (select/brush/eyedropper/camera/import/pan) plus the view launcher that reopens any closed view. Since anything (even every canvas) can be closed, the rail is the home base that can never leave you empty. Design: D18. Refinement: tasks/refinements/tool_rail.md"
+      note "The thin left rail: modal tools (select/brush/eyedropper/camera/import/pan) plus the view launcher that reopens any closed view. Since anything (even every canvas) can be closed, the rail is the home base that can never leave you empty. Design: D18. Refinement: tasks/refinements/editor/tool_rail.md"
     }
     task workspaces "Saved layout presets (local UI state)" {
       effort 2d
@@ -152,6 +153,12 @@ task editor "Editor — host GUI over libarbc" {
       allocate team
       depends !view
       note "Pan/zoom drives the active viewport camera (transient); a scale bar in composition units (no phantom %); deep-zoom rebasing surfaced from HostViewport. Design: D2. Refinement: tasks/refinements/camera_nav.md"
+    }
+    task tool_dispatch "Route ToolSelection into canvas pointer-gesture dispatch" {
+      effort 2d
+      allocate team
+      depends editor.dock.tool_rail, editor.cells.gizmo, editor.canvas.nav
+      note "Route dockmodel::ToolSelection active tool into the canvas interaction handler so a canvas pointer gesture dispatches per active tool (Select/Brush/Eyedropper/Pan); promote the tool->behavior seam into interact (hit-test/gizmo/brush math). Source of debt: tasks/refinements/editor/tool_rail.md (D20/A11). Design: docs/00-design.md D20, docs/01-architecture.md A11."
     }
   }
 
@@ -294,7 +301,7 @@ task editor "Editor — host GUI over libarbc" {
     task package "Installable editor artifacts per platform" {
       effort 3d
       allocate team
-      depends editor.panels.overview, editor.panels.color, editor.cameras.export, editor.paint.paint_res, editor.paint.retouch_stack, editor.import.paste, editor.import.nested, editor.cells.gizmo, editor.cells.resolution, editor.canvas.nav, editor.cameras.manip, editor.cameras.look_through, editor.project.exec_new, editor.project.undo, editor.project.gc, editor.dock.tool_rail, editor.dock.workspaces
+      depends editor.panels.overview, editor.panels.color, editor.cameras.export, editor.paint.paint_res, editor.paint.retouch_stack, editor.import.paste, editor.import.nested, editor.cells.gizmo, editor.cells.resolution, editor.canvas.nav, editor.canvas.tool_dispatch, editor.cameras.manip, editor.cameras.look_through, editor.project.exec_new, editor.project.undo, editor.project.gc, editor.dock.tool_rail, editor.dock.workspaces
       note "Bundle the editor as an installable artifact per platform (AppImage/.dmg/.msi or CPack equivalents), embedding fonts/icons and staging the runtime. Gathers the feature-complete editor. Refinement: tasks/refinements/package.md"
     }
   }
