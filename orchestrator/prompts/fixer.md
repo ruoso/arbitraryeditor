@@ -6,13 +6,12 @@ failing step for **`$task_id`**.
 
 The implementer has already landed code changes against the refinement at
 **`$refinement_path`**. The driver ran `clang-format -i` (pure formatting
-fixup) and then the verification chain — `scripts/gate` (configure + build
-+ ctest + format check + levelization + claims register), then a local
-replay of the per-push CI (`.github/workflows/ci.yml`) via `act` in docker
-containers: the `lint` job, every `build-test` matrix leg except
-`msvc-debug` (gcc/clang × debug/release/asan/tsan/rtsan), and the
-`coverage` job with its diff-coverage gate — stopping at the first
-failure. Your job is to diagnose that failure and make a fix so the next
+fixup) and then the verification chain — `scripts/gate` (check_levels +
+format check + configure + build + ctest), then a local replay of the
+per-push CI (`.github/workflows/ci.yml`) via `act` in docker containers: the
+`lint` job, every `build-test` matrix leg (gcc/clang ×
+debug/release/asan/tsan), and the `coverage` job with its diff-coverage gate —
+stopping at the first failure. Your job is to diagnose that failure and make a fix so the next
 driver-run of the chain passes.
 
 A failing `ci-*` step's log is `act` output: the workflow step that failed
@@ -56,8 +55,7 @@ $prior_attempts
 
 Use **`Task(subagent_type="Explore", ...)`** against `$failing_log` to
 extract the failure surface: the first compiler error, the failing test
-name + assertion, the levelization/claims-check violation line, or the
-sanitizer report. The headless-mode name for the agent-spawning tool is
+name + assertion, the `check_levels` violation line, or the sanitizer report. The headless-mode name for the agent-spawning tool is
 `Task`, not `Agent`. Do NOT pipe to `tail` (it truncates blindly — with
 `-Werror` the first error is what matters, not the last) and do NOT `Read`
 the log file directly (it floods your context with noise). The Explore
@@ -74,16 +72,13 @@ before editing.
   a bug or stale assumption. Tests are the contract; making them pass by
   weakening them is never the right answer. Goldens regenerate only when
   the refinement scopes the rendering change that justifies it.
-- A **levelization failure** (`check_levels.py`) means the code's include
-  or dependency structure violates doc 17 — restructure the code (move the
-  type, invert the dependency, use the designed seam); NEVER edit the
-  checker's table to make it pass.
-- A **claims failure** (`check_claims.py`) means a registered claim lost
-  its enforcing test or an `enforces:` tag names an unregistered claim —
-  restore the test or fix the registry entry per doc 16, whichever encodes
-  the truth.
-- A **sanitizer failure** in an asan/tsan/rtsan lane is a real bug even
-  when the plain gate passed — fix the root cause, never suppress.
+- A **levelization failure** (`check_levels.py`) means the code's include or
+  dependency structure violates the §8 DAG — or the L1 core gained an
+  ImGui/GL/SDL include (the A8 seam). Restructure the code (move the type,
+  invert the dependency, use the designed seam); NEVER edit the checker's table
+  to make it pass.
+- A **sanitizer failure** in an asan/tsan lane is a real bug even when the
+  plain gate passed — fix the root cause, never suppress.
 - A **diff-coverage failure** (`ci-coverage`) means the changed lines are
   under-tested (the gate requires 90% of changed lines covered) — add
   tests for the uncovered branches; do not pad with trivial code motion.
@@ -103,9 +98,8 @@ before editing.
 - **DO NOT touch the refinement's `## Status` section.** Closer territory.
 - **DO NOT weaken tests** to make them pass.
 - **DO NOT edit the gate or the checkers** (`scripts/gate`,
-  `scripts/check_levels.py`, `scripts/check_claims.py`, `.clang-format`,
-  `.clang-tidy`, `.github/workflows/`, `.github/act/`, `.actrc`) — fix the
-  code, not the bar.
+  `scripts/check_levels.py`, `.clang-format`, `.github/workflows/`,
+  `.github/act/`, `.actrc`) — fix the code, not the bar.
 
 ## Don't pre-run the verification chain
 

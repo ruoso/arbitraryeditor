@@ -15,13 +15,12 @@ or on disk.
 The driver ran the canonical verification chain deterministically before
 invoking you, and every step passed:
 
-- `scripts/gate` — configure + build + ctest + clang-format check +
-  levelization + claims register.
+- `scripts/gate` — check_levels (levelization + the A8 seam) + clang-format
+  check + configure + build + ctest.
 - A local containerized replay of the per-push CI
-  (`.github/workflows/ci.yml` via `act`): the `lint` job, every
-  `build-test` matrix leg except `msvc-debug` (gcc/clang ×
-  debug/release/asan/tsan/rtsan), and the `coverage` job with its
-  diff-coverage gate.
+  (`.github/workflows/ci.yml` via `act`): the `lint` job, every `build-test`
+  matrix leg (gcc/clang × debug/release/asan/tsan), and the `coverage` job with
+  its diff-coverage gate.
 
 The exact results are listed below under §Verification results. You do NOT
 need to re-run any step. Trust the block — that's what it's for. Paste
@@ -115,8 +114,8 @@ from the diff (`git diff --stat` to confirm).
 ### 2. Mark the task complete in the WBS
 
 Add `complete 100` immediately after `allocate team` in the matching task
-block in `tasks/<NN>-<area>.tji` (the area is the first dot-segment of
-`$task_id`). While there, if the task's `note` line does not yet end with
+block in `tasks/00-editor.tji` (all editor leaves live in that one file).
+While there, if the task's `note` line does not yet end with
 `Refinement: $refinement_path`, append that pointer to the note string
 (keeping the existing design-doc citations) — the WBS is the index into
 the refinements.
@@ -191,9 +190,9 @@ the governing design doc(s)>
 <bulleted list of files with one-line each>
 
 Verification (driver-run, deterministic chain — see $test_results):
-  - `scripts/gate` — green (build, ctest, format, levelization, claims).
+  - `scripts/gate` — green (check_levels, format, build, ctest).
   - Local CI replay (`ci.yml` via act) — lint, gcc/clang ×
-    debug/release/asan/tsan/rtsan, coverage + diff-coverage gate: green.
+    debug/release/asan/tsan, coverage + diff-coverage gate: green.
   - <task-specific verification if any>.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
@@ -225,8 +224,7 @@ entry you appended.
 
 - `tasks/refinements/README.md` — refinement shape + task-completion
   ritual (authoritative for the ritual you're running).
-- `docs/design/16-sdlc-and-quality.md` — the quality rules the chain
-  enforces.
+- `docs/01-architecture.md` §9 — the testing/DoD the chain enforces.
 
 ## Return contract
 

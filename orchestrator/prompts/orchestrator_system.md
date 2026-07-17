@@ -80,11 +80,10 @@ Once the `implementer` returns, the driver takes over and runs a
 deterministic chain (not visible to you as separate orchestrator turns):
 
 - Run `clang-format -i` over the tree (pure formatting fixup), then the
-  verification chain: `scripts/gate` (configure + build + ctest + format
-  check + levelization + claims register), then a local containerized
-  replay of the per-push CI (`.github/workflows/ci.yml` via `act`): the
-  `lint` job, every `build-test` matrix leg except `msvc-debug`
-  (gcc/clang × debug/release/asan/tsan/rtsan), and the `coverage` job
+  verification chain: `scripts/gate` (check_levels + format check + configure +
+  build + ctest), then a local containerized replay of the per-push CI
+  (`.github/workflows/ci.yml` via `act`): the `lint` job, every `build-test`
+  matrix leg (gcc/clang × debug/release/asan/tsan), and the `coverage` job
   including its 90% diff-coverage gate.
 - If any step fails, dispatch a `fixer` sub-agent against the failing log
   and loop back to verification, up to a hard cap. If the cap is exhausted
@@ -151,9 +150,10 @@ Heuristics, in rough order of weight:
    itself a tech-debt leaf added under the registration policy — picking it
    pays down debt instead of accruing it. This usually wins.
 2. **Foundation / seam tasks before consumer tasks.** The levelization
-   (design doc 17) makes this concrete: a lower-level component's leaf
-   (pool before model before contract before engines) unblocks more
-   successors and settles interfaces consumers would otherwise guess at.
+   (`docs/01-architecture.md` §8) makes this concrete: a lower-level
+   component's leaf (base/project/scene before render before views/dock)
+   unblocks more successors and settles interfaces consumers would otherwise
+   guess at.
 3. **Composability with recent work.** Prefer a leaf whose surface composes
    cleanly with the most recent commit's work; this keeps future-reader
    context coherent and reduces the chance of small reverts.
@@ -238,8 +238,7 @@ Include:
   dispatched?) so you know which sub-agent comes next.
 - The active workstream for this worktree, stated explicitly so sibling
   orchestrators can avoid it.
-- Coverage trend notes (claims-register / conformance-suite growth you're
-  watching).
+- Coverage / test-suite growth you're watching (L1 units, e2e, goldens).
 - Any deferred design questions you said "decide next time."
 - The last 3–5 commits in a one-line trail so you don't immediately re-pick
   something adjacent.
@@ -288,19 +287,18 @@ The sub-agent template files (`orchestrator/prompts/<template>.md`) embed
 these policies — you do not need to repeat them in `vars`. But you should be
 aware they exist and reflect them in your picking:
 
-- **Design docs are the constitution** — `docs/design/00-…17` are normative
-  (design doc 16). A change that alters designed behavior updates the
-  governing design doc in the same commit; genuinely new design-level
-  decisions land as doc deltas plus a decision record in doc 00. The
-  refinement_writer owns making the call and writing the delta.
-- **Claims-register growth** — when a task lands a behavior the design docs
-  promise, its tests should register and enforce the claim
-  (`tests/claims/registry.tsv` + `enforces:` tags — doc 16). If claims
-  count stays flat across many commits, call it out in the next pick
-  reasoning and steer toward a task that grows it.
-- **Conformance-suite coverage** — every new content kind (and operator)
-  runs the contract conformance suite; kinds tasks that skip it are
-  incomplete by definition.
+- **Design docs are the constitution** — `docs/00-design.md` (D1-D19) and
+  `docs/01-architecture.md` (A1-A9) are normative. A change that alters a
+  decided behavior updates the governing doc in the same commit; genuinely new
+  design-level decisions land as a `D<n>`/`A<n>` delta. The refinement_writer
+  owns making the call and writing the delta.
+- **Levelization holds** — every leaf keeps `check_levels` clean; the L1
+  UI-agnostic core (project/scene/interact/commands/dockmodel) never gains an
+  ImGui/GL/SDL include (the A8 seam). A task that would breach it is mis-scoped.
+- **Test-pyramid coverage** — every leaf lands the tests its DoD requires
+  (`docs/01-architecture.md` §9): Catch2 L1 units for logic, `render_offline`
+  goldens for rendered output, ImGui Test Engine e2e for UI. A leaf that skips
+  the tests its surface needs is incomplete by definition.
 - **Tech-debt registration** — every follow-up task is a real WBS leaf, not
   a Status-block note, AND is wired into a milestone's `depends` (a task no
   milestone gates is an orphan — `unblocked.py` prints an ORPHANS audit).
@@ -329,8 +327,9 @@ aware they exist and reflect them in your picking:
 You don't read these — the sub-agent templates reference them so the
 sub-agents know what to load:
 
-- `docs/design/` — the seventeen design docs (canonical, normative).
+- `docs/00-design.md` (D1-D19) + `docs/01-architecture.md` (A1-A9) — the design
+  docs (canonical, normative).
 - `tasks/refinements/README.md` — refinement shape + task-completion ritual.
-- `tasks/refinements/<area>/<task_name>.md` — refinement path convention.
+- `tasks/refinements/<task_name>.md` — refinement path convention.
 - `scripts/gate` — the canonical verification entry point.
-- `tests/claims/registry.tsv` — the claims register.
+- `scripts/check_levels.py` — the levelization DAG + testability seam (§8).

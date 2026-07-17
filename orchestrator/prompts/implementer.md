@@ -19,10 +19,9 @@ Read the refinement in full first, and the design-doc sections it cites.
 The orchestrator driver runs `clang-format -i` as a deterministic
 auto-fixup, then runs the canonical verification chain the moment you
 return: `scripts/gate`, then a local containerized replay of the per-push
-CI (`.github/workflows/ci.yml` via `act`) — lint, every `build-test`
-matrix leg except `msvc-debug` (gcc/clang × debug/release/asan/tsan/
-rtsan), and the coverage job with its 90% diff-coverage gate on changed
-lines. If any chain step fails, the driver dispatches a `fixer` sub-agent
+CI (`.github/workflows/ci.yml` via `act`) — lint, every `build-test` matrix
+leg (gcc/clang × debug/release/asan/tsan), and the coverage job with its 90%
+diff-coverage gate on changed lines. If any chain step fails, the driver dispatches a `fixer` sub-agent
 against the failing log; you do not see that loop. If everything passes,
 the driver dispatches the `closer` sub-agent which commits the result.
 
@@ -67,26 +66,26 @@ $additional_context
 
 ## Hard rules
 
-- **Respect the levelization** (design doc 17): a component may only
-  include from its declared dependency closure — `scripts/check_levels.py`
-  fails the gate otherwise. If the refinement requires an edge the doc 17
-  table forbids, STOP and report; do not "fix" the checker.
-- **No new dependencies** without the refinement scoping them under
-  doc 10's minimal-vetted-deps policy (the refinement_writer should have
-  produced the design-doc delta; if a fresh dependency surfaces during
-  implementation, STOP and report — do not add it autonomously).
-- **No test weakening**: never delete or loosen an assertion, a claim, a
-  golden, or a tolerance to get past the gate. Goldens regenerate only when
-  the refinement scopes the rendering change that justifies it.
+- **Respect the levelization** (`docs/01-architecture.md` §8): a component may
+  only include from its declared dependency closure, and the L1 UI-agnostic
+  core never includes ImGui/GL/SDL (the A8 seam) — `scripts/check_levels.py`
+  fails the gate otherwise. If the refinement requires an edge the §8 DAG
+  forbids, STOP and report; do not "fix" the checker.
+- **No new dependencies** without the refinement scoping them (the
+  refinement_writer should have produced the doc delta; if a fresh dependency
+  surfaces during implementation, STOP and report — do not add it
+  autonomously).
+- **No test weakening**: never delete or loosen an assertion, a golden, or a
+  tolerance to get past the gate. Goldens regenerate only when the refinement
+  scopes the rendering change that justifies it.
 - **No gate/CI tampering**: do not edit `scripts/gate`,
-  `scripts/check_levels.py`, `scripts/check_claims.py`, `.clang-format`,
-  `.clang-tidy`, or `.github/workflows/` unless the refinement explicitly
-  scopes it.
-- If the refinement scopes claims-register entries, conformance-suite runs,
-  goldens, or counter assertions, they are part of the implementation — a
-  refinement that scopes them and an implementation that skips them is
-  incomplete. If a scoped test cannot be written (missing seam), STOP and
-  report rather than silently landing without it.
+  `scripts/check_levels.py`, `.clang-format`, or `.github/workflows/` unless
+  the refinement explicitly scopes it.
+- If the refinement scopes tests (Catch2 L1 units, `render_offline` goldens,
+  ImGui Test Engine e2e), they are part of the implementation — a refinement
+  that scopes them and an implementation that skips them is incomplete. If a
+  scoped test cannot be written (missing seam), STOP and report rather than
+  silently landing without it.
 - DO NOT touch any `.tji` file or the refinement's `## Status` section —
   that's the closer's job.
 - DO NOT commit — the closer does that too.
@@ -94,8 +93,8 @@ $additional_context
 
 ## New test additions still in scope
 
-If the refinement scopes a new unit test, golden, counter assertion, claim,
-or conformance run, write it as part of your implementation work. The
+If the refinement scopes a new Catch2 unit test, a `render_offline` golden, or
+an ImGui Test Engine e2e, write it as part of your implementation work. The
 driver will execute it via the gate afterwards. Likewise: if the refinement
 DEFERS a test addition, do not add one — note the deferral in your return
 summary so the closer can register the follow-up task in the WBS.
@@ -121,8 +120,8 @@ named follow-up tasks (with stable ids) get registered into the WBS.
 ## Reference paths
 
 - `tasks/refinements/README.md` — refinement shape + task-completion ritual.
-- `docs/design/` — the design docs (normative; doc 16 = quality rules,
-  doc 17 = component levelization).
+- `docs/00-design.md` (D1-D19) + `docs/01-architecture.md` (A1-A9) — the design
+  docs (normative; §8 = levelization, §9 = testing/DoD).
 - `scripts/gate` — what the driver will run against your tree.
 
 ## Return contract
@@ -131,8 +130,8 @@ When done, your final assistant message must be a short summary
 (≤ 8 lines):
 
 - Files created / edited (paths only).
-- Test additions you wrote (if any): kind + name(s) (unit / golden /
-  counter / claim id / conformance) or `none`.
+- Test additions you wrote (if any): kind + name(s) (Catch2 unit / golden /
+  ImGui Test Engine e2e) or `none`.
 - Whether a refinement-scoped test was deferred (and why) — `n/a` if all
   scoped tests landed.
 - Any tech-debt follow-up task proposed (stable id + one-line description)

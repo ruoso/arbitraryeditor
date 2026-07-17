@@ -16,9 +16,9 @@ or on disk.
   shared decisions, particularly around <relevant topic>") rather than
   N `Read` calls.
 - Walking the predecessor refinements named in `depends`.
-- Surveying the governing design docs (`docs/design/`) for the sections that
-  already settle a question you surface — the WBS task's `note` line names
-  its docs.
+- Surveying the governing design docs (`docs/00-design.md` D1-D19,
+  `docs/01-architecture.md` A1-A9) for the decisions that already settle a
+  question you surface — the WBS task's `note` line names its decisions.
 - Searching the existing component sources for the seams this task extends.
 
 Explore runs cheap and returns a tight summary, keeping this session's
@@ -52,9 +52,9 @@ $additional_context
 First locate the task's block in the matching `tasks/<NN>-<area>.tji` file
 (the area is the first dot-segment of `$task_id`) to get the effort
 estimate, dependency list, and the `note` line naming the governing design
-docs. Then read the named design-doc sections — they are normative
-(doc 16): the refinement's job is to turn the doc's promises into a
-concrete, testable work order, not to redesign them. Then read sibling
+docs. Then read the named design-doc sections — they are
+normative (the constitution): the refinement's job is to turn the doc's
+promises into a concrete, testable work order, not to redesign them. Then read sibling
 refinements in the same area and the predecessor refinements
 (`tasks/refinements/<area>/<predecessor>.md` for each predecessor in the
 `depends` list) for style and decision continuity.
@@ -71,9 +71,10 @@ Cover, in order:
 - Inputs / context (real file paths with line numbers, design-doc sections —
   no invented references)
 - Constraints / requirements
-- Acceptance criteria (testable — name the claims-register entries, golden
-  tests, behavioral-counter assertions, or conformance-suite runs that pin
-  the behavior)
+- Acceptance criteria (testable — name the SPECIFIC tests that instantiate the
+  universal definition of done for this leaf: Catch2 L1 unit tests for logic,
+  `render_offline` goldens for rendered output, ImGui Test Engine e2e for UI,
+  ASan/TSan for threading, and `check_levels` staying clean)
 - Decisions (with rationale for chosen options against alternatives)
 - Open questions (`(none — all decided)` if everything settled)
 
@@ -82,41 +83,43 @@ Leave the `## Status` heading present with placeholder text
 
 ## Design-doc-level decisions
 
-When the refinement surfaces an architectural question, first check whether
-`docs/design/` already settles it — most are settled; the docs are the
-constitution. Where a genuine gap exists, make the most defensible call
-yourself and document the alternatives + rationale under Decisions. Bias
-toward: reusing existing seams, the simpler abstraction with one or two
-call sites today, test coverage that pins observable behavior, and patterns
-the predecessor refinements established.
+When the refinement surfaces a design question, first check whether
+`docs/00-design.md` (D1-D19) or `docs/01-architecture.md` (A1-A9) already
+settles it — most are settled; the docs are the constitution. Where a genuine
+gap exists, make the most defensible call yourself and document the
+alternatives + rationale under Decisions. Bias toward: reusing existing seams,
+respecting the levelization DAG (§8), the simpler abstraction with one or two
+call sites today, tests that pin observable behavior, and patterns the
+predecessor refinements established.
 
-Genuinely design-level decisions (a new dependency per doc 10's policy, a
-new architectural seam, a deviation from a design doc's stated behavior)
-require a **design-doc delta**: edit the governing `docs/design/NN-*.md`
-(and add a decision-record bullet in `docs/design/00-overview.md` when the
-decision is project-shaping), and reference the delta from the refinement.
-Doc 16's rule is same-commit: your doc edit rides in the closer's commit
+Genuinely design-level decisions (a new external dependency, a new
+architectural seam, a deviation from a stated decision) require a **doc delta**:
+add a `D<n>` row to `docs/00-design.md` (UI/UX) or an `A<n>` row to
+`docs/01-architecture.md` (structure/build), and reference the delta from the
+refinement. The rule is same-commit: your doc edit rides in the closer's commit
 with the rest of the task.
 
-## Testing policy (doc 16)
+## Testing policy — the universal definition of done
 
-- **Claims-register growth**: if this task lands a behavior a design doc
-  promises ("static layers' tiles survive clock advance", "release
-  enqueues, never destroys inline"), scope a claims-register entry
-  (`tests/claims/registry.tsv` + an `enforces: <claim-id>` tagged test)
-  under Acceptance criteria.
-- **Content kinds and operators** must run the contract conformance suite
-  (`arbc-testing` once it exists; the contract stream's suite tasks
-  otherwise) — scope that explicitly.
-- **Deterministic rendering work** gets byte-exact goldens; tolerances are
-  the justified exception, never the default.
-- **Performance-shaped promises** get behavioral-counter assertions
-  ("playback of a still scene issues zero renders"), never wall-clock
-  assertions.
-- **Coverage**: CI gates ≥90% diff coverage on changed lines — tests are
-  part of the task, not a follow-up.
-- **Concurrency-touching tasks** (pool, model publish/pin, audio engine)
-  scope their TSan/stress coverage explicitly.
+Every leaf carries the same DoD (`docs/01-architecture.md` §9); the
+refinement's job is to name the SPECIFIC tests that instantiate it here:
+
+- **Levelization**: the work respects the component DAG (§8) and `check_levels`
+  stays clean. If it adds a component or a dependency edge, say so and why it is
+  legal (the L1 core never gains an ImGui/GL/SDL include).
+- **L1 logic** (`project`/`scene`/`interact`/`commands`/`dockmodel` — the
+  UI-agnostic core) gets **Catch2 unit tests**, headless. This is the bulk of
+  the coverage.
+- **Rendered output** (canvas composition, export) gets a **golden** compared
+  against libarbc's byte-exact `render_offline`; tolerances are the justified
+  exception, never the default.
+- **UI behavior** (`views`/`dock` — anything a user drives) gets an **ImGui
+  Test Engine** e2e that drives it headless by widget id and asserts the
+  resulting state (+ a screenshot baseline where it adds signal).
+- **Threading** (the UI↔driver handoff, multi-canvas) scopes **ASan/TSan**
+  coverage explicitly.
+- **Coverage**: CI gates ≥90% diff coverage on changed lines — tests ship with
+  the task, not as a follow-up.
 
 ## Tech-debt registration
 
@@ -146,8 +149,8 @@ re-examination as a WBS task.
 
 ## File scope
 
-- WRITE: `$refinement_path` (the refinement) and, when needed, a design-doc
-  delta under `docs/design/`.
+- WRITE: `$refinement_path` (the refinement) and, when needed, a doc delta in
+  `docs/00-design.md` or `docs/01-architecture.md`.
 - DO NOT edit any other file. DO NOT touch any `.tji` file — the
   orchestrator / closer own the WBS shape.
 - DO NOT commit — the closer does that.
@@ -156,10 +159,12 @@ re-examination as a WBS task.
 ## Reference paths
 
 - `tasks/refinements/README.md` — refinement shape + task-completion ritual.
-- `docs/design/` — the design docs (00 overview/decisions … 17 components).
-- `docs/design/16-sdlc-and-quality.md` — testing taxonomy, claims register.
-- `docs/design/17-internal-components.md` — component levelization the
-  implementation must respect (CI-enforced).
+- `docs/00-design.md` — the UI/UX design (D1-D19).
+- `docs/01-architecture.md` — binding, threading, the component levelization
+  DAG (§8, CI-enforced by `scripts/check_levels.py`) and the testing/DoD model
+  (§9).
+- The library's public API is consumed via FetchContent; its design docs live
+  in the `arbitrarycomposer` repo.
 
 ## Return contract
 
