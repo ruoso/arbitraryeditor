@@ -18,6 +18,11 @@ echo "gate: check_levels"
 python3 scripts/check_levels.py
 
 echo "gate: clang-format"
+# `--cached --others --exclude-standard` covers tracked *and* untracked
+# sources so a freshly-written, not-yet-added file is still checked. The
+# driver's pre-gate `clang-format -i` fixup (orchestrator/driver.py,
+# AUTO_FORMAT_STEP) mirrors this exact selection — keep the two in sync so
+# whatever this gate checks, the driver has already formatted.
 mapfile -t files < <(git ls-files --cached --others --exclude-standard '*.cpp' '*.hpp' '*.h' 2>/dev/null || true)
 if command -v clang-format >/dev/null 2>&1 && [ "${#files[@]}" -gt 0 ]; then
   clang-format --dry-run --Werror "${files[@]}"

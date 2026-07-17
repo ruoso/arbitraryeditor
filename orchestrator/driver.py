@@ -71,9 +71,21 @@ MAX_FIXER_ATTEMPTS = 10
 # the gate's `clang-format --dry-run -Werror` check gets a chance to fail.
 # Its return code is informational only; a non-zero exit (e.g. an
 # unparseable file) is surfaced by the verification chain anyway.
+#
+# The file selection mirrors the gate's format check (scripts/gate) exactly:
+# `--cached --others --exclude-standard` covers both tracked and *untracked*
+# sources (a new, not-yet-added file the implementer just wrote), so the
+# fixup formats everything the gate later checks. Extensions match the gate
+# too (.cpp/.hpp/.h). Kept in sync deliberately — drift here reintroduces the
+# "untracked file never got formatted, gate then fails on it" gap.
 AUTO_FORMAT_STEP: tuple[str, list[str]] = (
     "format",
-    ["bash", "-c", "git ls-files '*.cpp' '*.hpp' | xargs -r clang-format -i"],
+    [
+        "bash",
+        "-c",
+        "git ls-files --cached --others --exclude-standard "
+        "'*.cpp' '*.hpp' '*.h' | xargs -r clang-format -i",
+    ],
 )
 
 # Verification chain run deterministically by the driver after every
