@@ -44,8 +44,9 @@ task editor "Editor — host GUI over libarbc" {
     task platform_services "PlatformServices seam (file / threads / clock)" {
       effort 2d
       allocate team
+      complete 100
       depends !app_shell
-      note "A thin interface over directory/file access, thread spawn, and clock; native implementation (std filesystem + threads). The one seam the future web port swaps (File System Access / OPFS / Emscripten pthreads) without touching app or UI code. Arch A3. Refinement: tasks/refinements/platform_services.md"
+      note "A thin interface over directory/file access, thread spawn, and clock; native implementation (std filesystem + threads). The one seam the future web port swaps (File System Access / OPFS / Emscripten pthreads) without touching app or UI code. Arch A3. Refinement: tasks/refinements/foundation/platform_services.md"
     }
     task render_probe "Render a trivial Document into a canvas texture" {
       effort 2d

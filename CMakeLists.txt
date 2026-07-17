@@ -133,7 +133,7 @@ endfunction()
 
 # L0
 ace_component(base)
-ace_component(platform DEPENDS base)
+ace_component(platform DEPENDS base LIBS Threads::Threads)
 # gl issues the shell's raw GLES3/WebGL2-subset draw calls (viewport/clear), so
 # it links libGLESv2; ImGui owns its own backend GL (docs A2/A3, refinement §2).
 ace_component(gl DEPENDS base LIBS ${ACE_GLES_LIBRARY})
@@ -166,9 +166,10 @@ target_link_libraries(arbitraryeditor PRIVATE ace::app)
 
 # ---- tests (Catch2 comes from libarbc) -------------------------------------
 enable_testing()
-add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp)
-target_link_libraries(ace_tests PRIVATE ace::interact ace::project arbc::arbc
-                                        Catch2::Catch2WithMain)
+add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
+                         tests/platform_test.cpp)
+target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::platform
+                                        arbc::arbc Catch2::Catch2WithMain)
 add_test(NAME ace_tests COMMAND ace_tests)
 
 # The app_shell test suite (docs §9): the pure frame-loop predicate (Catch2
