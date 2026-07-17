@@ -1,4 +1,5 @@
 #include <ace/dock/dock.hpp>
+#include <ace/dockmodel/view_registry.hpp>
 #include <ace/views/views.hpp>
 
 #include <imgui.h>
@@ -6,12 +7,13 @@
 
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace ace::dock {
 namespace {
 
-constexpr const char* k_panel_a_title = "Panel A";
-constexpr const char* k_panel_b_title = "Panel B";
+using ace::dockmodel::SplitOrientation;
+using ace::dockmodel::ViewType;
 
 // Recursively translate a DockLayout subtree into ImGui dock nodes rooted at
 // `node_id`: a split creates two children (H → left|right, V → top|bottom) and
@@ -24,9 +26,8 @@ void build_node(ImGuiID node_id, const ace::dockmodel::DockNode& node) {
     }
     return;
   }
-  const ImGuiDir dir = node.orientation == ace::dockmodel::SplitOrientation::Horizontal
-                           ? ImGuiDir_Left
-                           : ImGuiDir_Up;
+  const ImGuiDir dir =
+      node.orientation == SplitOrientation::Horizontal ? ImGuiDir_Left : ImGuiDir_Up;
   ImGuiID first_id = 0;
   ImGuiID second_id = 0;
   ImGui::DockBuilderSplitNode(node_id, dir, static_cast<float>(node.ratio), &first_id, &second_id);
@@ -34,49 +35,82 @@ void build_node(ImGuiID node_id, const ace::dockmodel::DockNode& node) {
   build_node(second_id, node.children[1]);
 }
 
-// A plain placeholder pane. Always paired End() (docked windows still require
-// it). Real view content arrives with editor.dock.view_registry.
-void draw_panel(const char* title) {
-  if (ImGui::Begin(title)) {
-    ImGui::TextUnformatted("Placeholder pane — editor.dock.view_registry supplies real views.");
-  }
-  ImGui::End();
-}
-
 } // namespace
 
 const char* name() { return "dock"; }
 
-const char* panel_a_title() { return k_panel_a_title; }
-
-const char* panel_b_title() { return k_panel_b_title; }
-
-ace::dockmodel::DockLayout default_layout() {
-  return ace::dockmodel::DockLayout::make_default(
-      {ace::views::probe_pane_title(), panel_a_title(), panel_b_title()});
+std::vector<ViewType> default_initial_views() {
+  return {ViewType::Canvas, ViewType::Inspector, ViewType::Layers, ViewType::Overview};
 }
 
-Dockspace::Dockspace(ace::dockmodel::DockLayout layout) : layout_(std::move(layout)) {}
+Dockspace::Dockspace(std::vector<ViewType> initial) {
+  if (initial.empty()) {
+    return;
+  }
+  // The first view fills a lone root leaf; the second splits off a panel column;
+  // the rest tab into that column. Minting flows through the registry so the
+  // instance ids and the multi-instance counter stay consistent with the layout.
+  const std::string canvas = registry_.open(layout_, initial.front());
+  if (initial.size() == 1) {
+    return;
+  }
+  const std::string column = registry_.mint_id(initial[1]);
+  layout_.split_leaf(canvas, SplitOrientation::Horizontal, 0.62, column);
+  for (std::size_t i = 2; i < initial.size(); ++i) {
+    layout_.insert_tab(column, registry_.mint_id(initial[i]));
+  }
+}
 
 void Dockspace::draw() {
   const ImGuiViewport* viewport = ImGui::GetMainViewport();
   // Full-window uniform dockspace over the main viewport, no reserved central
   // node — every node is a peer (D18 / D-dockspace-5). The returned id is stable
-  // per viewport, so it is safe to build against on the first frame.
+  // per viewport, so it is safe to build against.
   dockspace_id_ = ImGui::DockSpaceOverViewport(0, viewport, ImGuiDockNodeFlags_None);
 
-  if (!built_ && !layout_.empty()) {
-    // Seed the live tree from the DockLayout exactly once; ImGui owns it after.
+  if (!layout_.empty() && (!built_ || rebuild_)) {
+    // Seed / re-seed the live tree from the authoritative DockLayout: on the
+    // first frame, and after a programmatic open/reopen so the new window docks
+    // per the model (the model is the source of truth — D-view-registry-6).
     ImGui::DockBuilderRemoveNode(dockspace_id_);
     ImGui::DockBuilderAddNode(dockspace_id_, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspace_id_, viewport->WorkSize);
     build_node(dockspace_id_, layout_.root());
     ImGui::DockBuilderFinish(dockspace_id_);
     built_ = true;
+    rebuild_ = false;
   }
 
-  draw_panel(panel_a_title());
-  draw_panel(panel_b_title());
+  // Draw every open view by its instance id; a cleared p_open (the tab ✕) routes
+  // through the L1 close so the model stays authoritative.
+  std::vector<std::string> to_close;
+  for (const std::string& id : layout_.view_ids()) {
+    bool open = true;
+    if (ImGui::Begin(id.c_str(), &open)) {
+      views::draw_view(id);
+    }
+    ImGui::End();
+    if (!open) {
+      to_close.push_back(id);
+    }
+  }
+  for (const std::string& id : to_close) {
+    registry_.close(layout_, id);
+  }
 }
+
+std::string Dockspace::open(ViewType type) {
+  std::string id = registry_.open(layout_, type);
+  rebuild_ = true; // the new window must dock into the model layout next frame
+  return id;
+}
+
+std::string Dockspace::reopen(ViewType type) {
+  std::string id = registry_.reopen(layout_, type);
+  rebuild_ = true;
+  return id;
+}
+
+bool Dockspace::close(std::string_view view_id) { return registry_.close(layout_, view_id); }
 
 } // namespace ace::dock

@@ -1,7 +1,9 @@
 #include <ace/app/probe.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/dock/dock.hpp>
+#include <ace/dockmodel/view_registry.hpp>
 #include <ace/gl/gl.hpp>
+#include <ace/views/views.hpp>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -9,6 +11,7 @@
 #include <imgui_impl_sdl3.h>
 
 #include <cstdio>
+#include <string_view>
 
 namespace ace::app {
 namespace {
@@ -149,19 +152,25 @@ int run_editor(const ShellOptions& opts) {
   // (refinement Constraint 8). Owned here in the app layer, not in the shell.
   ProbeView probe;
   probe.upload();
-  // The dockspace host (editor.dock.dockspace) owns the shell's whole draw:
-  // it tiles the main viewport with the placeholder panes, and the render_probe
-  // pane is drawn afterward as the canvas stand-in (DockBuilder docks it by id).
-  ace::dock::Dockspace dockspace(ace::dock::default_layout());
-  shell.set_draw_content([&dockspace, &probe]() {
-    dockspace.draw();
-    probe.draw();
-  });
+  // The Canvas view IS the render_probe pane (D18 "the canvas is a view"): the
+  // app owns the GL texture, so it registers the Canvas body the dockspace draws
+  // inside the canvas window it owns. Every other view type draws a placeholder
+  // until its downstream panel leaf lands (D-view-registry-5).
+  ace::views::register_view_body(ace::dockmodel::ViewType::Canvas,
+                                 [&probe](std::string_view) { probe.draw_content(); });
+  // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
+  // it renders each open view by its instance id and syncs the tab ✕ back into
+  // the authoritative DockLayout.
+  ace::dock::Dockspace dockspace;
+  shell.set_draw_content([&dockspace]() { dockspace.draw(); });
   while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
     shell.new_frame();
     shell.draw_ui();
     shell.render();
   }
+  // Clear the body before the ProbeView it captures is destroyed — the seam is
+  // process-global, so a later shell run must not call into a dangling capture.
+  ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
   probe.destroy();
   shell.shutdown();
   return 0;

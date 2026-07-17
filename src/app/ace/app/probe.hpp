@@ -17,8 +17,13 @@ public:
   // Offline-render the probe (ace::render) and upload it (ace::gl). Requires a
   // current GL context. Idempotent replace is out of scope — call once.
   void upload();
-  // Draw the probe pane (ace::views). No-op-safe with a zero texture handle.
+  // Draw the standalone probe pane (ace::views): its own Begin/Image/End window.
+  // No-op-safe with a zero texture handle.
   void draw() const;
+  // Draw just the probe image into the CURRENT ImGui window — the Canvas view
+  // body the dockspace draws inside the canvas window it owns (D18 "canvas is a
+  // view"). No Begin/End.
+  void draw_content() const;
   // Release the GL texture. Safe to call twice (the destructor also calls it).
   void destroy();
 

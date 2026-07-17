@@ -1,7 +1,5 @@
-#include <ace/app/probe.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/dock/dock.hpp>
-#include <ace/views/views.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -12,16 +10,16 @@
 
 // The dockspace UI e2e (docs/01-architecture.md §9 :189 — "open→dock→select…").
 // It reuses the ImGui Test Engine rig from tests/shell_e2e_test.cpp: boot the
-// shell against the SDL offscreen driver + software GL, install the dockspace
-// draw-content (the same wiring run_editor uses), and drive the D18 mechanics
-// BY STABLE WIDGET ID — presence, tab-select, and drag-to-dock — asserting each
-// against ImGui's live dock tree. No byte-exact golden (software-GL pixels are
-// flaky; the dockspace composes chrome, not a Document — refinement Acceptance).
-using ace::app::ProbeView;
+// shell against the SDL offscreen driver + software GL, install the catalog-
+// driven dockspace draw-content (the same wiring run_editor uses), and drive the
+// D18 mechanics BY STABLE VIEW ID — presence, tab-select, and drag-to-dock —
+// asserting each against ImGui's live dock tree. No byte-exact golden (software-GL
+// pixels are flaky; the dockspace composes chrome, not a Document — refinement
+// Acceptance).
 using ace::app::Shell;
 using ace::app::ShellOptions;
 
-TEST_CASE("dockspace e2e: panes are addressable, tab-select and drag-to-dock work") {
+TEST_CASE("dockspace e2e: views are addressable, tab-select and drag-to-dock work") {
   Shell shell;
   ShellOptions opts;
   opts.headless = true;
@@ -29,16 +27,11 @@ TEST_CASE("dockspace e2e: panes are addressable, tab-select and drag-to-dock wor
   opts.height = 480;
   REQUIRE(shell.init(opts));
 
-  // The render_probe pane is the canvas stand-in; its texture is uploaded after
-  // init (GL context current). The dockspace tiles the viewport and draws the
-  // two placeholder panels; the probe pane is drawn afterward (run_editor wiring).
-  ProbeView probe;
-  probe.upload();
-  ace::dock::Dockspace dockspace(ace::dock::default_layout());
-  shell.set_draw_content([&dockspace, &probe]() {
-    dockspace.draw();
-    probe.draw();
-  });
+  // The default arrangement: a Canvas fills one side; Inspector / Layers /
+  // Overview share the other side as a tab-group. Every body is a placeholder
+  // here (no Canvas texture registered) — the mechanics are body-agnostic.
+  ace::dock::Dockspace dockspace;
+  shell.set_draw_content([&dockspace]() { dockspace.draw(); });
 
   ImGuiTestEngine* engine = ImGuiTestEngine_CreateContext();
   ImGuiTestEngineIO& te_io = ImGuiTestEngine_GetIO(engine);
@@ -48,41 +41,41 @@ TEST_CASE("dockspace e2e: panes are addressable, tab-select and drag-to-dock wor
 
   ImGuiTest* test = IM_REGISTER_TEST(engine, "dockspace", "mechanics");
   test->TestFunc = [](ImGuiTestContext* ctx) {
-    const char* probe_id = ace::views::probe_pane_title();
-    const char* panel_a = ace::dock::panel_a_title();
-    const char* panel_b = ace::dock::panel_b_title();
+    const char* canvas = "canvas#1";
+    const char* inspector = "inspector";
+    const char* layers = "layers";
 
-    // 1. The host and each placeholder pane exist and are addressable by id.
-    IM_CHECK(ctx->WindowInfo(probe_id).ID != 0);
-    IM_CHECK(ctx->WindowInfo(panel_a).ID != 0);
-    IM_CHECK(ctx->WindowInfo(panel_b).ID != 0);
+    // 1. The host and each view are addressable by their stable instance id.
+    IM_CHECK(ctx->WindowInfo(canvas).ID != 0);
+    IM_CHECK(ctx->WindowInfo(inspector).ID != 0);
+    IM_CHECK(ctx->WindowInfo(layers).ID != 0);
 
-    ImGuiWindow* w_probe = ctx->GetWindowByRef(probe_id);
-    ImGuiWindow* w_a = ctx->GetWindowByRef(panel_a);
-    ImGuiWindow* w_b = ctx->GetWindowByRef(panel_b);
-    IM_CHECK(w_probe != nullptr);
-    IM_CHECK(w_a != nullptr);
-    IM_CHECK(w_b != nullptr);
+    ImGuiWindow* w_canvas = ctx->GetWindowByRef(canvas);
+    ImGuiWindow* w_inspector = ctx->GetWindowByRef(inspector);
+    ImGuiWindow* w_layers = ctx->GetWindowByRef(layers);
+    IM_CHECK(w_canvas != nullptr);
+    IM_CHECK(w_inspector != nullptr);
+    IM_CHECK(w_layers != nullptr);
 
-    // All panes are docked into the one main-viewport dockspace host (the host
+    // All views are docked into the one main-viewport dockspace host (the host
     // node exists and is shared — D18 fully-uniform shell, D-dockspace-5).
-    IM_CHECK(w_probe->DockNode != nullptr);
-    IM_CHECK(w_a->DockNode != nullptr);
-    IM_CHECK(ImGui::DockNodeGetRootNode(w_probe->DockNode) ==
-             ImGui::DockNodeGetRootNode(w_a->DockNode));
+    IM_CHECK(w_canvas->DockNode != nullptr);
+    IM_CHECK(w_inspector->DockNode != nullptr);
+    IM_CHECK(ImGui::DockNodeGetRootNode(w_canvas->DockNode) ==
+             ImGui::DockNodeGetRootNode(w_inspector->DockNode));
 
-    // 2. Tab-select: the two panels seed a shared tab-group; click Panel B's tab
-    //    and assert it becomes the node's selected (focused) tab.
-    IM_CHECK(w_a->DockNode == w_b->DockNode);
-    ctx->ItemClick(w_b->TabId); // the window's tab button in the shared tab bar
-    IM_CHECK(w_b->DockNode->TabBar != nullptr);
-    IM_CHECK(w_b->DockNode->TabBar->SelectedTabId == w_b->TabId);
+    // 2. Tab-select: Inspector / Layers seed a shared tab-group; click Layers'
+    //    tab and assert it becomes the node's selected (focused) tab.
+    IM_CHECK(w_inspector->DockNode == w_layers->DockNode);
+    ctx->ItemClick(w_layers->TabId); // the window's tab button in the shared bar
+    IM_CHECK(w_layers->DockNode->TabBar != nullptr);
+    IM_CHECK(w_layers->DockNode->TabBar->SelectedTabId == w_layers->TabId);
 
-    // 3. Drag-to-dock: move Panel B into the probe's container as a tab; the
-    //    moved pane now shares the target node (the D18 drag/tab mechanic).
-    ctx->DockInto(panel_b, probe_id, ImGuiDir_None);
-    IM_CHECK(w_b->DockNode != nullptr);
-    IM_CHECK(w_b->DockNode == w_probe->DockNode);
+    // 3. Drag-to-dock: move Layers into the canvas container as a tab; the moved
+    //    view now shares the target node (the D18 drag/tab mechanic).
+    ctx->DockInto(layers, canvas, ImGuiDir_None);
+    IM_CHECK(w_layers->DockNode != nullptr);
+    IM_CHECK(w_layers->DockNode == w_canvas->DockNode);
   };
   ImGuiTestEngine_QueueTest(engine, test);
 
@@ -108,10 +101,6 @@ TEST_CASE("dockspace e2e: panes are addressable, tab-select and drag-to-dock wor
   // (the ImGui context is still alive until shutdown() below).
   CHECK(ImGui::DockBuilderGetNode(dockspace.dockspace_id()) != nullptr);
 
-  // Teardown order mirrors shell_e2e: destroy the probe texture while the GL
-  // context is valid, shut the shell (which destroys the ImGui context the
-  // engine hooked), then destroy the engine.
-  probe.destroy();
   shell.shutdown();
   ImGuiTestEngine_DestroyContext(engine);
 }

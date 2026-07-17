@@ -19,6 +19,8 @@ void ProbeView::upload() {
 
 void ProbeView::draw() const { views::draw_probe_pane(texture_, width_, height_); }
 
+void ProbeView::draw_content() const { views::draw_probe_image(texture_, width_, height_); }
+
 void ProbeView::destroy() {
   if (texture_ != 0) {
     gl::destroy_texture(texture_);
