@@ -8,6 +8,7 @@
 #include <arbc/compositor/compositor.hpp>
 #include <arbc/media/pixel_format.hpp>
 #include <arbc/media/surface_format.hpp>
+#include <arbc/runtime/damage_router.hpp>
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/host_viewport.hpp>
 #include <arbc/runtime/interactive.hpp>
@@ -27,7 +28,10 @@ namespace ace::render {
 constexpr std::size_t k_tile_cache_bytes = 64U * 1024 * 1024;
 
 struct CanvasRenderer::Impl {
-  explicit Impl(arbc::Document& doc) : document(doc), pool(backend), cache(k_tile_cache_bytes) {}
+  Impl(arbc::Document& doc, arbc::WorkerPool* borrowed, arbc::DamageRouter* damage_router,
+       std::chrono::steady_clock::duration frame_budget)
+      : document(doc), pool(backend), cache(k_tile_cache_bytes), borrowed_pool(borrowed),
+        router(damage_router), budget(frame_budget) {}
 
   // Rebuild the size-dependent bundle (target Surface + InteractiveRenderer +
   // HostViewport) at the current width/height. A zero/degenerate size tears the
@@ -51,17 +55,27 @@ struct CanvasRenderer::Impl {
     if (surface.has_value()) {
       target = std::move(*surface);
 
-      // The deterministic thread-free inline executor (WorkerPoolConfig{},
-      // worker_count == 0): the mode every deterministic golden uses, so the
-      // interactive frame is byte-exact and the leaf adds no WorkerPool
-      // (D-canvas_view-2).
-      renderer.emplace(arbc::WorkerPoolConfig{});
+      // Either BORROW the host's shared WorkerPool (runtime.shared_worker_pool,
+      // multi_canvas) or OWN a thread-free inline executor (WorkerPoolConfig{},
+      // worker_count == 0 — the deterministic golden mode, D-canvas_view-2). One code
+      // path: a WorkerPoolConfig{} pool is byte-identical to the parallel path.
+      if (borrowed_pool != nullptr) {
+        renderer.emplace(*borrowed_pool);
+      } else {
+        renderer.emplace(arbc::WorkerPoolConfig{});
+      }
 
       arbc::HostViewport::Config config;
       config.viewport = arbc::Viewport{width, height, arbc::Affine::identity()};
-      // An effectively unbounded per-frame budget: the inline executor settles the
-      // whole frame in one step(), so no deadline cuts the byte-exact composite.
-      config.budget = std::chrono::hours(1);
+      // The per-frame budget: settle-fully (an effectively unbounded hour) for the
+      // inline golden path, or a caller-chosen BOUNDED slice for the shared-thread host
+      // so one heavy canvas cannot starve another (D-multi_canvas-3).
+      config.budget = budget;
+      // The shared DamageRouter (multi_canvas): the viewport registers ITS accumulator with
+      // the router instead of evicting the Model's single sink slot, so a commit fans out to
+      // every canvas over this document. Null for the single-canvas own-pool golden path
+      // (one viewport, the direct single-slot install).
+      config.router = router;
       viewport = std::make_unique<arbc::HostViewport>(
           *renderer, document, arbc::HostViewport::DocumentBinding{}, backend, pool, cache, *target,
           arbc::HostViewport::Clock{}, config);
@@ -92,6 +106,13 @@ struct CanvasRenderer::Impl {
   arbc::SurfacePool pool;
   arbc::TileCache cache;
 
+  // The shared pool this renderer borrows (nullptr == own an inline executor), the shared
+  // per-document DamageRouter it registers with (nullptr == the direct single-slot install),
+  // and the per-frame budget handed to HostViewport (D-multi_canvas-3/4). All fixed at ctor.
+  arbc::WorkerPool* borrowed_pool = nullptr;
+  arbc::DamageRouter* router = nullptr;
+  std::chrono::steady_clock::duration budget = std::chrono::hours(1);
+
   int width = 0;
   int height = 0;
 
@@ -105,7 +126,12 @@ struct CanvasRenderer::Impl {
 };
 
 CanvasRenderer::CanvasRenderer(arbc::Document& document)
-    : impl_(std::make_unique<Impl>(document)) {}
+    : impl_(std::make_unique<Impl>(document, nullptr, nullptr, std::chrono::hours(1))) {}
+
+CanvasRenderer::CanvasRenderer(arbc::Document& document, arbc::WorkerPool& pool,
+                               arbc::DamageRouter& router,
+                               std::chrono::steady_clock::duration budget)
+    : impl_(std::make_unique<Impl>(document, &pool, &router, budget)) {}
 
 CanvasRenderer::~CanvasRenderer() = default;
 
@@ -115,16 +141,20 @@ void CanvasRenderer::resize(int width, int height) {
   impl_->rebuild();
 }
 
-void CanvasRenderer::step() {
+bool CanvasRenderer::step() {
   if (!impl_->viewport) {
-    return; // zero-area / defensive: nothing to drive (Constraint 7).
+    return false; // zero-area / defensive: nothing to drive (Constraint 7).
   }
-  impl_->viewport->step();
+  const arbc::HostViewport::StepOutcome outcome = impl_->viewport->step();
   const std::uint64_t frames = impl_->viewport->frames_issued();
   if (frames != impl_->converted_frames) {
     impl_->convert();
     impl_->converted_frames = frames;
   }
+  // schedule_follow_up: the bounded budget did not settle the frame — the shared host
+  // loop re-drives this entry next cycle (D-multi_canvas-3). Always false for the
+  // settle-fully inline path (the hour budget composites in one pass).
+  return outcome.schedule_follow_up;
 }
 
 const Srgb8Image& CanvasRenderer::image() const { return impl_->image; }
@@ -135,5 +165,7 @@ std::uint64_t CanvasRenderer::frames_issued() const {
 
 int CanvasRenderer::width() const { return impl_->width; }
 int CanvasRenderer::height() const { return impl_->height; }
+
+const arbc::WorkerPool* CanvasRenderer::borrowed_pool() const { return impl_->borrowed_pool; }
 
 } // namespace ace::render

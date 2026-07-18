@@ -2,11 +2,14 @@
 
 #include <ace/render/render.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 
 namespace arbc {
 class Document;
+class WorkerPool;
+class DamageRouter;
 } // namespace arbc
 
 namespace ace::render {
@@ -24,8 +27,19 @@ namespace ace::render {
 // upload is a separate gl/app step, so the whole compositor path is
 // headless-unit- and golden-testable without a GL context.
 //
-// This leaf drives the renderer synchronously on the UI thread with the
-// deterministic thread-free inline executor (WorkerPoolConfig{}) — D-canvas_view-2.
+// Two construction modes (editor.canvas.multi_canvas / D-multi_canvas-4 parameterizes
+// the two hard-coded choices this bundle used to own):
+//   - the Document& ctor OWNS a thread-free inline executor (WorkerPoolConfig{}) and
+//     settles the whole frame in one step (an effectively unbounded budget) — the
+//     deterministic golden path D-canvas_view-2 ships;
+//   - the (Document&, WorkerPool&, budget) ctor BORROWS a shared WorkerPool (the pool
+//     the CanvasHost owns and every canvas shares, runtime.shared_worker_pool) and
+//     drives each step under a caller-chosen BOUNDED budget so one heavy canvas on the
+//     shared render thread cannot starve another (D-multi_canvas-3). The borrowed pool
+//     MUST outlive this renderer (interactive.hpp lifetime rule).
+// Both modes are ONE code path — determinism is a config choice, not a code fork; a
+// WorkerPoolConfig{} pool is byte-identical to the parallel path.
+//
 // The off-UI-thread driver + latest-frame double-buffer is editor.canvas.frame_sync;
 // N canvases sharing one WorkerPool is editor.canvas.multi_canvas. `document` and
 // its collaborators are held by reference and MUST outlive this object (the
@@ -33,6 +47,13 @@ namespace ace::render {
 class CanvasRenderer {
 public:
   explicit CanvasRenderer(arbc::Document& document);
+  // Borrow a shared WorkerPool + a shared per-document DamageRouter, and drive each frame
+  // under a bounded budget (editor.canvas.multi_canvas). The router (not the Model's single
+  // set_damage_sink slot) fans a commit's damage out to EVERY viewport sharing the
+  // document, so N canvases all re-render an edit (`damage_router.hpp`). `pool` and `router`
+  // MUST outlive this renderer.
+  CanvasRenderer(arbc::Document& document, arbc::WorkerPool& pool, arbc::DamageRouter& router,
+                 std::chrono::steady_clock::duration budget);
   ~CanvasRenderer();
 
   CanvasRenderer(const CanvasRenderer&) = delete;
@@ -43,12 +64,14 @@ public:
   // size. A degenerate/zero size renders nothing (no allocation) — Constraint 7.
   void resize(int width, int height);
 
-  // Drive one HostViewport::step() on the UI thread (inline executor). The first
-  // step always composites (frames_issued() == 1); a subsequent step on an
-  // unchanged, playhead-pinned scene issues zero further frames (the still-scene
-  // early-out). Re-converts the settled target to sRGB8 only when a new frame was
-  // issued.
-  void step();
+  // Drive one HostViewport::step(). The first step always composites
+  // (frames_issued() == 1); a subsequent step on an unchanged, playhead-pinned
+  // scene issues zero further frames (the still-scene early-out). Re-converts the
+  // settled target to sRGB8 only when a new frame was issued. Returns
+  // StepOutcome::schedule_follow_up — true when the bounded-budget pass did NOT
+  // settle the frame and the caller should re-drive next cycle (D-multi_canvas-3);
+  // always false for the settle-fully inline path.
+  bool step();
 
   // The current settled straight-alpha sRGB8 image (empty before the first frame
   // or at a zero size). Tightly packed w*h*4, GL-uploadable — Constraint 5.
@@ -63,6 +86,11 @@ public:
   // resize).
   int width() const;
   int height() const;
+
+  // The shared WorkerPool this renderer BORROWS, or nullptr when it owns an inline
+  // executor. The CanvasHost exposes this so a test can prove N canvases borrow one
+  // pool (acceptance criterion f).
+  const arbc::WorkerPool* borrowed_pool() const;
 
 private:
   struct Impl;

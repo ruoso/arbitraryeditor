@@ -204,21 +204,25 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   if (on_ready) {
     on_ready(app_state);
   }
-  // The Canvas view is a LIVE interactive render of the one owned Document
-  // (editor.canvas.view; D18 "the canvas is a view"): the app owns the driver +
-  // its GL texture, steps the HostViewport each frame on the UI thread (the
-  // deterministic inline executor, D-canvas_view-2), and uploads the settled
-  // frame — a texture created once, updated in place, and destroyed before
-  // shutdown while the context is still valid (Constraint 6/8). Owned here in the
-  // app layer, not in the shell. Every other view type draws a placeholder until
+  // The Canvas subsystem is N LIVE interactive renders of the one owned Document over
+  // ONE shared WorkerPool + ONE render thread (editor.canvas.multi_canvas; A5 "N
+  // renderers share one WorkerPool", D18 "multiple canvases through different cameras
+  // side by side"): the app owns the host + one render thread + a per-canvas#N GL
+  // texture, drives every HostViewport off the UI thread (D-multi_canvas-2), and uploads
+  // each settled frame — textures created once, updated in place, and released before
+  // shutdown while the context is still valid (Constraint 5). Owned here in the app
+  // layer, not in the shell. The body draws by its per-pane view_id, so every canvas#N
+  // the dock mints renders independently. Every other view type draws a placeholder until
   // its downstream panel leaf lands (D-view-registry-5).
   CanvasView canvas(app_state);
-  ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, [&canvas](std::string_view) {
-    // The dockspace owns the canvas#N window; render at the pane's pixel
-    // size (Constraint 7). A degenerate pane draws nothing.
-    const ImVec2 avail = ImGui::GetContentRegionAvail();
-    canvas.draw_content(static_cast<int>(avail.x), static_cast<int>(avail.y));
-  });
+  ace::views::register_view_body(
+      ace::dockmodel::ViewType::Canvas, [&canvas](std::string_view view_id) {
+        // The dockspace owns the canvas#N window; render at the
+        // pane's pixel size (Constraint 7). A degenerate pane
+        // draws nothing.
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
+      });
   // The History view IS the undo journal made visible and click-navigable (D18
   // "History is a view"; editor.panels.history). It reads the one owned session's
   // journal and loops the shipped undo/redo verbs, so the body captures the same
@@ -267,7 +271,14 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     project_gateway = app_gateway.get();
   }
   dockspace.set_project_gateway(project_gateway);
-  shell.set_draw_content([&dockspace]() { dockspace.draw(); });
+  // After the dock draws every open view body (each canvas#N pane lazily registering its
+  // host entry), reconcile the canvas subsystem against the authoritative layout: a
+  // canvas#N that was closed leaves DockLayout::view_ids(), so its host entry + GL texture
+  // are freed (D-multi_canvas-5 / Constraint 7). Runs on the UI thread with a live context.
+  shell.set_draw_content([&dockspace, &canvas]() {
+    dockspace.draw();
+    canvas.reconcile(dockspace.layout().view_ids());
+  });
   while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
     shell.new_frame();
     shell.draw_ui();

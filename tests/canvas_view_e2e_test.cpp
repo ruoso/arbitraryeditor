@@ -168,9 +168,9 @@ TEST_CASE(
   // canvas.destroy() at teardown. Cleared after the loop so the process-global seam
   // never outlives this CanvasView/AppState into a later test in the binary.
   CanvasView canvas(state);
-  ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view) {
+  ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    canvas.draw_content(static_cast<int>(avail.x), static_cast<int>(avail.y));
+    canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
   });
 
   ace::dock::Dockspace dockspace; // default layout → canvas#1 open + docked
@@ -192,15 +192,32 @@ TEST_CASE(
 
     // The driver renders OFF the UI thread: wait (bounded) for the double-buffer to
     // publish its first frame rather than assuming a synchronous inline step.
-    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued() >= 1; }));
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") >= 1; }));
     IM_CHECK(ctx->WindowInfo("canvas#1").ID != 0);
     ImGuiWindow* w_canvas = ctx->GetWindowByRef("canvas#1");
     IM_CHECK(w_canvas != nullptr);
     IM_CHECK(w_canvas->DockNode != nullptr);
 
     // The off-thread driver produced at least one live frame of the shared document.
-    IM_CHECK(canvas.frames_issued() >= 1);
-    ctx->Yield(12);
+    IM_CHECK(canvas.frames_issued("canvas#1") >= 1);
+
+    // The host renders with a REAL shared WorkerPool now (multi_canvas), so the first
+    // published frame can be a partial (async tiles still resolving); let the scene SETTLE
+    // (its sequence quiet over a window) so the fully-composited frame is uploaded + drawn
+    // before the post-loop pixel scan.
+    std::uint64_t last = canvas.frames_issued("canvas#1");
+    for (int quiet = 0; quiet < 40;) {
+      ctx->Yield();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      const std::uint64_t now = canvas.frames_issued("canvas#1");
+      if (now == last) {
+        ++quiet;
+      } else {
+        quiet = 0;
+        last = now;
+      }
+    }
+    ctx->Yield(4);
   };
   ImGuiTestEngine_QueueTest(engine, test);
 
@@ -310,9 +327,9 @@ TEST_CASE(
                                       state);
   gateway.set_edit_listener([&canvas]() { canvas.poke(); });
 
-  ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view) {
+  ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    canvas.draw_content(static_cast<int>(avail.x), static_cast<int>(avail.y));
+    canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
   });
 
   ace::dock::Dockspace dockspace;
@@ -333,16 +350,16 @@ TEST_CASE(
     CanvasView& canvas = *e2e->canvas;
 
     // Wait for the first off-thread frame (covering colour) + its GL upload.
-    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued() >= 1; }));
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") >= 1; }));
 
     // Let the scene SETTLE (the still-scene early-out): once no new frame lands over a
     // quiet window, the sequence is stable, so a later advance is attributable to the
     // edit and not to a still-settling frame racing the assertion.
-    std::uint64_t last = canvas.frames_issued();
+    std::uint64_t last = canvas.frames_issued("canvas#1");
     for (int quiet = 0; quiet < 40;) {
       ctx->Yield();
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      const std::uint64_t now = canvas.frames_issued();
+      const std::uint64_t now = canvas.frames_issued("canvas#1");
       if (now == last) {
         ++quiet;
       } else {
@@ -350,7 +367,7 @@ TEST_CASE(
         last = now;
       }
     }
-    const std::uint64_t before = canvas.frames_issued();
+    const std::uint64_t before = canvas.frames_issued("canvas#1");
 
     // Request an edit THROUGH THE GATEWAY, performed on the MAIN thread (the writer):
     // a moved undo pokes the driver, which re-renders the damage off-thread into the
@@ -358,8 +375,8 @@ TEST_CASE(
     e2e->request_undo.store(true);
     IM_CHECK(pump_until(ctx, [&] { return e2e->undo_moved.load(); }));
     // The poke drives a fresh off-thread frame; the settled sequence now advances.
-    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued() > before; }));
-    IM_CHECK(canvas.frames_issued() > before);
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") > before; }));
+    IM_CHECK(canvas.frames_issued("canvas#1") > before);
     ctx->Yield(4);
   };
   ImGuiTestEngine_QueueTest(engine, test);
@@ -432,19 +449,19 @@ TEST_CASE(
   for (int i = 0; i < 600 && !published; ++i) {
     shell.new_frame();
     ImGui::Begin("canvas_host");
-    canvas.draw_content(64, 64); // request 64x64; upload once the off-thread frame lands
+    canvas.draw_content("canvas#1", 64, 64); // request 64x64; upload once the frame lands
     ImGui::End();
     shell.render();
-    published = canvas.frames_issued() >= 1;
+    published = canvas.frames_issued("canvas#1") >= 1;
     if (!published) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
-  CHECK(canvas.frames_issued() >= 1);
+  CHECK(canvas.frames_issued("canvas#1") >= 1);
 
   shell.new_frame();
   ImGui::Begin("canvas_host");
-  canvas.draw_content(48, 32); // a size change: destroy the old texture + re-upload
+  canvas.draw_content("canvas#1", 48, 32); // a size change: destroy the old texture + re-upload
   ImGui::End();
   shell.render();
 

@@ -1,11 +1,16 @@
 #pragma once
 
 #include <ace/platform/threads.hpp>
-#include <ace/render/canvas_driver.hpp>
+#include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace ace::commands {
 class AppState;
@@ -13,20 +18,26 @@ class AppState;
 
 namespace ace::app {
 
-// Owns the interactive Canvas driver + its GL texture at the app layer (L4), the
-// off-UI-thread successor to editor.canvas.view's synchronous driver
-// (editor.canvas.frame_sync). At construction it spawns a dedicated RENDER THREAD
-// (through the portable platform::NativeThreads seam, A3/D-frame_sync-1) that runs
-// the render::CanvasDriver drive loop — so HostViewport::step() never runs on the UI
-// thread (A4 "rendering is never on it"). Each UI frame it sizes the driver to the
-// Canvas pane (a resize REQUEST the render thread services), consumes the latest
-// settled frame from the double-buffer, and uploads it — a fresh gl::upload_rgba8 on
-// the first frame / a resize, an in-place gl::update_rgba8 when a new sequence lands
-// at the same size (Constraint 3), and no GL traffic when the sequence has not moved.
-// An edit poke (poke()) wakes the render thread promptly; the UI thread stays the
-// single writer (D-frame_sync-2). Teardown is deterministic: stop → join → release
-// the texture (Constraint 5). Bind against the process's one owned Document via the
-// AppState& the shell holds (Constraint 3); it must outlive this view.
+// The shell's Canvas subsystem at the app layer (L4): ONE render::CanvasHost over the
+// one owned Document, ONE render thread, and a canvas#N-keyed set of per-pane GL-texture
+// presenters (editor.canvas.multi_canvas; A5 "N renderers share one WorkerPool"). This
+// supersedes editor.canvas.frame_sync's render-thread-per-CanvasView: the shell holds a
+// single CanvasView, and every canvas#N pane the dock mints renders INDEPENDENTLY through
+// one shared host + one shared thread (D-multi_canvas-2).
+//
+// At construction it spawns the one render thread (through platform::NativeThreads, A3)
+// that runs the host's drive loop off the UI thread (A4 "rendering is never on it"). Each
+// UI frame, per canvas#N pane: it ensures the host has that entry (add is idempotent),
+// sizes it to the pane (a resize REQUEST the render thread services), consumes the
+// entry's latest settled frame from its double-buffer, and uploads it to that id's own GL
+// texture — a fresh gl::upload_rgba8 on the first frame / a resize, an in-place
+// gl::update_rgba8 when a new sequence lands at the same size (Constraint 3), no GL
+// traffic when the sequence has not moved. An edit poke wakes EVERY live entry (the
+// fan-out — one writer, N observers; Constraint 4). Panes that leave the dock layout are
+// reconciled away (host entry freed on the render thread, texture on the UI thread;
+// Constraint 7). Teardown is deterministic: stop -> join the one thread -> release every
+// texture (Constraint 5). Bind against the process's one owned Document via the AppState&
+// the shell holds; it must outlive this view.
 class CanvasView {
 public:
   explicit CanvasView(commands::AppState& state);
@@ -35,43 +46,48 @@ public:
   CanvasView(const CanvasView&) = delete;
   CanvasView& operator=(const CanvasView&) = delete;
 
-  // Draw the Canvas body into the CURRENT ImGui window at `pane_width`x
-  // `pane_height` device pixels (the dockspace owns Begin/End + the tab ✕). A
-  // zero/degenerate pane renders nothing (Constraint 7). Requires a current GL
-  // context.
-  void draw_content(int pane_width, int pane_height);
+  // Draw the Canvas body for `view_id` into the CURRENT ImGui window at `pane_width`x
+  // `pane_height` device pixels (the dockspace owns Begin/End + the tab ✕). Lazily adds
+  // the host entry + presenter on this id's first appearance. A zero/degenerate pane
+  // renders nothing (Constraint 7). Requires a current GL context.
+  void draw_content(std::string_view view_id, int pane_width, int pane_height);
 
-  // Wake the render thread to re-render after a UI-thread edit (the poke seam the
-  // edit points — undo/redo through the gateway — drive; D-frame_sync-2). Thread-safe.
+  // Wake the render thread to re-render EVERY live canvas after a UI-thread edit (the
+  // fan-out poke seam the edit points drive; D-frame_sync-2 / Constraint 4). Thread-safe.
   void poke();
 
-  // The driver's published-frame sequence — the test-visible signal the e2e asserts
-  // (>= 1 for a live frame; an advance after an edit poke proves the off-thread
-  // re-render reached the double-buffer).
-  std::uint64_t frames_issued() const;
+  // Reconcile the live presenters/entries against the dock's current view ids: drop the
+  // host entry (render thread) and GL texture (UI thread) of any canvas#N that left the
+  // layout (Constraint 7 / D-multi_canvas-5). Call each UI frame after the dock draws.
+  void reconcile(const std::vector<std::string>& live_view_ids);
 
-  // Stop + join the render thread and release the GL texture while the context is
+  // The published-frame sequence for `view_id` (0 for an unknown id) — the per-pane
+  // test-visible liveness signal (>= 1 for a live frame; an advance after an edit poke
+  // proves the off-thread re-render reached that entry's double-buffer).
+  std::uint64_t frames_issued(std::string_view view_id) const;
+
+  // Stop + join the render thread and release every GL texture while the context is
   // still valid (before shutdown). Safe to call twice (the destructor also calls it).
   void destroy();
 
 private:
-  render::CanvasDriver driver_;
+  // One per-canvas#N presenter: the latest frame consumed from that entry's double-buffer
+  // and the GL texture it uploads to. All UI-thread state.
+  struct Presenter {
+    render::Srgb8Image image;
+    std::uint64_t consumed_seq = 0;
+    int requested_width = 0;
+    int requested_height = 0;
+    unsigned int texture = 0;
+    int tex_width = 0;
+    int tex_height = 0;
+  };
+
+  commands::AppState& state_;
+  render::CanvasHost host_;
   platform::NativeThreads threads_;
   std::unique_ptr<platform::JoinHandle> render_thread_;
-
-  // The latest frame consumed from the double-buffer, and the sequence it carried —
-  // re-uploaded to GL only when the sequence advances (Constraint 3).
-  render::Srgb8Image image_;
-  std::uint64_t consumed_seq_ = 0;
-
-  // The last framing size requested of the render thread; a genuine change posts a
-  // new resize request (Constraint 7).
-  int requested_width_ = 0;
-  int requested_height_ = 0;
-
-  unsigned int texture_ = 0;
-  int tex_width_ = 0;
-  int tex_height_ = 0;
+  std::map<std::string, Presenter, std::less<>> presenters_;
 };
 
 } // namespace ace::app

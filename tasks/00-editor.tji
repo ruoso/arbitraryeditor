@@ -168,8 +168,9 @@ task editor "Editor — host GUI over libarbc" {
     task multi_canvas "N canvases over one Document sharing one WorkerPool" {
       effort 2d
       allocate team
+      complete 100
       depends !frame_sync
-      note "Multiple canvas views = multiple HostViewport/InteractiveRenderer over the one Document sharing one library WorkerPool; each cache render-thread-confined, so no new locking. This is 'paint through Viewport | look through Hero'. Arch A5 / D18. Refinement: tasks/refinements/multi_canvas.md"
+      note "Multiple canvas views = multiple HostViewport/InteractiveRenderer over the one Document sharing one library WorkerPool; each cache render-thread-confined, so no new locking. This is 'paint through Viewport | look through Hero'. Arch A5 / D18. Refinement: tasks/refinements/editor/multi_canvas.md"
     }
     task nav "Pan / zoom the viewport camera; scale bar; deep zoom" {
       effort 2d
