@@ -114,8 +114,9 @@ task editor "Editor — host GUI over libarbc" {
     task exec_new "Open-another-project = exec a new instance" {
       effort 1d
       allocate team
+      complete 100
       depends !app_state
-      note "Opening a different project execs a fresh editor process (its own Document/workspace/threads/window). No multi-project-in-one-window, no in-process switching. Design: D19. Refinement: tasks/refinements/exec_new.md"
+      note "Opening a different project execs a fresh editor process (its own Document/workspace/threads/window). No multi-project-in-one-window, no in-process switching. Design: D19. Refinement: tasks/refinements/editor/exec_new.md"
     }
     task save "Save = re-dump project.arbc + assets; dirty state" {
       effort 1.5d
