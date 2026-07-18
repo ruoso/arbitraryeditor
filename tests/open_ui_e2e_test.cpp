@@ -72,6 +72,12 @@ public:
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
   void save_as() override {}
+  // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
+  // undo_ui_e2e_test.cpp.
+  bool undo() override { return false; }
+  bool redo() override { return false; }
+  bool can_undo() const override { return false; }
+  bool can_redo() const override { return false; }
 };
 
 struct E2EState {

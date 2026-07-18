@@ -51,6 +51,12 @@ public:
   // Save As (A13/D-save_as) — inert here; the dedicated Save As… button coverage
   // lives in save_as_ui_e2e_test.cpp.
   void save_as() override {}
+  // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
+  // undo_ui_e2e_test.cpp.
+  bool undo() override { return false; }
+  bool redo() override { return false; }
+  bool can_undo() const override { return false; }
+  bool can_redo() const override { return false; }
 };
 
 struct E2EState {

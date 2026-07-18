@@ -38,6 +38,25 @@ DispatchOutcome dispatch(AppState& state, const Command& command) {
   return outcome;
 }
 
+UndoOutcome undo(AppState& state) {
+  // Undo IS the library journal (D15 / Constraint 1): drive the cursor and report
+  // whether it moved plus the resulting revision / can-undo / can-redo state. No
+  // editor-side inverse list, no snapshot — `journal().undo()` republishes the
+  // touched objects at their *before* edge as a forward publish. Writer-thread (A4);
+  // `mark_saved` is deliberately NOT called (D-undo-4 / Constraint 4).
+  arbc::Document& doc = state.document();
+  const bool moved = doc.journal().undo();
+  return UndoOutcome{moved, doc.pin()->revision(), doc.journal().can_undo(),
+                     doc.journal().can_redo()};
+}
+
+UndoOutcome redo(AppState& state) {
+  arbc::Document& doc = state.document();
+  const bool moved = doc.journal().redo();
+  return UndoOutcome{moved, doc.pin()->revision(), doc.journal().can_undo(),
+                     doc.journal().can_redo()};
+}
+
 platform::Result<AppState> open_or_create_app_state(const platform::FileSystem& fs,
                                                     const std::filesystem::path& root) {
   if (fs.exists(root)) {

@@ -159,6 +159,28 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   draw_new_project_modal(dockspace, gateway);
 }
 
+// The canonical undo affordance (Decision D-undo-3): the keyboard chords Ctrl+Z
+// (undo), Ctrl+Shift+Z / Ctrl+Y (redo), handled here in the L3 dockspace — the only
+// ImGui level — and routed through the gateway to the L4 session verbs, gated on
+// can_undo()/can_redo() so a no-op is never dispatched. There is no menu bar (D18
+// uniform shell) and the History panel is deferred, so the chord is undo's only home
+// this leaf ships. `IsKeyChordPressed` reads GLOBAL key state and matches modifiers
+// EXACTLY (Ctrl+Z and Ctrl+Shift+Z never collide), so the chord fires regardless of
+// which docked window holds focus and needs no focus-routing.
+void handle_undo_shortcuts(ProjectGateway& gateway) {
+  if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) {
+    if (gateway.can_undo()) {
+      gateway.undo();
+    }
+  }
+  if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z) ||
+      ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y)) {
+    if (gateway.can_redo()) {
+      gateway.redo();
+    }
+  }
+}
+
 } // namespace
 
 const char* name() { return "dock"; }
@@ -253,6 +275,14 @@ Dockspace::Dockspace(std::vector<ViewType> initial) {
 }
 
 void Dockspace::draw() {
+  // The undo/redo keyboard chords route through the wired gateway to the in-process
+  // session (D-undo-3), gated on can_undo()/can_redo(). Handled once per frame,
+  // before any window, so it fires regardless of docked-window focus; omitted with
+  // the rail's Project section when no gateway is wired (the bare-shell smoke).
+  if (ProjectGateway* gateway = project_gateway_) {
+    handle_undo_shortcuts(*gateway);
+  }
+
   ImGuiViewport* viewport = ImGui::GetMainViewport();
   const ImVec2 work_pos = viewport->WorkPos;
   const ImVec2 work_size = viewport->WorkSize;

@@ -79,6 +79,19 @@ bool AppProjectGateway::save() {
 
 bool AppProjectGateway::is_dirty() const { return app_state_.is_dirty(); }
 
+bool AppProjectGateway::undo() {
+  // Navigate the in-process session's journal (D15 / A13), not a sibling exec.
+  // `commands::undo` drives `journal().undo()` as a forward publish and reports
+  // whether the cursor moved; it never touches the dirty baseline (D-undo-4).
+  return ace::commands::undo(app_state_).moved;
+}
+
+bool AppProjectGateway::redo() { return ace::commands::redo(app_state_).moved; }
+
+bool AppProjectGateway::can_undo() const { return app_state_.document().journal().can_undo(); }
+
+bool AppProjectGateway::can_redo() const { return app_state_.document().journal().can_redo(); }
+
 void AppProjectGateway::save_as() {
   // Save As is New/Open's async-pick shape (D-save_as-3) applied to THIS session:
   // pick a target folder, then publish a copy there and exec a sibling on it. The

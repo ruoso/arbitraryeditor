@@ -136,8 +136,9 @@ task editor "Editor — host GUI over libarbc" {
     task undo "Undo/redo wired to library transactions" {
       effort 2d
       allocate team
+      complete 100
       depends !app_state
-      note "Undo/redo IS libarbc's transaction journal (doc 14), not a reimplementation; continuous gestures (a stroke, a drag) coalesce into one step. Viewport-camera navigation is transient (not undoable); a saved shot's framing is scene data (undoable). Design: D15. Refinement: tasks/refinements/undo.md"
+      note "Undo/redo IS libarbc's transaction journal (doc 14), not a reimplementation; continuous gestures (a stroke, a drag) coalesce into one step. Viewport-camera navigation is transient (not undoable); a saved shot's framing is scene data (undoable). Design: D15. Refinement: tasks/refinements/editor/undo.md"
     }
     task gc "Clean up (GC) + consolidate + relink" {
       effort 2d
@@ -262,6 +263,12 @@ task editor "Editor — host GUI over libarbc" {
       allocate team
       depends editor.dock.view_registry, editor.paint.brush
       note "A conventional sRGB/HSV/hex picker + straight-alpha opacity; the editor is the invisible translator to/from the library's premultiplied-linear working space. Eyedropper samples the displayed sRGB through the active camera. Design: D10. Refinement: tasks/refinements/color.md"
+    }
+    task history "History view/panel: journal entry list + click-to-jump" {
+      effort 2.5d
+      allocate team
+      depends editor.project.undo, editor.dock.view_registry
+      note "Render journal().entry_at(i).name as an ordered list with the cursor() position marked; 'Undo <name>'/'Redo <name>' labels; click-an-entry to jump (loop undo()/redo() to reach the target cursor — single-step navigation only). L3 views. Design: D15/D18/D21. Source-of-debt: tasks/refinements/editor/undo.md."
     }
   }
 

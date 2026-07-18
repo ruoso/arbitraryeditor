@@ -80,6 +80,19 @@ public:
   // chosen target — so it returns void (no synchronous outcome to render). A
   // cancelled pick publishes nothing and execs nothing.
   virtual void save_as() = 0;
+
+  // Undo / redo the in-process session by navigating libarbc's document-wide
+  // transaction journal (D15 / A13 / editor.project.undo). Like `save()`, these act
+  // on THIS process's one owned `Document`, not a sibling exec: the L4 impl drives
+  // `commands::undo`/`commands::redo` against the held `AppState`. `undo`/`redo`
+  // return whether the cursor moved; `can_undo`/`can_redo` gate the keyboard chord
+  // so a no-op is never dispatched (Decision D-undo-3). The same dependency
+  // inversion — the L3 dockspace reaches the L4 session through this seam, never an
+  // illegal `dock -> commands` edge.
+  virtual bool undo() = 0;
+  virtual bool redo() = 0;
+  virtual bool can_undo() const = 0;
+  virtual bool can_redo() const = 0;
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by

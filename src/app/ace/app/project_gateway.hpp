@@ -44,6 +44,10 @@ public:
   bool save() override;
   bool is_dirty() const override;
   void save_as() override;
+  bool undo() override;
+  bool redo() override;
+  bool can_undo() const override;
+  bool can_redo() const override;
 
 private:
   bool spawn(const std::filesystem::path& dir);

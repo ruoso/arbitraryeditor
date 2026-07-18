@@ -74,6 +74,18 @@ public:
   // edit path (a revision-bumping `dispatch` re-dirties by advancing past it).
   void mark_saved(std::uint64_t revision) { saved_revision_ = revision; }
 
+  // Hand out the next gesture-coalescing key for a continuous gesture (a brush
+  // stroke, a handle drag), the collision-free seam `editor.project.undo` ships
+  // (Constraint 3 / Decision D-undo-2). A gesture calls this ONCE at gesture-start
+  // and stamps every frame's `doc.transact(name).coalesce(key)` with the returned
+  // key, so the library folds the whole gesture into ONE journal entry (one undo
+  // step); ending the gesture = stop using the key. The counter is a per-session
+  // monotonic `std::uint64_t` seeded at 1, so it never returns `k_no_coalesce` (0)
+  // and two distinct gestures never share a key even when adjacent — the journal
+  // only folds *consecutive* commits with a *matching* non-zero key. Writer-thread
+  // only, like every other edit-path call on the one owned `Document` (A4).
+  std::uint64_t next_gesture_key() { return next_gesture_key_++; }
+
 private:
   std::unique_ptr<arbc::Document> document_;
   project::ProjectLayout layout_;
@@ -82,6 +94,9 @@ private:
   bool rebuilt_from_canonical_ = false;
   // The last-published revision this session, or `nullopt` when none is known.
   std::optional<std::uint64_t> saved_revision_;
+  // The next gesture-coalescing key (D-undo-2): monotonic, seeded at 1 so it never
+  // hands out `k_no_coalesce` (0) and never repeats within a session.
+  std::uint64_t next_gesture_key_ = 1;
 };
 
 // A dispatchable editor action (refinement Decision D-app_state-5). This leaf
@@ -108,6 +123,32 @@ struct DispatchOutcome {
 // A4). Returns the journal delta + resulting revision. A command with no `apply`
 // (or a no-op body) adds no entry.
 DispatchOutcome dispatch(AppState& state, const Command& command);
+
+// The observable result of one undo/redo navigation (Decision D-undo-1). Undo/redo
+// are journal-cursor *navigation*, not scene *edits*: they add no `JournalEntry`
+// and take no `apply`, so they are plain verbs, not `Command`s on `dispatch`.
+// `moved` is the honest signal — `false` when there was nothing to move to (an
+// empty journal, the tip, or a rare writer-path allocation failure; the cursor
+// stays put), which is normal control flow, not a fault (so no `platform::Result`).
+struct UndoOutcome {
+  bool moved = false;         // the cursor navigated (a forward publish happened)
+  std::uint64_t revision = 0; // the document revision after navigating
+  bool can_undo = false;      // whether a further undo is possible
+  bool can_redo = false;      // whether a redo is possible
+};
+
+// Undo one step: navigate the document journal's cursor back one entry, rebinding
+// every touched object to its *before* edge as an ordinary FORWARD publish
+// (revision +1) — libarbc's `journal().undo()`, never a reimplemented stack (D15 /
+// Constraint 1). Writer-thread, synchronous (A4). Because navigation is a forward
+// publish, undo NEVER returns the revision to a prior value and never marks the
+// session clean (D-undo-4 / Constraint 4) — it does not touch the dirty baseline.
+UndoOutcome undo(AppState& state);
+
+// Redo one step: the symmetric forward navigation to the *after* edge
+// (`journal().redo()`). Same writer-thread, forward-publish, dirty-baseline-inert
+// contract as `undo`.
+UndoOutcome redo(AppState& state);
 
 // Resolve a project directory into an `AppState` (refinement Decision
 // D-app_state-6): an existing path opens (`project::open_project`), a

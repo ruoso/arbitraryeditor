@@ -16,25 +16,27 @@
 
 #include <GLES3/gl3.h>
 
-// editor.project.save_as — the rail's Save As… UI e2e (Acceptance / §9), mirroring
-// tests/save_ui_e2e_test.cpp: offscreen SDL + software GL, driving the rail BY
-// STABLE WIDGET ID. A fake ProjectGateway (records save_as()) is injected so the
-// Save As… button is exercised without a real folder dialog or session — the
-// pick→publish→exec follow-up is the L4 AppProjectGateway's job, unit-tested
-// headless in app_project_gateway_test.cpp. No byte-exact golden (software-GL pixels
-// are flaky, per the open_ui/save e2e precedent); the assertion is on the recorded
-// save_as() call driven by the rail button.
+// editor.project.undo — the undo/redo keyboard-chord UI e2e (Acceptance / §9),
+// mirroring tests/save_ui_e2e_test.cpp: offscreen SDL + software GL, driving the
+// dockspace via injected key chords. A fake ProjectGateway (records undo()/redo();
+// scripts can_undo()/can_redo()) is injected so the chords are exercised without a
+// real session. The assertions are on the recorded verb calls: Ctrl+Z drives undo(),
+// Ctrl+Shift+Z and Ctrl+Y drive redo(), and each chord is gated — a no-op when the
+// matching can_undo()/can_redo() is false (Decision D-undo-3).
 
 using ace::app::Shell;
 using ace::app::ShellOptions;
 
 namespace {
 
-// Records save_as(); the other actions are inert (this e2e is scoped to the Save As…
-// button wiring, the fork verb of A13/D-save_as).
+// Records undo()/redo() and scripts can_undo()/can_redo(); the entry + Save actions
+// are inert (this e2e is scoped to the undo/redo chords).
 class FakeGateway final : public ace::dock::ProjectGateway {
 public:
-  int save_as_calls = 0;
+  int undo_calls = 0;
+  int redo_calls = 0;
+  bool can_undo_flag = true;
+  bool can_redo_flag = true;
 
   bool open_project(const std::filesystem::path&) override { return true; }
   bool new_project(const std::filesystem::path&, const std::string&) override { return true; }
@@ -43,13 +45,18 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
-  void save_as() override { ++save_as_calls; }
-  // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
-  // undo_ui_e2e_test.cpp.
-  bool undo() override { return false; }
-  bool redo() override { return false; }
-  bool can_undo() const override { return false; }
-  bool can_redo() const override { return false; }
+  void save_as() override {}
+
+  bool undo() override {
+    ++undo_calls;
+    return true;
+  }
+  bool redo() override {
+    ++redo_calls;
+    return true;
+  }
+  bool can_undo() const override { return can_undo_flag; }
+  bool can_redo() const override { return can_redo_flag; }
 };
 
 struct E2EState {
@@ -65,7 +72,8 @@ bool capture_pixels(ImGuiID /*viewport_id*/, int x, int y, int w, int h, unsigne
 
 } // namespace
 
-TEST_CASE("save_as e2e: the rail's Save As… button drives the gateway's save_as") {
+TEST_CASE(
+    "undo e2e: Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y drive the gateway, gated on can_undo/can_redo") {
   Shell shell;
   ShellOptions opts;
   opts.headless = true;
@@ -86,20 +94,48 @@ TEST_CASE("save_as e2e: the rail's Save As… button drives the gateway's save_a
   ImGuiTestEngine_Start(engine, shell.imgui_context());
 
   E2EState state{&dockspace, &gateway};
-  ImGuiTest* test = IM_REGISTER_TEST(engine, "save_as", "rail_save_as");
+  ImGuiTest* test = IM_REGISTER_TEST(engine, "undo", "chords_drive_gateway_gated");
   test->UserData = &state;
   test->TestFunc = [](ImGuiTestContext* ctx) {
     auto* state = static_cast<E2EState*>(ctx->Test->UserData);
     FakeGateway& gateway = *state->gateway;
-    const std::string rail = ace::dock::tool_rail_title();
-    const auto rail_ref = [&rail](const char* label) { return rail + "/" + label; };
+    ctx->Yield(2); // let the dockspace draw before injecting chords
 
-    // Clicking Save As… drives the gateway's save_as() exactly once (the async
-    // pick→publish→exec follow-up is owned by the L4 impl, not asserted here).
-    IM_CHECK(gateway.save_as_calls == 0);
-    ctx->ItemClick(rail_ref("###save_as").c_str());
+    // Ctrl+Z drives undo() exactly once (the canonical chord), redo() untouched.
+    gateway.can_undo_flag = true;
+    gateway.can_redo_flag = true;
+    IM_CHECK(gateway.undo_calls == 0);
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Z);
     ctx->Yield(2);
-    IM_CHECK(gateway.save_as_calls == 1);
+    IM_CHECK(gateway.undo_calls == 1);
+    IM_CHECK(gateway.redo_calls == 0);
+
+    // Ctrl+Shift+Z drives redo().
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z);
+    ctx->Yield(2);
+    IM_CHECK(gateway.redo_calls == 1);
+    IM_CHECK(gateway.undo_calls == 1); // undo not re-triggered by the shift variant
+
+    // Ctrl+Y is the alternate redo chord.
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Y);
+    ctx->Yield(2);
+    IM_CHECK(gateway.redo_calls == 2);
+
+    // Gating: with can_undo() false, Ctrl+Z is a no-op (never dispatches undo()).
+    gateway.can_undo_flag = false;
+    const int undo_before = gateway.undo_calls;
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Z);
+    ctx->Yield(2);
+    IM_CHECK(gateway.undo_calls == undo_before);
+
+    // Gating: with can_redo() false, both redo chords are no-ops.
+    gateway.can_redo_flag = false;
+    const int redo_before = gateway.redo_calls;
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z);
+    ctx->Yield(2);
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Y);
+    ctx->Yield(2);
+    IM_CHECK(gateway.redo_calls == redo_before);
   };
   ImGuiTestEngine_QueueTest(engine, test);
 

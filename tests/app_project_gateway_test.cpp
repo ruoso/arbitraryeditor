@@ -6,6 +6,8 @@
 #include <ace/platform/process_launcher.hpp>
 #include <ace/project/project.hpp>
 
+#include <arbc/runtime/document.hpp>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
@@ -256,6 +258,39 @@ TEST_CASE("AppProjectGateway::save_as on a cancelled pick publishes nothing and 
 
   REQUIRE(dialog.shown);
   REQUIRE_FALSE(launcher.invoked); // a cancelled pick spawns nothing (D-save_as)
+}
+
+TEST_CASE("AppProjectGateway::undo/redo navigate the in-process session's journal (A13)",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // A fresh session has an empty journal cursor: nothing to navigate.
+  CHECK_FALSE(gateway.can_undo());
+  CHECK_FALSE(gateway.can_redo());
+  CHECK_FALSE(gateway.undo()); // an empty journal is inert (D-undo)
+  CHECK_FALSE(gateway.redo());
+
+  // One edit through the seam pushes exactly one journal entry.
+  ace::commands::dispatch(session,
+                          ace::commands::Command{"add_composition", [](arbc::Document& doc) {
+                                                   doc.add_composition(64.0, 64.0);
+                                                 }});
+  CHECK(gateway.can_undo());
+  CHECK_FALSE(gateway.can_redo());
+
+  // Undo navigates the cursor back (a forward publish) and reports the move; redo
+  // then navigates forward again. No sibling exec is fired for either (A13).
+  REQUIRE(gateway.undo());
+  CHECK(gateway.can_redo());
+  REQUIRE(gateway.redo());
+  CHECK(gateway.can_undo());
+  REQUIRE_FALSE(launcher.invoked);
 }
 
 TEST_CASE("AppProjectGateway::pick_folder forwards and survives teardown mid-pick",
