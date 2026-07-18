@@ -8,6 +8,8 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <system_error>
 #include <type_traits>
 
@@ -105,6 +107,26 @@ platform::Result<OpenedProject> open_project(const platform::FileSystem& fs,
 // `project.arbc` — the canonical dump is `editor.project.save`'s publish step.
 platform::Result<OpenedProject> create_project(const platform::FileSystem& fs,
                                                const std::filesystem::path& root);
+
+// --- open_ui validate / compose helpers (editor.project.open_ui) -----------
+
+// True when `root` is an existing directory that already holds a project (D16):
+// either the live workspace file or the canonical `project.arbc` is present under
+// an enumerable directory (the same recognition `open_project` applies inline).
+// A pure existence check via `project_layout` — it opens NO `Document` (A7), so
+// it is safe to pre-validate an Open target before spawning a sibling editor on
+// it and doubles as the recent-list pruner (D-open_ui-5). Never throws.
+bool is_project_directory(const platform::FileSystem& fs, const std::filesystem::path& root);
+
+// Compose the target directory for a New project from a chosen parent location and
+// a project `name` (D-open_ui-4). Pure path arithmetic — NO I/O, opens no
+// `Document`. Returns `nullopt` for an empty parent, an empty/blank name, or a
+// name that is not a single path component (contains a `/` or `\\` separator, or
+// is `.` / `..`) — so no name can escape `parent` by traversal (Constraint 2).
+// The composed path is deliberately NOT created here: the sibling editor's
+// create-vs-open bootstrap scaffolds the not-yet-existing directory.
+std::optional<std::filesystem::path> compose_new_project_target(const std::filesystem::path& parent,
+                                                                std::string_view name);
 
 } // namespace ace::project
 

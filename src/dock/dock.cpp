@@ -44,6 +44,96 @@ void build_node(ImGuiID node_id, const ace::dockmodel::DockNode& node) {
   build_node(second_id, node.children[1]);
 }
 
+// The New Project modal (D-open_ui-4): opened once a folder pick resolves a parent
+// location, it collects a project name and, on Create, composes the not-yet-
+// existing target through the gateway — which spawns the sibling whose bootstrap
+// create-branch scaffolds it (no second Document minted here, D19/A7). Drawn every
+// frame from the rail so BeginPopupModal stays balanced; the name buffer + parent
+// live on the Dockspace so the state survives the async pick.
+void draw_new_project_modal(Dockspace& dockspace, ProjectGateway& gateway) {
+  const char* popup_id = "New Project";
+  if (dockspace.new_project_modal_open() && !ImGui::IsPopupOpen(popup_id)) {
+    ImGui::OpenPopup(popup_id);
+  }
+  const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  if (ImGui::BeginPopupModal(popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("Location: %s", dockspace.new_project_parent().string().c_str());
+    ImGui::InputText("Name", dockspace.new_project_name_buffer(),
+                     static_cast<std::size_t>(dockspace.new_project_name_buffer_size()));
+    const std::string name(dockspace.new_project_name_buffer());
+    if (ImGui::Button("Create")) {
+      if (gateway.new_project(dockspace.new_project_parent(), name)) {
+        dockspace.project_feedback().clear();
+        dockspace.close_new_project_modal();
+        ImGui::CloseCurrentPopup();
+      } else {
+        dockspace.project_feedback() = "Enter a valid project name.";
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      dockspace.close_new_project_modal();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+}
+
+// The rail's Project section (D18 home base / D22): New / Open / Open Recent, each
+// terminating in a sibling `exec` through the gateway (never swapping this
+// process's one Document, D19). Present only when a gateway is wired; the folder
+// pick is async, so New/Open compose their follow-up inside the pick callback.
+void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
+  ImGui::Separator();
+  ImGui::TextUnformatted("Project");
+  // Stable, slash-free `###` widget ids (the visible label carries the ellipsis /
+  // path; the id after `###` is what the e2e drives by) so a path in the label
+  // never confuses the test-engine ref parser.
+  if (ImGui::Selectable("New Project…###new_project")) {
+    ProjectGateway* gw = &gateway;
+    gw->pick_folder([&dockspace](std::optional<std::filesystem::path> picked) {
+      if (picked.has_value()) {
+        dockspace.open_new_project_modal(*picked);
+      }
+    });
+  }
+  if (ImGui::Selectable("Open Project…###open_project")) {
+    ProjectGateway* gw = &gateway;
+    gw->pick_folder([&dockspace, gw](std::optional<std::filesystem::path> picked) {
+      if (!picked.has_value()) {
+        return; // a cancelled pick spawns nothing (Constraint 5)
+      }
+      if (gw->open_project(*picked)) {
+        dockspace.project_feedback().clear();
+      } else {
+        dockspace.project_feedback() = "That folder is not a project.";
+      }
+    });
+  }
+  const std::vector<std::filesystem::path> recent = gateway.recent_projects();
+  if (!recent.empty()) {
+    ImGui::TextUnformatted("Open Recent");
+    for (std::size_t i = 0; i < recent.size(); ++i) {
+      const std::filesystem::path& dir = recent[i];
+      std::string label = dir.string();
+      label += "###recent";
+      label += std::to_string(i);
+      if (ImGui::Selectable(label.c_str())) {
+        if (gateway.open_recent(dir)) {
+          dockspace.project_feedback().clear();
+        } else {
+          dockspace.project_feedback() = "That project is no longer available.";
+        }
+      }
+    }
+  }
+  if (!dockspace.project_feedback().empty()) {
+    ImGui::TextWrapped("%s", dockspace.project_feedback().c_str());
+  }
+  draw_new_project_modal(dockspace, gateway);
+}
+
 } // namespace
 
 const char* name() { return "dock"; }
@@ -81,6 +171,12 @@ void draw_tool_rail(Dockspace& dockspace) {
     if (ImGui::Selectable(label.c_str(), entry.is_open)) {
       dockspace.open(entry.type);
     }
+  }
+
+  // The project-entry affordances (D22 / A12): New / Open / Open Recent, present
+  // only when the app wired a gateway (null in the bare-shell smoke).
+  if (ProjectGateway* gateway = dockspace.project_gateway()) {
+    draw_project_section(dockspace, *gateway);
   }
 
   // Saved workspaces (D18/D21): a one-click switcher over the built-in and user

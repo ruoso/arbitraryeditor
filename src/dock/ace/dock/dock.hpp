@@ -5,6 +5,9 @@
 #include <ace/dockmodel/view_registry.hpp>
 
 #include <array>
+#include <filesystem>
+#include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +20,47 @@ namespace ace::dock {
 
 // The dock component. See docs/01-architecture.md §8 (component levelization).
 const char* name();
+
+// The project-entry seam (docs/01-architecture.md A12, docs/00-design.md D22).
+// The tool rail's New / Open / Recent affordances drive this ABSTRACT interface,
+// which `dock` (L3) declares and owns; the concrete AppProjectGateway lives in L4
+// `app` — the only level permitted SDL — and is the sole holder of the SDL-backed
+// native folder dialog, the platform::ProcessLauncher + current_executable_path
+// (A7), the dockmodel::RecentProjects store, and the L1 `project` validate/compose
+// helpers. So the rail reaches process-launch + SDL through one abstraction it
+// declares, never by including `<ace/commands/...>` or `<ace/platform/...>`; the
+// dependency is inverted so `dock`'s includes stay within its own header + std.
+//
+// Every action spawns a NEW sibling editor process (process-per-project, D19/A7)
+// and NEVER swaps the current process's one Document — the current window stays up
+// (D19's tab analog). Errors are values: the mutating actions return success/
+// failure the rail renders as inline feedback (Constraint 7).
+class ProjectGateway {
+public:
+  virtual ~ProjectGateway() = default;
+
+  // Validate `dir` as an existing project, record it MRU-front, and spawn a
+  // sibling editor on it. Returns false (no spawn) when `dir` is not a project.
+  virtual bool open_project(const std::filesystem::path& dir) = 0;
+
+  // Compose `parent / name` (a not-yet-existing target) and spawn a sibling whose
+  // bootstrap create-branch scaffolds it — no second Document is minted here.
+  // Returns false on an invalid name; records nothing (the directory is absent).
+  virtual bool new_project(const std::filesystem::path& parent, const std::string& name) = 0;
+
+  // Replay a recent project directory: re-order it MRU-front and spawn. Returns
+  // false when the directory is no longer a project.
+  virtual bool open_recent(const std::filesystem::path& dir) = 0;
+
+  // Open the OS-native folder picker (Constraint 5). Returns IMMEDIATELY; the OS
+  // dialog is async, so `on_pick` is invoked on a later frame with the chosen
+  // directory, or with nullopt on cancel. The rail composes the chosen path into
+  // an open_project / new_project follow-up inside `on_pick`.
+  virtual void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) = 0;
+
+  // The current pruned MRU list (most-recent-first) for the rail to render.
+  virtual std::vector<std::filesystem::path> recent_projects() const = 0;
+};
 
 // The default starter arrangement (the eight-type catalog is opened lazily by
 // the launcher — tool_rail): a Canvas fills one side; Inspector / Layers /
@@ -81,16 +125,46 @@ public:
   ace::dockmodel::ToolSelection& tools() { return tools_; }
   const ace::dockmodel::ToolSelection& tools() const { return tools_; }
 
+  // The project-entry gateway the rail's New / Open / Recent affordances drive
+  // (A12 / D22). Null until the app wires one at bootstrap (or a test injects a
+  // fake through ShellOptions); when null the rail omits the Project section.
+  void set_project_gateway(ProjectGateway* gateway) { project_gateway_ = gateway; }
+  ProjectGateway* project_gateway() const { return project_gateway_; }
+
+  // The New Project modal state the rail drives (a name buffer mirroring the
+  // save-name buffer, plus the chosen parent the folder pick seeded). The modal
+  // opens only after pick_folder resolves a parent location (D-open_ui-4).
+  char* new_project_name_buffer() { return new_project_name_.data(); }
+  int new_project_name_buffer_size() const { return static_cast<int>(new_project_name_.size()); }
+  bool new_project_modal_open() const { return new_project_modal_open_; }
+  const std::filesystem::path& new_project_parent() const { return new_project_parent_; }
+  void open_new_project_modal(std::filesystem::path parent) {
+    new_project_parent_ = std::move(parent);
+    new_project_name_.fill('\0');
+    new_project_modal_open_ = true;
+  }
+  void close_new_project_modal() { new_project_modal_open_ = false; }
+
+  // Inline feedback the rail renders for the last project action (a non-project
+  // Open selection, an unavailable recent, an invalid New name). The rail reads
+  // and writes it; empty means "no message".
+  std::string& project_feedback() { return project_feedback_; }
+
 private:
   ace::dockmodel::ViewRegistry registry_;
   ace::dockmodel::DockLayout layout_;
   ace::dockmodel::ToolSelection tools_; // the rail's active-tool selection (A11)
   ace::dockmodel::WorkspaceStore* workspace_store_ =
-      nullptr;                       // preset store (app-wired, may be null)
-  std::array<char, 64> save_name_{}; // "Save current as…" name buffer
-  bool built_ = false;               // DockBuilder seeded at least once
-  bool rebuild_ = false;             // a programmatic open/reopen needs a re-seed
-  unsigned int dockspace_id_ = 0;    // ImGuiID; assigned on first draw()
+      nullptr;                                // preset store (app-wired, may be null)
+  ProjectGateway* project_gateway_ = nullptr; // project-entry seam (app-wired, may be null)
+  std::array<char, 64> save_name_{};          // "Save current as…" name buffer
+  std::array<char, 128> new_project_name_{};  // New Project modal name buffer
+  std::filesystem::path new_project_parent_;  // parent the folder pick seeded
+  std::string project_feedback_;              // inline feedback for the last action
+  bool new_project_modal_open_ = false;       // the New Project modal is showing
+  bool built_ = false;                        // DockBuilder seeded at least once
+  bool rebuild_ = false;                      // a programmatic open/reopen needs a re-seed
+  unsigned int dockspace_id_ = 0;             // ImGuiID; assigned on first draw()
 };
 
 // The stable ImGui window id of the fixed tool rail — exposed so the e2e can

@@ -162,8 +162,12 @@ target_include_directories(ace_app PUBLIC "${CMAKE_SOURCE_DIR}/src/app")
 target_compile_features(ace_app PUBLIC cxx_std_20)
 # ace::platform: run_editor constructs a NativeFileSystem + WorkspaceStore for the
 # saved-workspace presets (editor.dock.workspaces); app is L4 so platform is in its
-# closure (scripts/check_levels.py). dockmodel arrives transitively via ace::dock.
-target_link_libraries(ace_app PUBLIC ace::dock ace::gl ace::platform imgui)
+# closure (scripts/check_levels.py). ace::commands/ace::project are named directly
+# now that AppProjectGateway (editor.project.open_ui) calls open_another_project +
+# the project validate/compose helpers; dockmodel via ace::dock stays transitive but
+# is named too for the RecentProjects store.
+target_link_libraries(ace_app PUBLIC ace::dock ace::gl ace::platform ace::commands
+                                     ace::project ace::dockmodel imgui)
 
 add_executable(arbitraryeditor src/app/main.cpp)
 target_link_libraries(arbitraryeditor PRIVATE ace::app)
@@ -175,7 +179,8 @@ add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
                          tests/dockmodel_test.cpp tests/view_registry_test.cpp
                          tests/tool_rail_test.cpp tests/workspaces_test.cpp
                          tests/project_open_test.cpp tests/commands_test.cpp
-                         tests/exec_new_test.cpp)
+                         tests/exec_new_test.cpp tests/recent_projects_test.cpp
+                         tests/project_entry_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands arbc::arbc
                                         Catch2::Catch2WithMain)
@@ -194,7 +199,8 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/shell_e2e_test.cpp tests/dockspace_e2e_test.cpp
                               tests/view_registry_e2e_test.cpp tests/tool_rail_e2e_test.cpp
                               tests/workspaces_e2e_test.cpp tests/app_state_e2e_test.cpp
-                              tests/exec_new_argv_test.cpp tests/exec_new_e2e_test.cpp)
+                              tests/exec_new_argv_test.cpp tests/exec_new_e2e_test.cpp
+                              tests/app_project_gateway_test.cpp tests/open_ui_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

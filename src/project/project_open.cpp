@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -202,6 +203,37 @@ platform::Result<OpenedProject> create_project(const platform::FileSystem& fs,
   opened.layout = layout;
   opened.rebuilt_from_canonical = false;
   return opened;
+}
+
+bool is_project_directory(const platform::FileSystem& fs, const std::filesystem::path& root) {
+  // Mirror open_project's recognition without opening a Document (A7): `root` must
+  // be an enumerable directory, and either the workspace file or the canonical
+  // project.arbc must be present.
+  if (!fs.list_directory(root).has_value()) {
+    return false;
+  }
+  const ProjectLayout layout = project_layout(root);
+  return fs.exists(layout.workspace_file) || fs.exists(layout.canonical);
+}
+
+std::optional<std::filesystem::path> compose_new_project_target(const std::filesystem::path& parent,
+                                                                std::string_view name) {
+  if (parent.empty() || name.empty()) {
+    return std::nullopt;
+  }
+  // A project name must be exactly one path component: reject separators (which
+  // would nest or, via `..`, escape) and the dot entries. Whitespace-only names
+  // are rejected too so a blank field never composes `parent / " "`.
+  if (name.find('/') != std::string_view::npos || name.find('\\') != std::string_view::npos) {
+    return std::nullopt;
+  }
+  if (name == "." || name == "..") {
+    return std::nullopt;
+  }
+  if (name.find_first_not_of(" \t") == std::string_view::npos) {
+    return std::nullopt;
+  }
+  return parent / std::filesystem::path(name);
 }
 
 } // namespace ace::project

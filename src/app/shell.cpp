@@ -1,11 +1,15 @@
+#include <ace/app/folder_dialog.hpp>
 #include <ace/app/probe.hpp>
+#include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/dock/dock.hpp>
+#include <ace/dockmodel/recent_projects.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/dockmodel/workspaces.hpp>
 #include <ace/gl/gl.hpp>
 #include <ace/platform/filesystem.hpp>
+#include <ace/platform/process_launcher.hpp>
 #include <ace/views/views.hpp>
 
 #include <SDL3/SDL.h>
@@ -16,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <random>
 #include <string>
 #include <string_view>
@@ -222,6 +227,31 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   // file is touched until a user saves.
   ace::dockmodel::WorkspaceStore workspace_store(workspace_prefs_root(), filesystem);
   dockspace.set_workspace_store(&workspace_store);
+  // The project-entry gateway (A12/D22): the rail's New / Open / Recent seam. A
+  // test may inject a fake through ShellOptions; otherwise wire the L4 SDL-backed
+  // AppProjectGateway (the sole native-folder-dialog holder) over the same
+  // FileSystem, a ProcessLauncher, and the recent-projects prefs store (a sibling
+  // of the workspaces prefs dir). Every action spawns a sibling editor — the one
+  // owned Document is never swapped (D19/A7). All outlive the draw loop below.
+  ace::platform::NativeProcessLauncher launcher;
+  std::unique_ptr<ace::dockmodel::RecentProjects> recent_projects;
+  std::unique_ptr<ace::app::SdlFolderDialog> folder_dialog;
+  std::unique_ptr<ace::app::AppProjectGateway> app_gateway;
+  ace::dock::ProjectGateway* project_gateway = opts.project_gateway;
+  if (project_gateway == nullptr) {
+    std::filesystem::path executable;
+    if (const platform::Result<std::filesystem::path> exe =
+            ace::platform::current_executable_path()) {
+      executable = *exe;
+    }
+    recent_projects = std::make_unique<ace::dockmodel::RecentProjects>(
+        workspace_prefs_root().parent_path(), filesystem);
+    folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
+    app_gateway = std::make_unique<ace::app::AppProjectGateway>(
+        *recent_projects, filesystem, *folder_dialog, launcher, executable);
+    project_gateway = app_gateway.get();
+  }
+  dockspace.set_project_gateway(project_gateway);
   shell.set_draw_content([&dockspace]() { dockspace.draw(); });
   while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
     shell.new_frame();

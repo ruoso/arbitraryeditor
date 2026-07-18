@@ -18,6 +18,13 @@ namespace ace::commands {
 class AppState;
 }
 
+// The project-entry seam (editor.project.open_ui / A12) is declared in L3 `dock`;
+// forward-declared here so a test can inject a fake gateway through ShellOptions
+// without dragging the dock header into every shell consumer.
+namespace ace::dock {
+class ProjectGateway;
+}
+
 namespace ace::app {
 
 struct ShellOptions {
@@ -36,6 +43,11 @@ struct ShellOptions {
   // one Document, never empty" invariant always holds and the app is drivable
   // headless. A future `editor.project.exec_new` passes a concrete path here.
   std::filesystem::path project_dir;
+  // Test seam (editor.project.open_ui): a fake project-entry gateway the rail's
+  // New / Open / Recent affordances drive, injected in place of the SDL-backed
+  // AppProjectGateway (A12). Null in a real run — run_editor then constructs the
+  // native gateway. Not owned; must outlive the run.
+  ace::dock::ProjectGateway* project_gateway = nullptr;
 };
 
 // The application shell: SDL3 window + GLES3 context + Dear ImGui (docking),
