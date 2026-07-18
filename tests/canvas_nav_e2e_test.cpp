@@ -6,9 +6,11 @@
 // canvas#1 view BY ID. Asserts: (i) a simulated wheel over the pane advances the
 // published frame AND raises anchor_depth(canvas#1) — zoom engaged end-to-end through
 // the interact math + camera channel; (ii) a Space-held drag pans (the frame advances);
-// (iii) the scale-bar overlay's labelled length changes after the zoom and is restored by
-// reset-to-fit (F). NOT a byte-exact golden — ImGui chrome + software-GL pixels are flaky
-// by construction (the tool_rail precedent); the byte-exactness lives in the CPU golden
+// (iii) the scale-bar overlay's labelled length changes after the zoom and, on reset-to-fit
+// (F), snaps to the authored-bounds fit — reading MORE units than the initial identity
+// framing because the 2048x2048 canvas frames below scale 1 in the pane (editor.canvas.
+// fit_bounds / D-fit_bounds-1). NOT a byte-exact golden — ImGui chrome + software-GL pixels are
+// flaky by construction (the tool_rail precedent); the byte-exactness lives in the CPU golden
 // tests/canvas_host_test.cpp. Drive by widget/view id, assert the resulting state.
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/shell.hpp>
@@ -195,14 +197,21 @@ TEST_CASE("canvas_nav e2e: wheel zooms (anchor_depth rises), Space-drag pans, sc
     IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") > before_pan; }));
     settle(ctx, canvas);
 
-    // Reset-to-fit (F): the camera returns to the default identity framing, so the scale
-    // bar is restored (the "don't get lost" recovery, D-nav-7).
+    // Reset-to-fit (F): the camera frames the root composition's authored 2048x2048 canvas
+    // into the pane (editor.canvas.fit_bounds / D-fit_bounds-1), the "don't get lost"
+    // recovery (D-nav-7). Because the authored canvas is far larger than the pane, the fit
+    // camera's scale is < 1 — so the restored scale-bar reads MORE composition units per
+    // screen span than the initial identity framing (units_before, scale == 1). That
+    // strict-greater proves F now reaches the authored-bounds fit, not device-pixel identity
+    // (which would merely restore units_before). It is also > units_zoomed (a zoom-in).
     const std::uint64_t before_reset = canvas.frames_issued("canvas#1");
     ctx->MouseMoveToPos(center);
     ctx->KeyPress(ImGuiKey_F);
     IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") > before_reset; }));
     settle(ctx, canvas);
-    IM_CHECK(canvas.scale_bar_units("canvas#1") > units_zoomed);
+    const double units_reset = canvas.scale_bar_units("canvas#1");
+    IM_CHECK(units_reset > units_zoomed);
+    IM_CHECK(units_reset > units_before);
   };
   ImGuiTestEngine_QueueTest(engine, test);
 

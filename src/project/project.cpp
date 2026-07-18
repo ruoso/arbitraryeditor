@@ -2,11 +2,15 @@
 #include <ace/platform/platform.hpp>
 #include <ace/project/project.hpp>
 
+#include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
+#include <arbc/model/model.hpp>   // DocRoot::find_first_composition (the read seam)
+#include <arbc/model/records.hpp> // CompositionRecord::canvas_w / canvas_h
 #include <arbc/runtime/document.hpp>
 
 #include <memory>
+#include <optional>
 
 namespace ace::project {
 
@@ -26,6 +30,26 @@ ProbeDocument build_probe_document() {
   probe.layer = doc.add_layer(probe.content, arbc::Affine::identity());
   doc.attach_layer(probe.composition, probe.layer);
   return probe;
+}
+
+std::optional<CompositionSize> root_composition_size(const arbc::Document& document) {
+  // Pin a version and read the root composition through the intended lock-free
+  // reader seam (A4 / D-fit_bounds-1): find_first_composition is libarbc's own
+  // lowest-id-wins root rule — the exact anchor the compositor sources its frame
+  // walk on, so the fit frames the identical composition that renders.
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return std::nullopt;
+  }
+  arbc::ObjectId root_id;
+  const arbc::CompositionRecord* rec = nullptr;
+  if (!state->find_first_composition(root_id, rec) || rec == nullptr) {
+    return std::nullopt; // no composition — nothing to fit (D-fit_bounds-3).
+  }
+  if (!(rec->canvas_w > 0.0) || !(rec->canvas_h > 0.0)) {
+    return std::nullopt; // degenerate authored size — nothing to fit (Constraint 2).
+  }
+  return CompositionSize{rec->canvas_w, rec->canvas_h};
 }
 
 } // namespace ace::project

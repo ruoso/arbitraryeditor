@@ -2,6 +2,7 @@
 #include <ace/commands/app_state.hpp>
 #include <ace/gl/gl.hpp>
 #include <ace/interact/interact.hpp>
+#include <ace/project/project.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 #include <ace/views/views.hpp>
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -81,11 +83,17 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
         views::draw_canvas_interactive(p.texture, p.tex_width, p.tex_height);
 
     // Thread the raw gesture through the L1 interact math (D-nav-2) into a new transient
-    // camera. reset-to-fit restores the default identity framing (D-canvas_view-5's fit
-    // camera; D-nav-7); wheel zooms about the cursor; a Space-drag pans (D9).
+    // camera. reset-to-fit frames the root composition's authored canvas bounds into the
+    // pane (D-fit_bounds-1) — the "don't get lost in unbounded space" recovery; a document
+    // with no usable authored size keeps the identity framing ("nothing to fit",
+    // D-fit_bounds-3). Wheel zooms about the cursor; a Space-drag pans (D9).
     arbc::Affine camera = p.camera;
     if (in.reset) {
       camera = arbc::Affine::identity();
+      if (const std::optional<project::CompositionSize> size =
+              project::root_composition_size(state_.document())) {
+        camera = interact::fit(size->width, size->height, p.tex_width, p.tex_height);
+      }
     }
     if (in.wheel != 0.0F) {
       camera = interact::zoom(camera, arbc::Vec2{in.focus_x, in.focus_y},

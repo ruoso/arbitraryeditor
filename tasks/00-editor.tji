@@ -188,8 +188,9 @@ task editor "Editor — host GUI over libarbc" {
     task fit_bounds "Wire reset-to-fit to root composition authored bounds" {
       effort 1d
       allocate team
+      complete 100
       depends !nav
-      note "reset-to-fit currently restores identity/fit framing (D-canvas_view-5); wire it to the root composition's authored bounds once a Document composition-bounds accessor is available. The general interact::fit(content,pane) math ships in editor.canvas.nav tested for this future wiring + downstream reuse. Source-of-debt: tasks/refinements/editor/nav.md. Design: docs/00-design.md D2 §3."
+      note "reset-to-fit currently restores identity/fit framing (D-canvas_view-5); wire it to the root composition's authored bounds once a Document composition-bounds accessor is available. The general interact::fit(content,pane) math ships in editor.canvas.nav tested for this future wiring + downstream reuse. Source-of-debt: tasks/refinements/editor/nav.md. Design: docs/00-design.md D2 §3. Refinement: tasks/refinements/editor/fit_bounds.md"
     }
   }
 

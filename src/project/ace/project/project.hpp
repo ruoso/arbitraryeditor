@@ -45,6 +45,24 @@ struct ProbeDocument {
 // the layer. The offline render (ace::render) drives this straight into a frame.
 ProbeDocument build_probe_document();
 
+// The root composition's authored canvas bounds, origin-anchored at [0,0]
+// (editor.canvas.fit_bounds). A composition carries only `canvas_w`/`canvas_h`
+// (no origin), so the authored region is [0,0]→[width,height] in composition units.
+struct CompositionSize {
+  double width = 0.0;
+  double height = 0.0;
+};
+
+// The reader mirror of `Document::add_composition` (D-fit_bounds-2): pin a version
+// and return the root (lowest-id) composition's authored `canvas_w`/`canvas_h` — the
+// same root the compositor anchors on (`find_first_composition`, the v0.1 root rule).
+// Returns `std::nullopt` when the document has no composition or the authored size is
+// degenerate (`canvas_w`/`canvas_h` not `> 0`), so "nothing to fit" is a first-class,
+// testable case (D-fit_bounds-3). Lives in L1 `project` beside the writer; the app
+// layer feeds the result to `interact::fit` on reset-to-fit. A lock-free `pin()` read
+// (A4) — legal on the UI (writer) thread, touches no render-thread cache.
+std::optional<CompositionSize> root_composition_size(const arbc::Document& document);
+
 // --- project directory open / create (editor.project.open) -----------------
 
 // The canonical on-disk bundle layout (D16, docs/00-design.md §9): a project is a
