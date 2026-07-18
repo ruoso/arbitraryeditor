@@ -87,8 +87,9 @@ bool Shell::init(const ShellOptions& opts) {
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-  // Created hidden; the windowed shell shows it after GL/ImGui are up (no flash).
-  const SDL_WindowFlags flags = SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN;
+  // Keep windowed runs visible from creation time. Some Wayland/libdecor
+  // combinations crash during explicit SDL_ShowWindow() on a hidden window.
+  const SDL_WindowFlags flags = SDL_WINDOW_OPENGL | (opts_.headless ? SDL_WINDOW_HIDDEN : 0);
   window_ = SDL_CreateWindow(k_window_title, opts_.width, opts_.height, flags);
   if (!window_) {
     return fail("SDL_CreateWindow");
@@ -99,9 +100,6 @@ bool Shell::init(const ShellOptions& opts) {
   }
   SDL_GL_MakeCurrent(window_, static_cast<SDL_GLContext>(gl_ctx_));
   SDL_GL_SetSwapInterval(opts_.headless ? 0 : 1);
-  if (!opts_.headless) {
-    SDL_ShowWindow(window_);
-  }
 
   IMGUI_CHECKVERSION();
   imgui_ctx_ = ImGui::CreateContext();

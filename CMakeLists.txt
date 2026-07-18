@@ -58,6 +58,10 @@ endif()
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+# Newer SDL releases may require X11 XTEST headers/libraries when X11 is
+# enabled. We do not rely on that path for editor behavior, so keep it disabled
+# to avoid a hard dependency on the system XTEST dev package.
+set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
 # The shell inits SDL_INIT_VIDEO only (src/app/shell.cpp) — audio and camera are
 # unused. Disable both subsystems: it trims the build and, crucially, drops SDL's
 # PipeWire backends (audio + camera both build SDL_pipewire.c), which fail to
@@ -68,7 +72,7 @@ set(SDL_AUDIO OFF CACHE BOOL "" FORCE)
 set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(SDL3
   GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-  GIT_TAG release-3.2.0
+  GIT_TAG release-3.4.12
   GIT_SHALLOW TRUE)
 FetchContent_Declare(imgui
   GIT_REPOSITORY https://github.com/ocornut/imgui.git

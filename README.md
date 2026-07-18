@@ -30,6 +30,14 @@ architecture (A1–A9) are fully specified:
 
 Toolkit: **Dear ImGui + SDL3 + OpenGL**. Rendering backend comes from libarbc.
 
+## Troubleshooting
+
+- Wayland startup crash in libdecor (`mmap failed: Invalid argument` + segfault):
+  this is a known upstream SDL/Wayland/libdecor issue
+  (https://github.com/libsdl-org/SDL/issues/5952). The editor defaults to
+  `SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR=0` unless you explicitly set that hint
+  yourself.
+
 ## Work breakdown
 
 The build is decomposed as a TaskJuggler WBS (`project.tjp` + `tasks/`), driven
