@@ -212,6 +212,52 @@ TEST_CASE("AppProjectGateway::save publishes the in-process session; is_dirty tr
   REQUIRE_FALSE(launcher.invoked);
 }
 
+TEST_CASE("AppProjectGateway::save_as picks a target, publishes a copy, and execs a sibling",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // The folder pick resolves to a fresh, not-yet-existing target: save_as publishes
+  // the in-process session's copy there (D-save_as-1) and execs a sibling on it.
+  const std::filesystem::path target = scratch.root / "copy";
+  dialog.next = target;
+  gateway.save_as();
+
+  REQUIRE(dialog.shown);
+  // project.arbc appears at the target — the copy was published (not a sibling on the
+  // source), and the sibling exec was fired with that same absolute path.
+  CHECK(fs.exists(ace::project::project_layout(target).canonical));
+  REQUIRE(launcher.invoked);
+  REQUIRE(launcher.args.size() == 1);
+  CHECK(launcher.args.front() == std::filesystem::weakly_canonical(target).string());
+
+  // The current session is untouched (D-save_as-2): still dirty, still its own root.
+  CHECK(gateway.is_dirty());
+  CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
+}
+
+TEST_CASE("AppProjectGateway::save_as on a cancelled pick publishes nothing and execs nothing",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  dialog.next = std::nullopt; // the user cancelled the folder picker
+  gateway.save_as();
+
+  REQUIRE(dialog.shown);
+  REQUIRE_FALSE(launcher.invoked); // a cancelled pick spawns nothing (D-save_as)
+}
+
 TEST_CASE("AppProjectGateway::pick_folder forwards and survives teardown mid-pick",
           "[app_project_gateway]") {
   ScratchDir scratch;

@@ -79,4 +79,20 @@ bool AppProjectGateway::save() {
 
 bool AppProjectGateway::is_dirty() const { return app_state_.is_dirty(); }
 
+void AppProjectGateway::save_as() {
+  // Save As is New/Open's async-pick shape (D-save_as-3) applied to THIS session:
+  // pick a target folder, then publish a copy there and exec a sibling on it. The
+  // orchestrator leaves the current session untouched (D-save_as-2), so this process
+  // keeps running on its original project. A cancelled pick does nothing. The
+  // callback captures only `this`, whose collaborators (dialog_/launcher_/filesystem_/
+  // app_state_) all outlive the gateway; a returned error value from the orchestrator
+  // is swallowed here (no rail feedback channel across the async pick this leaf).
+  dialog_.show([this](std::optional<std::filesystem::path> picked) {
+    if (!picked.has_value()) {
+      return;
+    }
+    ace::commands::save_project_as(app_state_, filesystem_, launcher_, executable_, *picked);
+  });
+}
+
 } // namespace ace::app

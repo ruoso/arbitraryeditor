@@ -104,6 +104,14 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
     ImGui::SmallButton("Unsaved changes###dirty_indicator");
     ImGui::EndDisabled();
   }
+  // Save As sits beside Save — the other in-process verb (A13), but it forks: it
+  // publishes a COPY elsewhere and opens that copy in a sibling `exec`, leaving this
+  // session put (D-save_as-2). The native folder pick is async, so the gateway owns
+  // the whole pick→publish→exec follow-up; the rail just fires the action (no
+  // synchronous feedback to render). Stable slash-free `###` id for the e2e.
+  if (ImGui::Selectable("Save As…###save_as")) {
+    gateway.save_as();
+  }
   // Stable, slash-free `###` widget ids (the visible label carries the ellipsis /
   // path; the id after `###` is what the e2e drives by) so a path in the label
   // never confuses the test-engine ref parser.

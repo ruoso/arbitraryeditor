@@ -43,6 +43,7 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override;
   bool save() override;
   bool is_dirty() const override;
+  void save_as() override;
 
 private:
   bool spawn(const std::filesystem::path& dir);

@@ -54,3 +54,19 @@ so a mapped reopen reads clean) would require touching the shipped open/create
 path and adding I/O for a degree of precision the durable-workspace +
 idempotent-re-dump model does not need. This is a product-polish judgment call
 for a human to weigh; no WBS task was created.
+
+---
+
+## Save As overwrite-with-confirmation UX
+
+**Source:** `tasks/refinements/editor/save_as.md` (save_as, 2026-07-18), D-save_as-4.
+
+`project::save_project_as` refuses to clobber a target directory that already
+contains a `project.arbc` — returning an error value rather than silently
+replacing another project's canonical. The safe default is implemented and
+tested. The "target exists — replace?" confirmation prompt is a UI/UX judgment
+call: which layer surfaces the dialog, what copy it shows, whether the picker
+itself should filter or warn, and whether a "replace" path should require the
+target's own project to be closed first. These are product-design questions that
+cannot be mechanically resolved by an agent implementer. No WBS task was
+created; the choice is parked here for human review.

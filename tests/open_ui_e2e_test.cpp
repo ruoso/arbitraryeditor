@@ -67,10 +67,11 @@ public:
     ++recent_queries;
     return recent;
   }
-  // Save + dirty (A13) — inert here (this e2e exercises New/Open/Recent); the
-  // dedicated coverage lives in save_ui_e2e_test.cpp.
+  // Save + dirty + Save As (A13) — inert here (this e2e exercises New/Open/Recent);
+  // the dedicated coverage lives in save_ui_e2e_test.cpp / save_as_ui_e2e_test.cpp.
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
+  void save_as() override {}
 };
 
 struct E2EState {

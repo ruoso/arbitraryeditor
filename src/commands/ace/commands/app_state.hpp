@@ -2,6 +2,7 @@
 
 #include <ace/commands/selection.hpp>
 #include <ace/platform/filesystem.hpp>
+#include <ace/platform/process_launcher.hpp>
 #include <ace/platform/result.hpp>
 #include <ace/project/project.hpp>
 #include <ace/project/save.hpp>
@@ -126,5 +127,25 @@ platform::Result<AppState> open_or_create_app_state(const platform::FileSystem& 
 // one in-process `AppState`; the rail never reaches into `project` directly (A13).
 platform::Result<project::SaveOutcome> save_project(AppState& state,
                                                     const platform::FileSystem& fs);
+
+// Save As: publish a COPY of the session's live `Document` as a new project under
+// `target_root`, then open THAT copy in a detached sibling editor (D-save_as-1/2).
+// Composes the two shipped, trusted halves — `project::save_project_as` (the
+// publish-copy) and `open_another_project` (the sibling `exec`). Rejects an empty
+// `target_root` with `std::errc::invalid_argument` — the launcher is NOT invoked
+// and nothing is written (Constraint 5, mirroring `open_another_project`).
+// Otherwise canonicalizes the target to an absolute path ONCE and uses that same
+// path for both the publish and the exec, so the child never depends on the
+// parent's CWD. The CURRENT session is left untouched: `save_project_as` never
+// calls `mark_saved`, never re-points `layout_`, never tears down the window —
+// process-per-project owns one `Document` for its lifetime (D19/A7, Constraint 4);
+// a fresh sibling process owns the copy. Errors are values: a failed publish execs
+// nothing (no sibling on a half-written bundle); a failed exec leaves the published
+// copy on disk and returns the error. Never throws.
+platform::Result<project::SaveOutcome> save_project_as(AppState& state,
+                                                       const platform::FileSystem& fs,
+                                                       const platform::ProcessLauncher& launcher,
+                                                       const std::filesystem::path& executable,
+                                                       const std::filesystem::path& target_root);
 
 } // namespace ace::commands

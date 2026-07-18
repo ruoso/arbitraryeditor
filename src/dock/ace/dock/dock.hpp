@@ -71,6 +71,15 @@ public:
   // Whether the session has unpublished workspace-vs-snapshot drift (D16/A13): the
   // rail draws the dirty indicator when true. Conservative — never a false clean.
   virtual bool is_dirty() const = 0;
+
+  // Save As (A13 / D-save_as): publish a COPY of the in-process session into a
+  // newly chosen directory and open that copy in a sibling editor, leaving THIS
+  // process on its original project (process-per-project, D19/A7). Like the
+  // New/Open picker this is ASYNCHRONOUS — the L4 impl opens the native folder
+  // dialog and, on a later frame, drives `commands::save_project_as` with the
+  // chosen target — so it returns void (no synchronous outcome to render). A
+  // cancelled pick publishes nothing and execs nothing.
+  virtual void save_as() = 0;
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by

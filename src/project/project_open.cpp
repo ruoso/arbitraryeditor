@@ -51,10 +51,6 @@ const std::error_category& open_error_category() noexcept {
   return category;
 }
 
-// The workspace is machine-local scratch, rebuilt from the canonical core and
-// excluded from sharing/VCS (D16, D-open-5).
-constexpr std::string_view k_gitignore_body = "workspace/\n";
-
 // Mint a fresh workspace-backed document over `workspace_file`. `Document::create`
 // truncates any stale/garbage file already there (O_CREAT|O_TRUNC), so it doubles
 // as the "overwrite the unusable workspace" step of the rebuild path. A workspace

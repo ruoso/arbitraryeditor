@@ -129,6 +129,7 @@ task editor "Editor — host GUI over libarbc" {
     task save_as "Save As = publish + copy project dir + exec sibling" {
       effort 1d
       allocate team
+      complete 100
       depends !save, !exec_new
       note "Save As: dump the current state, recursively copy project.arbc + assets/ to the chosen target (excluding workspace/, which the sibling regenerates), write the workspace/-excluding .gitignore, then hand the new directory to commands::open_another_project (editor.project.exec_new). Design: D16 §9 (Save As = copy the directory), A7/D19 (process-per-project). Source-of-debt: tasks/refinements/editor/save.md. Refinement: tasks/refinements/editor/save_as.md"
     }

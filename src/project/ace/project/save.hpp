@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <string_view>
 #include <system_error>
@@ -83,6 +84,23 @@ private:
 platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
                                            const ProjectLayout& layout, const arbc::Document& doc,
                                            const arbc::Registry& registry);
+
+// Publish a COPY of the live `doc` as a fresh project rooted at `target_root` — the
+// portable core (`project.arbc` + content-addressed `assets/`) plus a
+// `workspace/`-excluding `.gitignore` — the "Save As (copy the directory)" verb
+// (D16 §9 / D-save_as-1). The "copy" is a re-publish of the *live* document into
+// `project_layout(target_root)` via the trusted `save_project` core, NOT a raw byte
+// copy: it captures the current in-memory state and writes only the bytes the
+// document actually references. It creates NO `workspace/` (the exec'd sibling
+// rebuilds it from the canonical core) and NO `exports/`, and it does NOT touch the
+// source project. Refuses to clobber: if `target_root` already holds a
+// `project.arbc` it returns `std::errc::file_exists` and writes nothing
+// (D-save_as-4). Errors are values (the `SaveError` publish faults ride through
+// unchanged); never throws.
+platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
+                                              const std::filesystem::path& target_root,
+                                              const arbc::Document& doc,
+                                              const arbc::Registry& registry);
 
 } // namespace ace::project
 

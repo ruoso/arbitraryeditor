@@ -146,4 +146,39 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
   return outcome;
 }
 
+platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
+                                              const std::filesystem::path& target_root,
+                                              const arbc::Document& doc,
+                                              const arbc::Registry& registry) {
+  const ProjectLayout layout = project_layout(target_root);
+
+  // Refuse to clobber an existing project (D-save_as-4): silently `atomic_replace`-ing
+  // a *different* project's canonical is the one Save-As error that destroys unrelated
+  // work. An existing `project.arbc` under the target is a data-loss footgun — return
+  // `file_exists` (a value, house style) and leave the target untouched. A populated
+  // directory WITHOUT a `project.arbc` is a fine destination, so the guard is narrow.
+  if (fs.exists(layout.canonical)) {
+    return std::make_error_code(std::errc::file_exists);
+  }
+
+  // The "copy" is a re-publish of the LIVE document into the new root (D-save_as-1),
+  // the exact mechanism plain Save already trusts: reuse `save_project` against the
+  // target layout so `project.arbc` + the content-addressed `assets/` land under
+  // `target_root`. Captures the current in-memory state; the source project is never
+  // touched. `save_project` `make_directories`-es `assets/` (and thus the root).
+  platform::Result<SaveOutcome> published = save_project(fs, layout, doc, registry);
+  if (!published.has_value()) {
+    return published.error();
+  }
+
+  // Exclude the machine-local `workspace/` scratch from VCS (D16/D-open-5), matching
+  // `create_project`'s scaffold so the copy is a first-class portable project. No
+  // `workspace/` is created here — the exec'd sibling rebuilds it from the canonical.
+  if (fs.atomic_replace(layout.gitignore, k_gitignore_body)) {
+    return make_error_code(SaveError::IoError);
+  }
+
+  return published;
+}
+
 } // namespace ace::project

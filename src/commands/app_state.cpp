@@ -1,9 +1,12 @@
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/exec_new.hpp>
 
 #include <arbc/builtin_kinds.hpp>
 #include <arbc/model/journal.hpp>
 #include <arbc/model/model.hpp>
 
+#include <filesystem>
+#include <system_error>
 #include <utility>
 
 namespace ace::commands {
@@ -62,6 +65,48 @@ platform::Result<project::SaveOutcome> save_project(AppState& state,
   }
   state.mark_saved(published.value().revision);
   return *published;
+}
+
+platform::Result<project::SaveOutcome> save_project_as(AppState& state,
+                                                       const platform::FileSystem& fs,
+                                                       const platform::ProcessLauncher& launcher,
+                                                       const std::filesystem::path& executable,
+                                                       const std::filesystem::path& target_root) {
+  // Reject an empty target before any I/O or exec (Constraint 5, mirroring
+  // `open_another_project`): an empty path would publish into the CWD and spawn a
+  // mystery sibling. The launcher is never touched and nothing is written.
+  if (target_root.empty()) {
+    return std::make_error_code(std::errc::invalid_argument);
+  }
+
+  // Canonicalize ONCE to an absolute path so the publish and the sibling `exec`
+  // agree on the destination regardless of the child's CWD (Constraint 5). `absolute`
+  // roots it lexically at the CWD; `weakly_canonical` then normalizes. Neither throws.
+  std::error_code ec;
+  std::filesystem::path resolved = std::filesystem::absolute(target_root, ec);
+  if (!ec) {
+    resolved = std::filesystem::weakly_canonical(resolved, ec);
+  }
+  if (ec) {
+    return ec;
+  }
+
+  // Publish a COPY of the LIVE document into the target (D-save_as-1). Capture runs
+  // on this (writer) thread (A4). The current session is deliberately left untouched
+  // — no `mark_saved`, no `layout_` rebind (D-save_as-2 / Constraint 4).
+  platform::Result<project::SaveOutcome> published =
+      project::save_project_as(fs, resolved, state.document(), state.registry());
+  if (!published.has_value()) {
+    return published.error(); // a failed publish execs nothing (Constraint 7)
+  }
+
+  // Open the copy in a detached sibling editor on the same absolute path. A failed
+  // exec leaves the (successfully published) copy on disk and returns the error.
+  if (const std::error_code exec_ec = open_another_project(launcher, executable, resolved)) {
+    return exec_ec;
+  }
+
+  return published;
 }
 
 } // namespace ace::commands

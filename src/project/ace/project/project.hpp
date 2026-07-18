@@ -65,6 +65,12 @@ struct ProjectLayout {
 // Resolve the canonical bundle paths for a project rooted at `root` (no I/O).
 ProjectLayout project_layout(const std::filesystem::path& root);
 
+// The `.gitignore` body a project scaffold writes at its root: the machine-local
+// `workspace/` scratch is rebuilt from the canonical core and excluded from
+// sharing/VCS (D16, D-open-5). Written by `create_project` and by Save As's
+// publish-copy (`save_project_as`), so it lives on the shared `project` header.
+inline constexpr std::string_view k_gitignore_body = "workspace/\n";
+
 // Errors are values, never throws (D-open-6): a caller (app_state) branches on the
 // value. A missing/corrupt nested or borrowed asset does NOT surface here — the
 // library's `load_document` loads a doc-05 placeholder and never makes a project
