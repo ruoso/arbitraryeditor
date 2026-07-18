@@ -173,7 +173,8 @@ enable_testing()
 add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
                          tests/platform_test.cpp tests/render_probe_test.cpp
                          tests/dockmodel_test.cpp tests/view_registry_test.cpp
-                         tests/tool_rail_test.cpp tests/workspaces_test.cpp)
+                         tests/tool_rail_test.cpp tests/workspaces_test.cpp
+                         tests/project_open_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel arbc::arbc Catch2::Catch2WithMain)
 # The render_offline golden compares against raw sRGB8 bytes under tests/goldens

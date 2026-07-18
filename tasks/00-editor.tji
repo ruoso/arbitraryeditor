@@ -94,8 +94,15 @@ task editor "Editor — host GUI over libarbc" {
     task open "Open a project directory; new project" {
       effort 2d
       allocate team
+      complete 100
       depends editor.foundation.render_probe
-      note "Open a project DIRECTORY (project.arbc + assets/ + workspace/): map the workspace or load the canonical doc; create a new project scaffolding the directory. Design: D16. Refinement: tasks/refinements/project_open.md"
+      note "Open a project DIRECTORY (project.arbc + assets/ + workspace/): map the workspace or load the canonical doc; create a new project scaffolding the directory. Design: D16. Refinement: tasks/refinements/editor/open.md"
+    }
+    task open_ui "In-app New/Open affordance; recent projects; native folder picker" {
+      effort 2d
+      allocate team
+      depends !exec_new, editor.dock.tool_rail
+      note "File-menu / tool-rail New and Open entries, a recent-projects list persisted to per-user prefs, and a native folder picker (SDL_ShowOpenFolderDialog behind a PlatformServices dialog seam), wiring the chosen path to ace::project::open_project / create_project and, for open-another, to editor.project.exec_new (new exec, A7/D19). Design: docs/00-design.md D16, D19. Source-of-debt refinement: tasks/refinements/editor/open.md"
     }
     task app_state "Project-level state; single Document per process; command dispatch" {
       effort 3d

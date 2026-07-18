@@ -18,14 +18,12 @@ namespace ace::render {
 
 const char* name() { return "render"; }
 
-Srgb8Image render_probe_srgb8(int width, int height) {
-  const project::ProbeDocument probe = project::build_probe_document();
-
+Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height) {
   arbc::CpuBackend backend;
   const arbc::Viewport viewport{width, height, arbc::Affine::identity()};
   // render_offline sources the root composition as the anchor and returns the
   // frame in the composition's working space (premultiplied linear rgba32f).
-  const auto frame = arbc::render_offline(*probe.document, viewport, backend);
+  const auto frame = arbc::render_offline(document, viewport, backend);
   // A straight-alpha sRGB8 target; convert() does the un-premultiply + gamma
   // encode the library owns (D-render_probe-4), leaving the editor the
   // invisible translator (D10) rather than an owner of colour math.
@@ -40,6 +38,11 @@ Srgb8Image render_probe_srgb8(int width, int height) {
     image.pixels.assign(bytes.begin(), bytes.end());
   }
   return image;
+}
+
+Srgb8Image render_probe_srgb8(int width, int height) {
+  const project::ProbeDocument probe = project::build_probe_document();
+  return render_document_srgb8(*probe.document, width, height);
 }
 
 } // namespace ace::render

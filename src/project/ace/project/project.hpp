@@ -1,10 +1,15 @@
 #pragma once
 
+#include <ace/platform/filesystem.hpp>
+
 #include <arbc/base/ids.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/runtime/document.hpp>
 
+#include <filesystem>
 #include <memory>
+#include <system_error>
+#include <type_traits>
 
 namespace ace::project {
 
@@ -38,4 +43,72 @@ struct ProbeDocument {
 // the layer. The offline render (ace::render) drives this straight into a frame.
 ProbeDocument build_probe_document();
 
+// --- project directory open / create (editor.project.open) -----------------
+
+// The canonical on-disk bundle layout (D16, docs/00-design.md §9): a project is a
+// directory holding `project.arbc` (portable snapshot) + `assets/` (owned bytes) +
+// `workspace/` (live mmap arena + checkpoints) [+ `exports/`]. The editor defines
+// the layout and points the library's workspace path into `workspace/`; the
+// workspace filename is editor-chosen (D-open-2). Pure path arithmetic — no I/O.
+struct ProjectLayout {
+  std::filesystem::path root;
+  std::filesystem::path canonical;      // <root>/project.arbc (the dump target — save's)
+  std::filesystem::path assets_dir;     // <root>/assets
+  std::filesystem::path workspace_dir;  // <root>/workspace
+  std::filesystem::path workspace_file; // <root>/workspace/document.arbcws (D-open-2)
+  std::filesystem::path exports_dir;    // <root>/exports
+  std::filesystem::path gitignore;      // <root>/.gitignore
+};
+
+// Resolve the canonical bundle paths for a project rooted at `root` (no I/O).
+ProjectLayout project_layout(const std::filesystem::path& root);
+
+// Errors are values, never throws (D-open-6): a caller (app_state) branches on the
+// value. A missing/corrupt nested or borrowed asset does NOT surface here — the
+// library's `load_document` loads a doc-05 placeholder and never makes a project
+// unopenable (D13/relink).
+enum class OpenError {
+  NotADirectory = 1, // `root` is not an existing directory
+  NoProject,         // neither a usable workspace nor a `project.arbc` is present
+  CorruptDocument,   // a `project.arbc` is present but failed to parse
+  IoError,           // a filesystem fault, or a workspace file this build cannot mint
+};
+
+// Bridge `OpenError` into `std::error_code` so it rides `platform::Result<T>`'s
+// error channel (its error alternative is a `std::error_code`).
+std::error_code make_error_code(OpenError error) noexcept;
+
+// A live workspace-backed `Document` plus the paths it resolved from. This leaf
+// produces the document; lifetime ownership (one per process, A7) is
+// `editor.project.app_state`'s, not this leaf's.
+struct OpenedProject {
+  std::unique_ptr<arbc::Document> document;
+  ProjectLayout layout;
+  // True when `open_project` rebuilt from the canonical `project.arbc` (a fresh
+  // clone, another machine, or an unusable workspace) rather than mapping the
+  // crash-durable workspace. Always false for `create_project`.
+  bool rebuilt_from_canonical = false;
+};
+
+// Open a project directory into a live `Document` — the LOAD direction only
+// (D-open-3). Maps the crash-durable `workspace/` if usable; on a missing or
+// unusable workspace file, rebuilds from the canonical `project.arbc`
+// (create a fresh workspace, `load_document` the canonical bytes, checkpoint).
+// Directory enumeration and reading `project.arbc` go through `fs`; the workspace
+// file and the document go through libarbc (D-platform_services-4).
+platform::Result<OpenedProject> open_project(const platform::FileSystem& fs,
+                                             const std::filesystem::path& root);
+
+// Scaffold a new project directory (`assets/`, `workspace/`, `exports/`, and a
+// `workspace/`-excluding `.gitignore`) and mint a fresh workspace-backed
+// `Document`, durable by default via checkpoint (D-open-4/5). Does NOT write
+// `project.arbc` — the canonical dump is `editor.project.save`'s publish step.
+platform::Result<OpenedProject> create_project(const platform::FileSystem& fs,
+                                               const std::filesystem::path& root);
+
 } // namespace ace::project
+
+// `OpenError` participates in the `std::error_code` machinery (ADL finds
+// `ace::project::make_error_code`), so `result.error() == OpenError::NoProject`
+// works and the enum rides `platform::Result`'s error channel unchanged.
+template <> struct std::is_error_code_enum<ace::project::OpenError> : std::true_type {};
