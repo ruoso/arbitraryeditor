@@ -5,6 +5,13 @@
 #include <functional>
 #include <string_view>
 
+namespace ace::commands {
+// The one owned project session (A7/D19); the History body reads its journal and
+// loops the shipped undo/redo verbs. Forward-declared to keep this header light —
+// views.cpp includes <ace/commands/app_state.hpp> for the definition.
+class AppState;
+} // namespace ace::commands
+
 namespace ace::views {
 
 // The views component. See docs/01-architecture.md §8 (component levelization).
@@ -41,5 +48,17 @@ void register_view_body(dockmodel::ViewType type, ViewBody body);
 // labeled placeholder when none is registered. An unparseable id draws an
 // "unknown view" placeholder.
 void draw_view(std::string_view view_id);
+
+// The History view body (D18 "History is a view"; D-history-1): renders the one
+// owned session's undo journal as an ordered list — a synthetic base row (the
+// pre-first-edit state) plus one row per journal entry in chronological order, the
+// head highlighted and future/redoable entries dimmed — and navigates it when a row
+// is clicked by looping the shipped commands::undo / commands::redo verbs toward the
+// row's target cursor (single-step only; D-history-4/5). A pure reader/navigator: it
+// reads depth()/cursor()/entry_at(i).name fresh each frame, never mutates the
+// journal directly, and keeps no shadow copy (Constraint 1/6). Draws into the
+// CURRENT window (the dockspace owns Begin/End). The L4 shell registers it capturing
+// the one AppState& and clears it on exit (D-history-3).
+void draw_history(commands::AppState& state, std::string_view view_id);
 
 } // namespace ace::views

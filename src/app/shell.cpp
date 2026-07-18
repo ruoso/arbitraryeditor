@@ -216,6 +216,14 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   // until its downstream panel leaf lands (D-view-registry-5).
   ace::views::register_view_body(ace::dockmodel::ViewType::Canvas,
                                  [&probe](std::string_view) { probe.draw_content(); });
+  // The History view IS the undo journal made visible and click-navigable (D18
+  // "History is a view"; editor.panels.history). It reads the one owned session's
+  // journal and loops the shipped undo/redo verbs, so the body captures the same
+  // AppState& the shell owns (D-history-3). Cleared on exit like the Canvas body —
+  // the register_view_body seam is process-global.
+  ace::views::register_view_body(
+      ace::dockmodel::ViewType::History,
+      [&app_state](std::string_view view_id) { ace::views::draw_history(app_state, view_id); });
   // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
   // it renders each open view by its instance id and syncs the tab ✕ back into
   // the authoritative DockLayout.
@@ -261,6 +269,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   // Clear the body before the ProbeView it captures is destroyed — the seam is
   // process-global, so a later shell run must not call into a dangling capture.
   ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
+  ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
   probe.destroy();
   shell.shutdown();
   return 0;

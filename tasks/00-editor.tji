@@ -267,8 +267,9 @@ task editor "Editor — host GUI over libarbc" {
     task history "History view/panel: journal entry list + click-to-jump" {
       effort 2.5d
       allocate team
+      complete 100
       depends editor.project.undo, editor.dock.view_registry
-      note "Render journal().entry_at(i).name as an ordered list with the cursor() position marked; 'Undo <name>'/'Redo <name>' labels; click-an-entry to jump (loop undo()/redo() to reach the target cursor — single-step navigation only). L3 views. Design: D15/D18/D21. Source-of-debt: tasks/refinements/editor/undo.md."
+      note "Render journal().entry_at(i).name as an ordered list with the cursor() position marked; 'Undo <name>'/'Redo <name>' labels; click-an-entry to jump (loop undo()/redo() to reach the target cursor — single-step navigation only). L3 views. Design: D15/D18/D21. Source-of-debt: tasks/refinements/editor/undo.md. Refinement: tasks/refinements/editor/history.md"
     }
   }
 
