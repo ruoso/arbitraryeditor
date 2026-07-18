@@ -1,5 +1,6 @@
 #include <ace/app/probe.hpp>
 #include <ace/app/shell.hpp>
+#include <ace/commands/app_state.hpp>
 #include <ace/dock/dock.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/dockmodel/workspaces.hpp>
@@ -15,6 +16,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
+#include <string>
 #include <string_view>
 
 namespace ace::app {
@@ -43,6 +46,17 @@ std::filesystem::path workspace_prefs_root() {
                                    ? std::filesystem::path(home) / ".config"
                                    : std::filesystem::temp_directory_path();
   return base / "arbitraryeditor" / "workspaces";
+}
+
+// A unique scratch project directory for a no-path launch (D-app_state-6): the
+// bootstrap create_projects one here so the single-`Document`-for-lifetime
+// invariant always holds even before the in-app New/Open picker
+// (editor.project.open_ui) exists. Under the OS temp dir with a random suffix so
+// repeated headless runs in one process never collide on a live workspace file.
+std::filesystem::path scratch_project_dir() {
+  std::random_device rd;
+  return std::filesystem::temp_directory_path() /
+         ("arbitraryeditor-session-" + std::to_string(rd()));
 }
 
 } // namespace
@@ -162,10 +176,29 @@ void Shell::shutdown() {
   }
 }
 
-int run_editor(const ShellOptions& opts) {
+int run_editor(const ShellOptions& opts, const std::function<void(commands::AppState&)>& on_ready) {
   Shell shell;
   if (!shell.init(opts)) {
     return 1;
+  }
+  // The process's ONE owned project session (A7/D19): resolve the project
+  // directory (a fresh scratch project when none was given) into the `AppState`
+  // and hold it for the whole run, beside the `dockmodel::ToolSelection` the
+  // dockspace owns. Errors are values — a failed open/create logs and exits
+  // non-zero, never a throw across the app boundary (D-app_state-6 / Constraint 6).
+  ace::platform::NativeFileSystem filesystem;
+  const std::filesystem::path project_dir =
+      opts.project_dir.empty() ? scratch_project_dir() : opts.project_dir;
+  auto session = ace::commands::open_or_create_app_state(filesystem, project_dir);
+  if (!session) {
+    std::fprintf(stderr, "shell: could not open project '%s': %s\n", project_dir.string().c_str(),
+                 session.error().message().c_str());
+    shell.shutdown();
+    return 2;
+  }
+  ace::commands::AppState& app_state = *session;
+  if (on_ready) {
+    on_ready(app_state);
   }
   // The probe texture is created once (GL context current after init), drawn
   // every frame, and destroyed before shutdown while the context is still valid
@@ -183,10 +216,10 @@ int run_editor(const ShellOptions& opts) {
   // the authoritative DockLayout.
   ace::dock::Dockspace dockspace;
   // The saved-workspace preset store (editor.dock.workspaces): persisted through
-  // the native FileSystem seam under the per-user prefs root. Wired into the
-  // dockspace so the rail's switcher can list/apply/save/delete presets. Both
-  // outlive the draw loop below; no preset file is touched until a user saves.
-  ace::platform::NativeFileSystem filesystem;
+  // the native FileSystem seam (the same one the session bootstrap used) under
+  // the per-user prefs root. Wired into the dockspace so the rail's switcher can
+  // list/apply/save/delete presets. Both outlive the draw loop below; no preset
+  // file is touched until a user saves.
   ace::dockmodel::WorkspaceStore workspace_store(workspace_prefs_root(), filesystem);
   dockspace.set_workspace_store(&workspace_store);
   shell.set_draw_content([&dockspace]() { dockspace.draw(); });

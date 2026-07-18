@@ -4,6 +4,10 @@
 
 #include <SDL3/SDL.h>
 
+#include <filesystem>
+#include <fstream>
+#include <system_error>
+
 // Offscreen-GL headless smoke (docs §9): "init + N frames + shutdown" against
 // the SDL offscreen video driver + software GL. No GPU/display required — the
 // ctest ENVIRONMENT pins SDL_VIDEODRIVER=offscreen + llvmpipe. This is the
@@ -19,6 +23,28 @@ TEST_CASE("shell smoke: run_editor init + N frames + shutdown headless") {
   opts.width = 320;
   opts.height = 240;
   REQUIRE(run_editor(opts) == 0);
+}
+
+TEST_CASE("shell smoke: run_editor exits 2 when the project dir cannot be opened") {
+  // A project_dir that resolves to a regular file (not a directory) makes the
+  // session bootstrap fail with OpenError::NotADirectory. init() still succeeds
+  // headless, so run_editor takes the open-failure branch: it logs, tears the
+  // partial shell down cleanly, and returns 2 — never a throw across the app
+  // boundary (D-app_state-6 / Constraint 6).
+  const std::filesystem::path not_a_dir =
+      std::filesystem::temp_directory_path() / "ace_shell_smoke_not_a_dir";
+  {
+    std::ofstream(not_a_dir) << "not a project directory";
+  }
+  ShellOptions opts;
+  opts.headless = true;
+  opts.max_frames = 1;
+  opts.width = 320;
+  opts.height = 240;
+  opts.project_dir = not_a_dir;
+  CHECK(run_editor(opts) == 2);
+  std::error_code ec;
+  std::filesystem::remove(not_a_dir, ec);
 }
 
 TEST_CASE("shell smoke: piecewise lifecycle honours the frame cap") {

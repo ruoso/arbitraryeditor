@@ -107,8 +107,9 @@ task editor "Editor — host GUI over libarbc" {
     task app_state "Project-level state; single Document per process; command dispatch" {
       effort 3d
       allocate team
+      complete 100
       depends !open
-      note "The app owns exactly ONE libarbc Document for its lifetime (process-per-project). Project-level selection and active tool; a command/action dispatch that turns UI actions into library transactions. Design: D19 / arch A4/A7. Refinement: tasks/refinements/app_state.md"
+      note "The app owns exactly ONE libarbc Document for its lifetime (process-per-project). Project-level selection and active tool; a command/action dispatch that turns UI actions into library transactions. Design: D19 / arch A4/A7. Refinement: tasks/refinements/editor/app_state.md"
     }
     task exec_new "Open-another-project = exec a new instance" {
       effort 1d

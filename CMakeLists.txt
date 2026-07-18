@@ -174,9 +174,10 @@ add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
                          tests/platform_test.cpp tests/render_probe_test.cpp
                          tests/dockmodel_test.cpp tests/view_registry_test.cpp
                          tests/tool_rail_test.cpp tests/workspaces_test.cpp
-                         tests/project_open_test.cpp)
+                         tests/project_open_test.cpp tests/commands_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
-                                        ace::dockmodel arbc::arbc Catch2::Catch2WithMain)
+                                        ace::dockmodel ace::commands arbc::arbc
+                                        Catch2::Catch2WithMain)
 # The render_offline golden compares against raw sRGB8 bytes under tests/goldens
 # (D-render_probe-6); the byte-compare helper resolves them by absolute path.
 target_compile_definitions(ace_tests PRIVATE
@@ -191,7 +192,7 @@ add_test(NAME ace_tests COMMAND ace_tests)
 add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/shell_e2e_test.cpp tests/dockspace_e2e_test.cpp
                               tests/view_registry_e2e_test.cpp tests/tool_rail_e2e_test.cpp
-                              tests/workspaces_e2e_test.cpp)
+                              tests/workspaces_e2e_test.cpp tests/app_state_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

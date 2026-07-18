@@ -2,6 +2,7 @@
 
 #include <ace/app/app_loop.hpp>
 
+#include <filesystem>
 #include <functional>
 #include <utility>
 
@@ -9,6 +10,13 @@
 // the .cpp owns the real includes (the SDL/ImGui seam lives in `app`, A8).
 struct SDL_Window;
 struct ImGuiContext;
+
+// The session aggregate (editor.project.app_state) lives in the L1 `commands`
+// core; forward-declared here so the bootstrap accessor signature does not drag
+// the arbc-owning session header into every shell consumer.
+namespace ace::commands {
+class AppState;
+}
 
 namespace ace::app {
 
@@ -22,6 +30,12 @@ struct ShellOptions {
   int max_frames = 0;
   int width = 1280;
   int height = 720;
+  // The project directory the process resolves into its one owned session
+  // (editor.project.app_state / D-app_state-6). Empty means "no path given": the
+  // bootstrap creates a fresh scratch project so the "one process owns exactly
+  // one Document, never empty" invariant always holds and the app is drivable
+  // headless. A future `editor.project.exec_new` passes a concrete path here.
+  std::filesystem::path project_dir;
 };
 
 // The application shell: SDL3 window + GLES3 context + Dear ImGui (docking),
@@ -70,9 +84,16 @@ private:
   int frames_ = 0;
 };
 
-// Convenience full run used by main() and the offscreen smoke: init, loop
-// new_frame/draw_ui/render while should_continue_loop() holds, then shutdown.
-// Returns 0 on a clean run, non-zero if init failed.
-int run_editor(const ShellOptions& opts);
+// Convenience full run used by main() and the offscreen smoke: init, resolve the
+// project directory into the process's one owned `AppState` (held for the whole
+// run beside the `dockmodel::ToolSelection`), loop new_frame/draw_ui/render while
+// should_continue_loop() holds, then shutdown (the session torn down cleanly,
+// its `HousekeepingThread` joined). Returns 0 on a clean run, 1 if init failed,
+// 2 if the project could not be opened/created (logged, never thrown —
+// D-app_state-6). `on_ready`, if set, is invoked exactly once with the live
+// session just after it comes up — the test-visible seam the boot-lifecycle e2e
+// asserts the single-`Document` ownership through.
+int run_editor(const ShellOptions& opts,
+               const std::function<void(commands::AppState&)>& on_ready = {});
 
 } // namespace ace::app

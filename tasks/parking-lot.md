@@ -18,6 +18,14 @@ downstream panel-content task is scheduled.
 
 ---
 
+## No-project first-launch UX
+
+**Source:** `tasks/refinements/editor/app_state.md` (app_state, 2026-07-17)
+
+The current bootstrap creates a scratch project when no project path is given, so the single-Document-per-process invariant (A7) always holds and the app is drivable headless. What the first-launch experience should actually *show* the user once a picker exists (`editor.project.open_ui`) is a design judgment call: show the scratch document, show a welcome/recent-projects screen, or block on a picker. This decision is deferred until `editor.project.open_ui` lands. No new WBS task was created; the choice is parked here for human review before that leaf is refined.
+
+---
+
 ## Assets view real-body owner
 
 **Source:** `tasks/refinements/editor/view_registry.md` (view_registry, 2026-07-17)
