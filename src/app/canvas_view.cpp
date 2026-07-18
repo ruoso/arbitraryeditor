@@ -1,13 +1,24 @@
 #include <ace/app/canvas_view.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/gl/gl.hpp>
+#include <ace/interact/interact.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 #include <ace/views/views.hpp>
 
+#include <arbc/base/geometry.hpp>
+#include <arbc/base/transform.hpp>
+
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
+
+namespace {
+// The zoom factor per wheel notch (editor.canvas.nav): each notch multiplies the
+// composition→device scale by this, so a wheel of `w` notches zooms by k_zoom_base^w.
+constexpr double k_zoom_base = 1.2;
+} // namespace
 
 namespace ace::app {
 
@@ -62,9 +73,40 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
   }
 
   // Draw the last uploaded frame every tick so the canvas stays visible between new
-  // frames (the render thread only publishes on change).
+  // frames (the render thread only publishes on change), AND read the always-on
+  // navigation gestures over the pane (editor.canvas.nav). Only meaningful once a frame
+  // exists; the camera operates in the render target's device pixels (== the pane size).
   if (p.texture != 0 && p.tex_width > 0 && p.tex_height > 0) {
-    views::draw_canvas_image(p.texture, p.tex_width, p.tex_height);
+    const views::CanvasInput in =
+        views::draw_canvas_interactive(p.texture, p.tex_width, p.tex_height);
+
+    // Thread the raw gesture through the L1 interact math (D-nav-2) into a new transient
+    // camera. reset-to-fit restores the default identity framing (D-canvas_view-5's fit
+    // camera; D-nav-7); wheel zooms about the cursor; a Space-drag pans (D9).
+    arbc::Affine camera = p.camera;
+    if (in.reset) {
+      camera = arbc::Affine::identity();
+    }
+    if (in.wheel != 0.0F) {
+      camera = interact::zoom(camera, arbc::Vec2{in.focus_x, in.focus_y},
+                              std::pow(k_zoom_base, static_cast<double>(in.wheel)));
+    }
+    if (in.panning && (in.pan_dx != 0.0F || in.pan_dy != 0.0F)) {
+      camera = interact::pan(camera, in.pan_dx, in.pan_dy);
+    }
+    // Submit only on a real change — the transient camera is per-pane app state (D-nav-1),
+    // never a transact; the submit rides the render-thread channel (Constraint 2).
+    if (!(camera == p.camera)) {
+      p.camera = camera;
+      host_.request_camera(view_id, p.camera);
+    }
+
+    // The scale bar (composition units per screen span, never a "%"; D2 §3 / D-nav-6):
+    // a bar targeting a quarter of the pane's short edge.
+    const double target_px = 0.25 * std::min(p.tex_width, p.tex_height);
+    const interact::ScaleBar bar = interact::scale_bar(p.camera, target_px);
+    p.scale_bar_units = bar.units;
+    views::draw_scale_bar(bar.units, bar.device_px);
   }
 }
 
@@ -89,6 +131,15 @@ void CanvasView::reconcile(const std::vector<std::string>& live_view_ids) {
 
 std::uint64_t CanvasView::frames_issued(std::string_view view_id) const {
   return host_.published_sequence(view_id);
+}
+
+std::size_t CanvasView::anchor_depth(std::string_view view_id) const {
+  return host_.anchor_depth(view_id);
+}
+
+double CanvasView::scale_bar_units(std::string_view view_id) const {
+  auto it = presenters_.find(view_id);
+  return it == presenters_.end() ? 0.0 : it->second.scale_bar_units;
 }
 
 void CanvasView::destroy() {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <arbc/base/transform.hpp>
+
 #include <cstdint>
 #include <vector>
 
@@ -27,7 +29,13 @@ struct Srgb8Image {
 // runs on the plain headless lane. Returns an empty image on the (defensive) error
 // path. Reused by editor.project.open's load-fidelity golden to prove a reopened
 // document reconstructs pixel-identically.
-Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height);
+//
+// `camera` (composition units -> device pixels) frames the render; it defaults to
+// identity, the pre-nav framing. editor.canvas.nav passes a non-identity camera so
+// the interactive-camera golden cross-checks byte-identically against the hosted
+// entry driven through the same Affine (D-nav-3).
+Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height,
+                                 const arbc::Affine& camera = arbc::Affine::identity());
 
 // The probe convenience: build the probe document (ace::project) and render it.
 Srgb8Image render_probe_srgb8(int width, int height);

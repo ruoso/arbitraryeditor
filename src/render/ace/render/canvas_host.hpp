@@ -14,6 +14,7 @@ namespace arbc {
 class Document;
 class WorkerPool;
 struct WorkerPoolConfig;
+struct Affine;
 } // namespace arbc
 
 namespace ace::render {
@@ -73,6 +74,12 @@ public:
   // the render thread; a request for an unknown id is dropped). Also wakes the loop.
   void request_resize(std::string_view id, int width, int height);
 
+  // UI thread: submit a new viewport camera for entry `id` (editor.canvas.nav,
+  // D-nav-3). Per-entry, like request_resize: stashes a pending Affine under the host
+  // lock, applied on the render thread before that entry's next step(); a submit for
+  // an unknown id is dropped. Also wakes the loop (a camera change is device damage).
+  void request_camera(std::string_view id, const arbc::Affine& camera);
+
   // UI thread: wake the render loop to re-render EVERY live entry after an edit (the
   // fan-out poke — one writer, N observers; Constraint 4).
   void poke();
@@ -101,6 +108,11 @@ public:
   // The latest published frame sequence for `id` (0 before the first publish or for an
   // unknown id). The presenter's per-pane liveness signal.
   std::uint64_t published_sequence(std::string_view id) const;
+
+  // Entry `id`'s current deep-zoom anchor-path depth (D-nav-5 observability): 0 for an
+  // unknown id, before the first frame, or while the camera is within the
+  // well-conditioned band. Read lock-free from a render-thread-snapshotted atomic.
+  std::size_t anchor_depth(std::string_view id) const;
 
   // The number of live entries currently served (post add/remove reconciliation).
   std::size_t live_count() const;

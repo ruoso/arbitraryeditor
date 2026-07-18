@@ -175,14 +175,21 @@ task editor "Editor — host GUI over libarbc" {
     task nav "Pan / zoom the viewport camera; scale bar; deep zoom" {
       effort 2d
       allocate team
+      complete 100
       depends !view
-      note "Pan/zoom drives the active viewport camera (transient); a scale bar in composition units (no phantom %); deep-zoom rebasing surfaced from HostViewport. Design: D2. Refinement: tasks/refinements/camera_nav.md"
+      note "Pan/zoom drives the active viewport camera (transient); a scale bar in composition units (no phantom %); deep-zoom rebasing surfaced from HostViewport. Design: D2. Refinement: tasks/refinements/editor/nav.md"
     }
     task tool_dispatch "Route ToolSelection into canvas pointer-gesture dispatch" {
       effort 2d
       allocate team
       depends editor.dock.tool_rail, editor.cells.gizmo, editor.canvas.nav
       note "Route dockmodel::ToolSelection active tool into the canvas interaction handler so a canvas pointer gesture dispatches per active tool (Select/Brush/Eyedropper/Pan); promote the tool->behavior seam into interact (hit-test/gizmo/brush math). Source of debt: tasks/refinements/editor/tool_rail.md (D20/A11). Design: docs/00-design.md D20, docs/01-architecture.md A11."
+    }
+    task fit_bounds "Wire reset-to-fit to root composition authored bounds" {
+      effort 1d
+      allocate team
+      depends !nav
+      note "reset-to-fit currently restores identity/fit framing (D-canvas_view-5); wire it to the root composition's authored bounds once a Document composition-bounds accessor is available. The general interact::fit(content,pane) math ships in editor.canvas.nav tested for this future wiring + downstream reuse. Source-of-debt: tasks/refinements/editor/nav.md. Design: docs/00-design.md D2 §3."
     }
   }
 

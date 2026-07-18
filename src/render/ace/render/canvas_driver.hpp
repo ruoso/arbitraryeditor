@@ -3,8 +3,11 @@
 #include <ace/render/canvas_renderer.hpp>
 #include <ace/render/render.hpp>
 
+#include <arbc/base/transform.hpp>
+
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -52,6 +55,14 @@ public:
   // 1). Also wakes the loop.
   void request_resize(int width, int height);
 
+  // UI thread: submit a new viewport camera (editor.canvas.nav, D-nav-3). Stashes a
+  // pending Affine under the SAME short lock as the pending resize; the render thread
+  // applies it (renderer.set_camera) at the top of its next iteration, before step().
+  // A submit both stores the pending camera and wakes the loop — a camera change is
+  // device damage, so the next step repaints. Cloned from request_resize; adds no lock
+  // and no thread (Constraint 2).
+  void request_camera(const arbc::Affine& camera);
+
   // UI thread: wake the render loop to re-render after an edit (the poke, Constraint
   // 4a). A poke on an unchanged, settled scene still wakes the loop; step()'s
   // still-scene early-out then publishes no new frame.
@@ -93,6 +104,12 @@ public:
   // contending the render thread's lock).
   std::uint64_t iterations() const;
 
+  // The viewport's current anchor-path depth (deep-zoom rebasing observability,
+  // D-nav-5). Snapshotted into an atomic on the render thread after each step, so the
+  // UI reads it lock-free with no torn cross-thread read of the render-confined
+  // HostViewport. 0 within the well-conditioned band.
+  std::size_t anchor_depth() const;
+
 private:
   CanvasRenderer renderer_; // render-thread-confined: only drive_once() touches it
 
@@ -103,6 +120,8 @@ private:
   bool resize_pending_ = false; // a resize request awaits the render thread
   int pending_width_ = 0;       // the requested framing size (guarded by mu_)
   int pending_height_ = 0;
+  bool camera_pending_ = false; // a camera submit awaits the render thread
+  arbc::Affine pending_camera_ = arbc::Affine::identity(); // the submitted camera (guarded by mu_)
 
   Srgb8Image published_;               // the front buffer the consumer reads
   Srgb8Image back_;                    // the producer's scratch (render thread)
@@ -110,6 +129,7 @@ private:
   std::uint64_t published_frames_ = 0; // frames_issued() last published (render thread)
 
   std::atomic<std::uint64_t> iterations_{0};
+  std::atomic<std::size_t> anchor_depth_{0}; // render-thread snapshot, UI reads lock-free
 };
 
 } // namespace ace::render

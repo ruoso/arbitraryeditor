@@ -3,6 +3,7 @@
 #include <ace/render/render.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -10,6 +11,7 @@ namespace arbc {
 class Document;
 class WorkerPool;
 class DamageRouter;
+struct Affine;
 } // namespace arbc
 
 namespace ace::render {
@@ -64,6 +66,15 @@ public:
   // size. A degenerate/zero size renders nothing (no allocation) — Constraint 7.
   void resize(int width, int height);
 
+  // Set the viewport camera (composition units -> device pixels), the second
+  // UI→render state channel this leaf adds beside resize (editor.canvas.nav,
+  // D-nav-3). Applied to the live HostViewport via set_camera AND retained, so a
+  // later rebuild() (a resize) reframes with the current camera rather than
+  // resetting to identity (Constraint 3). RENDER-THREAD-confined: the HostViewport
+  // and its TileCache are render-thread-only (A4), so only the driver's drive loop
+  // calls this. A value-identical camera is free — the next step issues no frame.
+  void set_camera(const arbc::Affine& camera);
+
   // Drive one HostViewport::step(). The first step always composites
   // (frames_issued() == 1); a subsequent step on an unchanged, playhead-pinned
   // scene issues zero further frames (the still-scene early-out). Re-converts the
@@ -86,6 +97,12 @@ public:
   // resize).
   int width() const;
   int height() const;
+
+  // The HostViewport's current anchor-path depth (zoom-in pushes, zoom-out pops):
+  // the deep-zoom rebasing observability signal the editor surfaces but never
+  // drives (D-nav-5). 0 before the first frame, at a zero size, or while the
+  // camera stays within the well-conditioned band. RENDER-THREAD-confined.
+  std::size_t anchor_depth() const;
 
   // The shared WorkerPool this renderer BORROWS, or nullptr when it owns an inline
   // executor. The CanvasHost exposes this so a test can prove N canvases borrow one

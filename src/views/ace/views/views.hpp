@@ -39,6 +39,34 @@ void draw_probe_image(unsigned int texture, int width, int height);
 // texture's pixel dimensions. Reuses the render_probe tile→GL display primitive.
 void draw_canvas_image(unsigned int texture, int width, int height);
 
+// The raw navigation gesture read over the canvas pane (editor.canvas.nav): the
+// always-on wheel-zoom + Space-drag pan + reset-to-fit input, in DEVICE pixels. No
+// camera math here (that is L1 interact, D-nav-2/7) — this only reports the ImGui
+// input the app threads through the interact math and submits to the render thread.
+struct CanvasInput {
+  bool hovered = false; // the cursor is over the pane
+  float wheel = 0.0F;   // vertical wheel notches this frame (0 unless hovered)
+  bool panning = false; // a Space-held left-drag is in progress (D9)
+  float pan_dx = 0.0F;  // the drag delta this frame, device px
+  float pan_dy = 0.0F;
+  float focus_x = 0.0F; // the cursor, relative to the image top-left (device px)
+  float focus_y = 0.0F;
+  bool reset = false; // reset-to-fit requested (F while hovered, D-nav-7)
+};
+
+// Draw the Canvas body AND read its navigation gestures: the `draw_canvas_image`
+// tile→GL Image plus an InvisibleButton overlay (an ImGui::Image is inert) that
+// captures hover/drag/wheel over the SAME pane rect. Returns the wheel-zoom /
+// Space-drag pan / reset-to-fit input for this frame (editor.canvas.nav / D-nav-4).
+// Draws into the CURRENT window (the dockspace owns Begin/End).
+CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height);
+
+// The composition-units scale-bar overlay (D2 §3 / D-nav-6): a bar `device_px`
+// wide labelled with its `units` composition-unit length, pinned bottom-left of the
+// CURRENT window — never a "%". A zero/degenerate bar draws nothing. The nice-number
+// math is L1 interact; this only renders the result.
+void draw_scale_bar(double units, double device_px);
+
 // A per-type view body: draws the view's content into the CURRENT ImGui window.
 // `view_id` is the dockmodel instance id being drawn (a type may draw multiple
 // instances). The dockspace owns the enclosing Begin/End + the close button.

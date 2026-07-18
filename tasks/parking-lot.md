@@ -95,3 +95,11 @@ thread, a cross-thread command queue, serialized undo-cursor navigation, and a
 journal-read guard) may become warranted. That is a monitor-and-decide call
 gated on real telemetry, not implementable work today. No WBS task was created;
 record here for human review when profiling data is available.
+
+---
+
+## Deep-zoom navigation aids beyond reset-to-fit
+
+**Source:** `tasks/refinements/editor/nav.md` (nav, 2026-07-18), D-nav-7 / Open questions.
+
+D2 §3 lists fit-to-frame, fit-to-cell, and zoom-to-selection as *(open)* navigation aids. `editor.canvas.nav` ships reset-to-fit (fit document to pane) as the minimal orientation affordance. Whether and which of the richer aids are needed, what gestures or menu entries invoke them, and whether they depend on the overview navigator (§5, `editor.panels.overview`) or the selection model (`editor.cells.selection`) is a design-open UX judgment. No WBS task was created; parked here for human review when the selection and overview panels are closer to landing.

@@ -16,6 +16,8 @@
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
+#include <arbc/compositor/anchored_viewports.hpp> // k_reanchor_scale_threshold (nav anchor_depth)
+#include <arbc/kind_raster/raster_content.hpp>    // DecodedImage / RasterContent (bounded content)
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/interactive.hpp>
@@ -29,6 +31,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "golden_support.hpp"
 
@@ -255,6 +258,14 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
            host.published_sequence("canvas#2") > before2;
   }));
 
+  // A camera submit rides the SAME lock as resize/poke (editor.canvas.nav): the second
+  // UI→render channel, applied on the render thread before step(). A non-identity camera
+  // is device damage, so canvas#1's sequence advances off-thread — the pending-Affine slot
+  // is lock-guarded exactly like the pending resize, so ASan/TSan see no torn read/write.
+  const std::uint64_t cam_before = host.published_sequence("canvas#1");
+  host.request_camera("canvas#1", arbc::Affine{1.0, 0.0, 0.0, 1.0, -6.0, -4.0});
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") > cam_before; }));
+
   // Remove one entry mid-run — its cache frees on the render thread, no leak.
   host.remove("canvas#2");
   REQUIRE(pump_until([&] { return host.live_count() == 1; }));
@@ -264,4 +275,193 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
   handle->join();
   CHECK(host.live_count() == 1);
   CHECK(host.published_sequence("canvas#1") >= 2);
+}
+
+// --- editor.canvas.nav: the per-entry camera channel + deep-zoom observability ------
+
+namespace {
+// A camera-DEPENDENT document: an unbounded solid background plus a BOUNDED 16x16 raster
+// square (finite content, unlike the full-frame probe solid), so a pan camera reveals a
+// genuinely different frame — the interactive path must thread the exact Affine through.
+std::unique_ptr<arbc::Document> build_raster_doc() {
+  auto doc = std::make_unique<arbc::Document>();
+  const arbc::ObjectId root = doc->add_composition(64.0, 64.0);
+  const arbc::ObjectId bg =
+      doc->add_content(std::make_shared<arbc::SolidContent>(arbc::Rgba{0.0F, 0.35F, 0.0F, 1.0F}));
+  doc->attach_layer(root, doc->add_layer(bg, arbc::Affine::identity()));
+  arbc::DecodedImage img;
+  img.width = 16;
+  img.height = 16;
+  img.format = arbc::k_working_rgba32f;
+  img.bytes.resize(static_cast<std::size_t>(16) * 16 * 4 * sizeof(float));
+  auto* fp = reinterpret_cast<float*>(img.bytes.data());
+  for (int i = 0; i < 16 * 16; ++i) { // opaque red, premultiplied linear
+    fp[i * 4] = 0.6F;
+    fp[i * 4 + 1] = 0.0F;
+    fp[i * 4 + 2] = 0.0F;
+    fp[i * 4 + 3] = 1.0F;
+  }
+  const arbc::ObjectId raster =
+      doc->add_content(std::make_shared<arbc::RasterContent>(std::move(img)));
+  doc->attach_layer(root, doc->add_layer(raster, arbc::Affine::translation(8.0, 8.0)));
+  return doc;
+}
+
+// A native-scale (integer-translation) pan camera: non-identity, camera-dependent, and — at
+// native scale, so no scale-rung/mip resample divergence — the interactive path stays
+// BYTE-IDENTICAL to render_offline. A zoom would legitimately diverge (the progressive
+// interactive rungs vs. the single-shot offline resample), which is why the byte-exact
+// cross-check uses a translation.
+constexpr arbc::Affine k_nav_camera{1.0, 0.0, 0.0, 1.0, -12.0, -8.0};
+
+// A nested composition chain (comps[0] is the lowest-id root anchor; each holds a layer
+// whose content is the next composition, placed by `edge`). Zooming past the
+// well-conditioned band re-anchors DOWN the chain, so anchor_depth rises — the deep-zoom
+// rebasing the editor surfaces (D-nav-5). Mirrors libarbc's own host_viewport chain fixture.
+constexpr double kNestC = 1000.0;
+constexpr double kNestCtr = 500.0;
+constexpr double kNestLvl = 0.001;
+arbc::Affine nest_edge() {
+  return arbc::compose(arbc::Affine::translation(kNestCtr - 0.5, kNestCtr - 0.5),
+                       arbc::Affine::scaling(kNestLvl, kNestLvl));
+}
+arbc::Affine nest_camera(double scale) {
+  return arbc::compose(arbc::Affine::translation(kNestCtr, kNestCtr),
+                       arbc::compose(arbc::Affine::scaling(scale, scale),
+                                     arbc::Affine::translation(-kNestCtr, -kNestCtr)));
+}
+std::unique_ptr<arbc::Document> build_nested_doc(int levels) {
+  auto doc = std::make_unique<arbc::Document>();
+  std::vector<arbc::ObjectId> comps;
+  for (int i = 0; i <= levels; ++i) {
+    comps.push_back(doc->add_composition(kNestC, kNestC));
+  }
+  const arbc::ObjectId leaf =
+      doc->add_content(std::make_shared<arbc::SolidContent>(arbc::Rgba{0.0F, 0.5F, 0.0F, 1.0F}));
+  doc->attach_layer(comps[static_cast<std::size_t>(levels)],
+                    doc->add_layer(leaf, arbc::Affine::identity()));
+  for (int i = 0; i < levels; ++i) {
+    doc->attach_layer(comps[static_cast<std::size_t>(i)],
+                      doc->add_layer(comps[static_cast<std::size_t>(i + 1)], nest_edge()));
+  }
+  return doc;
+}
+
+// Drive the inline host to settle (each drive_once publishes at most one frame; a settled
+// still scene returns false), bounded so a defect cannot hang the suite.
+void settle(CanvasHost& host) {
+  for (int i = 0; i < 32 && host.drive_once(); ++i) {
+  }
+}
+} // namespace
+
+TEST_CASE("canvas_host: request_camera reaches HostViewport::set_camera — the frame reframes") {
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  settle(host);
+  std::uint64_t s = 0;
+  Srgb8Image identity_frame;
+  REQUIRE(host.consume("canvas#1", s, identity_frame));
+
+  host.request_camera("canvas#1", k_nav_camera);
+  settle(host);
+  Srgb8Image nav_frame;
+  REQUIRE(host.consume("canvas#1", s, nav_frame));
+
+  // (e) The camera threaded through: the frame changed AND equals the byte-exact offline
+  //     render for the SAME Affine — not just "some non-identity frame", the EXACT one.
+  CHECK(nav_frame.pixels != identity_frame.pixels);
+  const Srgb8Image offline = ace::render::render_document_srgb8(*doc, k_w, k_h, k_nav_camera);
+  CHECK(nav_frame.pixels == offline.pixels);
+}
+
+TEST_CASE("canvas_host: a resize after a camera submit PRESERVES the camera (rebuild reapplies)") {
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.request_camera("canvas#1", k_nav_camera);
+  settle(host);
+  std::uint64_t s = 0;
+  Srgb8Image f;
+  REQUIRE(host.consume("canvas#1", s, f));
+
+  // (f) A pane resize reconstructs the non-movable HostViewport; it must reframe with the
+  //     held camera, not reset to identity (Constraint 3). The reframed frame equals the
+  //     offline render at the NEW size through the SAME camera.
+  host.request_resize("canvas#1", 48, 40);
+  settle(host);
+  Srgb8Image resized;
+  REQUIRE(host.consume("canvas#1", s, resized));
+  CHECK(resized.width == 48);
+  CHECK(resized.height == 40);
+  const Srgb8Image offline = ace::render::render_document_srgb8(*doc, 48, 40, k_nav_camera);
+  CHECK(resized.pixels == offline.pixels);
+}
+
+TEST_CASE("canvas_host: request_camera is per-entry — one canvas's camera leaves the other's") {
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *doc);
+  host.request_resize("canvas#2", k_w, k_h);
+  host.request_camera("canvas#1", k_nav_camera); // only canvas#1 pans
+  settle(host);
+
+  // (g) canvas#1 shows the panned framing; canvas#2 stays at identity — the two channels
+  //     do not cross.
+  std::uint64_t s1 = 0;
+  Srgb8Image f1;
+  REQUIRE(host.consume("canvas#1", s1, f1));
+  std::uint64_t s2 = 0;
+  Srgb8Image f2;
+  REQUIRE(host.consume("canvas#2", s2, f2));
+  CHECK(f1.pixels == ace::render::render_document_srgb8(*doc, k_w, k_h, k_nav_camera).pixels);
+  CHECK(f2.pixels == ace::render::render_document_srgb8(*doc, k_w, k_h).pixels);
+  CHECK(f1.pixels != f2.pixels);
+}
+
+TEST_CASE("canvas_host: anchor_depth surfaces deep-zoom rebasing — non-zero in, back to 0 out") {
+  auto doc = build_nested_doc(/*levels=*/1);
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  settle(host);
+  // (h) A still, in-band frame is anchored at the root: depth 0.
+  CHECK(host.anchor_depth("canvas#1") == 0);
+  CHECK(host.anchor_depth("canvas#7") == 0); // unknown id
+
+  // Zoom PAST the well-conditioned band: step() re-anchors to the descendant composition.
+  host.request_camera("canvas#1", nest_camera(arbc::k_reanchor_scale_threshold * 2.0));
+  settle(host);
+  CHECK(host.anchor_depth("canvas#1") == 1);
+
+  // Zoom back far out: the anchor path pops and depth returns to 0 (rebasing observably
+  // reversed).
+  host.request_camera("canvas#1", nest_camera(1.0 / (arbc::k_reanchor_scale_threshold * 2.0)));
+  settle(host);
+  CHECK(host.anchor_depth("canvas#1") == 0);
+}
+
+TEST_CASE("canvas_host: an interactive-camera frame is byte-exact vs offline + the golden") {
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.request_camera("canvas#1", k_nav_camera);
+  settle(host);
+  std::uint64_t s = 0;
+  Srgb8Image f;
+  REQUIRE(host.consume("canvas#1", s, f));
+
+  // 1. Byte-exact against the committed interactive-camera golden (inline degenerate pool,
+  //    D10/D-canvas_view-2 byte-exactness preserved through the camera channel).
+  CHECK(ace_test::compare_golden("canvas_nav_zoom_64x64.rgba8", f.pixels));
+  // 2. Cross-check: identical to the offline render through the SAME Affine — the camera
+  //    threads to the composite EXACTLY, not just approximately (D-nav-3).
+  const Srgb8Image offline = ace::render::render_document_srgb8(*doc, k_w, k_h, k_nav_camera);
+  CHECK(f.pixels == offline.pixels);
 }

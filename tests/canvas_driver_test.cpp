@@ -136,6 +136,37 @@ TEST_CASE(
   CHECK(driver.published_sequence() >= 1); // at least the first settled frame reached the buffer
 }
 
+TEST_CASE("canvas_driver: request_camera drives a fresh frame; a resize preserves it; "
+          "anchor_depth is surfaced") {
+  const ProbeDocument probe = build_probe_document();
+  CanvasDriver driver(*probe.document);
+  driver.request_resize(k_w, k_h);
+  CHECK(driver.drive_once());
+  std::uint64_t seq = 0;
+  Srgb8Image frame;
+  REQUIRE(driver.consume(seq, frame));
+  REQUIRE(seq == 1);
+  // A still, in-band identity frame anchors at the root: depth 0 (surfaced through the
+  // render-thread-snapshotted atomic).
+  CHECK(driver.anchor_depth() == 0);
+
+  // A non-identity camera submit is device damage — the next drive re-composites and
+  // publishes even for the uniform probe (frames_issued advances), reaching set_camera on
+  // the render thread (editor.canvas.nav / D-nav-3).
+  driver.request_camera(arbc::Affine{1.0, 0.0, 0.0, 1.0, -8.0, -5.0});
+  CHECK(driver.drive_once());
+  CHECK(driver.published_sequence() == 2);
+  CHECK(driver.anchor_depth() == 0); // still in-band
+
+  // A resize after the camera submit reframes at the new size with the camera preserved
+  // (the renderer holds it across rebuild, Constraint 3) — the drive publishes the new size.
+  driver.request_resize(40, 24);
+  CHECK(driver.drive_once());
+  REQUIRE(driver.consume(seq, frame));
+  CHECK(frame.width == 40);
+  CHECK(frame.height == 24);
+}
+
 TEST_CASE("canvas_driver: the double-buffered frame is byte-exact vs offline + the golden") {
   const ProbeDocument probe = build_probe_document();
   CanvasDriver driver(*probe.document);

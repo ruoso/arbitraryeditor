@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -43,6 +44,58 @@ void draw_canvas_image(unsigned int texture, int width, int height) {
   // The Canvas body reuses the render_probe tile→GL display primitive: an Image
   // into the dockspace-owned canvas#N window (D-canvas_view-4).
   draw_probe_image(texture, width, height);
+}
+
+CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height) {
+  CanvasInput in;
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  draw_probe_image(texture, width, height);
+  // Overlay an InvisibleButton over the SAME rect: an ImGui::Image is inert (no id, no
+  // interaction), so the pane cannot otherwise capture a drag or report hover. Rewind the
+  // cursor to the image origin, then place the button covering the image (D-nav-3).
+  ImGui::SetCursorScreenPos(origin);
+  ImGui::InvisibleButton("##canvas_nav",
+                         ImVec2(static_cast<float>(width), static_cast<float>(height)),
+                         ImGuiButtonFlags_MouseButtonLeft);
+
+  const ImGuiIO& io = ImGui::GetIO();
+  in.hovered = ImGui::IsItemHovered();
+  in.focus_x = io.MousePos.x - origin.x;
+  in.focus_y = io.MousePos.y - origin.y;
+  if (in.hovered) {
+    in.wheel = io.MouseWheel; // wheel-zoom about the cursor (D2 §3)
+    in.reset = ImGui::IsKeyPressed(ImGuiKey_F, /*repeat=*/false); // reset-to-fit (D-nav-7)
+  }
+  // Space-held left-drag pans the viewport camera (D9) — the always-on gesture,
+  // independent of the active modal tool (D-nav-4). IsItemActive() holds while the
+  // left button is down after pressing over the pane.
+  if (ImGui::IsItemActive() && ImGui::IsKeyDown(ImGuiKey_Space)) {
+    in.panning = true;
+    in.pan_dx = io.MouseDelta.x;
+    in.pan_dy = io.MouseDelta.y;
+  }
+  return in;
+}
+
+void draw_scale_bar(double units, double device_px) {
+  if (!(device_px > 0.0) || !(units > 0.0)) {
+    return; // a degenerate camera scale: nothing to draw
+  }
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  const ImVec2 wpos = ImGui::GetWindowPos();
+  const ImVec2 wsize = ImGui::GetWindowSize();
+  constexpr float pad = 12.0F;
+  const float y = wpos.y + wsize.y - pad;
+  const float x0 = wpos.x + pad;
+  const float x1 = x0 + static_cast<float>(device_px);
+  const ImU32 col = IM_COL32(255, 255, 255, 220);
+  // A bar with end ticks + a composition-unit label — the scale readout, never a "%".
+  draw_list->AddLine(ImVec2(x0, y), ImVec2(x1, y), col, 2.0F);
+  draw_list->AddLine(ImVec2(x0, y - 4.0F), ImVec2(x0, y + 4.0F), col, 2.0F);
+  draw_list->AddLine(ImVec2(x1, y - 4.0F), ImVec2(x1, y + 4.0F), col, 2.0F);
+  char label[64];
+  std::snprintf(label, sizeof(label), "%g u", units);
+  draw_list->AddText(ImVec2(x0, y - 18.0F), col, label);
 }
 
 void draw_probe_pane(unsigned int texture, int width, int height) {

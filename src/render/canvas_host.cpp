@@ -2,6 +2,7 @@
 #include <ace/render/canvas_renderer.hpp>
 #include <ace/render/render.hpp>
 
+#include <arbc/base/transform.hpp>
 #include <arbc/runtime/damage_router.hpp>
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/interactive.hpp>
@@ -41,10 +42,11 @@ struct CanvasHost::Entry {
       : renderer(doc, pool, router, budget) {}
 
   CanvasRenderer renderer;
-  Srgb8Image published;               // front buffer the consumer reads (guarded)
-  Srgb8Image back;                    // producer scratch (render thread, off-lock)
-  std::uint64_t sequence = 0;         // published-frame sequence (guarded)
-  std::uint64_t published_frames = 0; // frames_issued() last published (render thread)
+  Srgb8Image published;                     // front buffer the consumer reads (guarded)
+  Srgb8Image back;                          // producer scratch (render thread, off-lock)
+  std::uint64_t sequence = 0;               // published-frame sequence (guarded)
+  std::uint64_t published_frames = 0;       // frames_issued() last published (render thread)
+  std::atomic<std::size_t> anchor_depth{0}; // deep-zoom depth, UI reads lock-free (D-nav-5)
 };
 
 struct CanvasHost::Impl {
@@ -79,6 +81,7 @@ struct CanvasHost::Impl {
   std::vector<PendingAdd> pending_adds;
   std::vector<std::string> pending_removes;
   std::map<std::string, std::pair<int, int>, std::less<>> pending_resizes;
+  std::map<std::string, arbc::Affine, std::less<>> pending_cameras; // per-entry camera submits
 
   std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries;
 
@@ -122,6 +125,15 @@ void CanvasHost::request_resize(std::string_view id, int width, int height) {
   impl_->cv.notify_all();
 }
 
+void CanvasHost::request_camera(std::string_view id, const arbc::Affine& camera) {
+  {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->pending_cameras[std::string(id)] = camera;
+    impl_->dirty = true;
+  }
+  impl_->cv.notify_all();
+}
+
 void CanvasHost::poke() {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -144,6 +156,8 @@ bool CanvasHost::drive_once() {
     bool do_resize;
     int width;
     int height;
+    bool do_camera;
+    arbc::Affine camera;
   };
   std::vector<DriveItem> items;
   // Entries removed this iteration destruct AFTER the lock is released (a
@@ -176,18 +190,23 @@ bool CanvasHost::drive_once() {
         impl_->entries.erase(it);
       }
       impl_->pending_resizes.erase(id);
+      impl_->pending_cameras.erase(id);
     }
     impl_->pending_removes.clear();
 
-    // 3. Snapshot the live set + apply any pending resize (dropping unknown ids).
+    // 3. Snapshot the live set + apply any pending resize/camera (dropping unknown ids).
     items.reserve(impl_->entries.size());
     for (auto& [id, entry] : impl_->entries) {
       auto rit = impl_->pending_resizes.find(id);
       const bool do_resize = rit != impl_->pending_resizes.end();
+      auto cit = impl_->pending_cameras.find(id);
+      const bool do_camera = cit != impl_->pending_cameras.end();
       items.push_back(DriveItem{entry.get(), do_resize, do_resize ? rit->second.first : 0,
-                                do_resize ? rit->second.second : 0});
+                                do_resize ? rit->second.second : 0, do_camera,
+                                do_camera ? cit->second : arbc::Affine::identity()});
     }
     impl_->pending_resizes.clear();
+    impl_->pending_cameras.clear();
   }
 
   impl_->iterations.fetch_add(1, std::memory_order_relaxed);
@@ -204,12 +223,20 @@ bool CanvasHost::drive_once() {
       // gate to guarantee the first frame at the new size publishes.
       entry->published_frames = 0;
     }
+    // Apply the submitted camera after any resize (the renderer holds it, so the resize
+    // already reframed with the current camera); a camera change is device damage
+    // (editor.canvas.nav / D-nav-3).
+    if (item.do_camera) {
+      entry->renderer.set_camera(item.camera);
+    }
 
     // A bounded step: schedule_follow_up means the budget did not settle the frame, so
     // this entry must be re-driven next cycle (D-multi_canvas-3).
     if (entry->renderer.step()) {
       more_pending = true;
     }
+    // Snapshot deep-zoom anchor depth for the UI's lock-free observability read (D-nav-5).
+    entry->anchor_depth.store(entry->renderer.anchor_depth(), std::memory_order_relaxed);
 
     const std::uint64_t frames = entry->renderer.frames_issued();
     // A still scene / zero-area pane issues no new frame — publish nothing (Constraint 4).
@@ -275,6 +302,12 @@ std::uint64_t CanvasHost::published_sequence(std::string_view id) const {
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto it = impl_->entries.find(id);
   return it == impl_->entries.end() ? 0 : it->second->sequence;
+}
+
+std::size_t CanvasHost::anchor_depth(std::string_view id) const {
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  auto it = impl_->entries.find(id);
+  return it == impl_->entries.end() ? 0 : it->second->anchor_depth.load(std::memory_order_relaxed);
 }
 
 std::size_t CanvasHost::live_count() const {

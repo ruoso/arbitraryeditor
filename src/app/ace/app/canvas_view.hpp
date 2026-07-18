@@ -4,6 +4,9 @@
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 
+#include <arbc/base/transform.hpp>
+
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -66,13 +69,25 @@ public:
   // proves the off-thread re-render reached that entry's double-buffer).
   std::uint64_t frames_issued(std::string_view view_id) const;
 
+  // The deep-zoom anchor-path depth for `view_id` (0 for an unknown id / in-band): the
+  // rebasing observability signal (D-nav-5), surfaced for the e2e to prove wheel-zoom
+  // engaged the library's re-anchoring.
+  std::size_t anchor_depth(std::string_view view_id) const;
+
+  // The composition-unit length of `view_id`'s current scale bar (0 for an unknown id):
+  // the last value computed from that pane's transient camera. The e2e asserts it changes
+  // after a zoom (the scale readout tracks the camera; D-nav-6).
+  double scale_bar_units(std::string_view view_id) const;
+
   // Stop + join the render thread and release every GL texture while the context is
   // still valid (before shutdown). Safe to call twice (the destructor also calls it).
   void destroy();
 
 private:
   // One per-canvas#N presenter: the latest frame consumed from that entry's double-buffer
-  // and the GL texture it uploads to. All UI-thread state.
+  // and the GL texture it uploads to. All UI-thread state — including the TRANSIENT
+  // viewport camera (D-nav-1: never a transact, never persisted; a per-pane value like
+  // Selection), submitted to the render thread through host_.request_camera.
   struct Presenter {
     render::Srgb8Image image;
     std::uint64_t consumed_seq = 0;
@@ -81,6 +96,8 @@ private:
     unsigned int texture = 0;
     int tex_width = 0;
     int tex_height = 0;
+    arbc::Affine camera = arbc::Affine::identity(); // the transient viewport camera
+    double scale_bar_units = 0.0;                   // last scale-bar length (composition units)
   };
 
   commands::AppState& state_;

@@ -24,6 +24,16 @@ void CanvasDriver::request_resize(int width, int height) {
   cv_.notify_all();
 }
 
+void CanvasDriver::request_camera(const arbc::Affine& camera) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    pending_camera_ = camera;
+    camera_pending_ = true;
+    dirty_ = true;
+  }
+  cv_.notify_all();
+}
+
 void CanvasDriver::poke() {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -46,6 +56,8 @@ bool CanvasDriver::drive_once() {
   bool do_resize = false;
   int width = 0;
   int height = 0;
+  bool do_camera = false;
+  arbc::Affine camera;
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (resize_pending_) {
@@ -53,6 +65,11 @@ bool CanvasDriver::drive_once() {
       width = pending_width_;
       height = pending_height_;
       resize_pending_ = false;
+    }
+    if (camera_pending_) {
+      do_camera = true;
+      camera = pending_camera_;
+      camera_pending_ = false;
     }
   }
   if (do_resize && (width != renderer_.width() || height != renderer_.height())) {
@@ -62,9 +79,17 @@ bool CanvasDriver::drive_once() {
     // both sizes happen to settle at the same frames_issued() count.
     published_frames_ = 0;
   }
+  // Apply the submitted camera AFTER any resize — the renderer holds it so the resize's
+  // rebuild already reframed with the current camera; this seats a fresh submit
+  // (editor.canvas.nav). A camera change is device damage, so the next step repaints.
+  if (do_camera) {
+    renderer_.set_camera(camera);
+  }
 
   renderer_.step();
   iterations_.fetch_add(1, std::memory_order_relaxed);
+  // Snapshot the deep-zoom anchor depth for the UI's lock-free observability read.
+  anchor_depth_.store(renderer_.anchor_depth(), std::memory_order_relaxed);
 
   const std::uint64_t frames = renderer_.frames_issued();
   // A still scene issues zero further frames (frames_issued() stable); a zero-area
@@ -133,6 +158,10 @@ std::uint64_t CanvasDriver::published_sequence() const {
 
 std::uint64_t CanvasDriver::iterations() const {
   return iterations_.load(std::memory_order_relaxed);
+}
+
+std::size_t CanvasDriver::anchor_depth() const {
+  return anchor_depth_.load(std::memory_order_relaxed);
 }
 
 } // namespace ace::render

@@ -66,7 +66,10 @@ struct CanvasRenderer::Impl {
       }
 
       arbc::HostViewport::Config config;
-      config.viewport = arbc::Viewport{width, height, arbc::Affine::identity()};
+      // Frame with the CURRENT camera, not identity — so a resize (which reconstructs
+      // the non-movable viewport) preserves the user's pan/zoom (Constraint 3 /
+      // editor.canvas.nav). The default camera is identity, the pre-nav framing.
+      config.viewport = arbc::Viewport{width, height, camera};
       // The per-frame budget: settle-fully (an effectively unbounded hour) for the
       // inline golden path, or a caller-chosen BOUNDED slice for the shared-thread host
       // so one heavy canvas cannot starve another (D-multi_canvas-3).
@@ -116,6 +119,10 @@ struct CanvasRenderer::Impl {
   int width = 0;
   int height = 0;
 
+  // The current viewport camera (editor.canvas.nav). Held here so rebuild() reframes
+  // with it (Constraint 3); default identity is the pre-nav framing. Render-thread-only.
+  arbc::Affine camera = arbc::Affine::identity();
+
   std::unique_ptr<arbc::Surface> target;
   std::optional<arbc::InteractiveRenderer> renderer;
   std::unique_ptr<arbc::HostViewport> viewport;
@@ -139,6 +146,16 @@ void CanvasRenderer::resize(int width, int height) {
   impl_->width = width;
   impl_->height = height;
   impl_->rebuild();
+}
+
+void CanvasRenderer::set_camera(const arbc::Affine& camera) {
+  impl_->camera = camera;
+  // Apply to the live viewport too — a camera change is device damage, so the next
+  // step() repaints at the new framing (host_viewport.hpp:190-196). At a zero size
+  // there is no viewport; the held camera reaches the next rebuild().
+  if (impl_->viewport) {
+    impl_->viewport->set_camera(camera);
+  }
 }
 
 bool CanvasRenderer::step() {
@@ -165,6 +182,10 @@ std::uint64_t CanvasRenderer::frames_issued() const {
 
 int CanvasRenderer::width() const { return impl_->width; }
 int CanvasRenderer::height() const { return impl_->height; }
+
+std::size_t CanvasRenderer::anchor_depth() const {
+  return impl_->viewport ? impl_->viewport->anchor_depth() : 0;
+}
 
 const arbc::WorkerPool* CanvasRenderer::borrowed_pool() const { return impl_->borrowed_pool; }
 

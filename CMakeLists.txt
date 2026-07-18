@@ -216,7 +216,7 @@ target_link_libraries(arbitraryeditor PRIVATE ace::app)
 
 # ---- tests (Catch2 comes from libarbc) -------------------------------------
 enable_testing()
-add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
+add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/binding_test.cpp
                          tests/platform_test.cpp tests/render_probe_test.cpp
                          tests/dockmodel_test.cpp tests/view_registry_test.cpp
                          tests/tool_rail_test.cpp tests/workspaces_test.cpp
@@ -249,7 +249,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/save_ui_e2e_test.cpp tests/save_as_ui_e2e_test.cpp
                               tests/undo_ui_e2e_test.cpp tests/history_e2e_test.cpp
                               tests/gc_ui_e2e_test.cpp tests/canvas_view_e2e_test.cpp
-                              tests/multi_canvas_e2e_test.cpp)
+                              tests/multi_canvas_e2e_test.cpp tests/canvas_nav_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

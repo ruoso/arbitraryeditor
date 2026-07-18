@@ -18,9 +18,10 @@ namespace ace::render {
 
 const char* name() { return "render"; }
 
-Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height) {
+Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height,
+                                 const arbc::Affine& camera) {
   arbc::CpuBackend backend;
-  const arbc::Viewport viewport{width, height, arbc::Affine::identity()};
+  const arbc::Viewport viewport{width, height, camera};
   // render_offline sources the root composition as the anchor and returns the
   // frame in the composition's working space (premultiplied linear rgba32f).
   const auto frame = arbc::render_offline(document, viewport, backend);
