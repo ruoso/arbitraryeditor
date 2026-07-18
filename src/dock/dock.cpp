@@ -80,6 +80,39 @@ void draw_new_project_modal(Dockspace& dockspace, ProjectGateway& gateway) {
   }
 }
 
+// The Clean up (GC) confirm modal (D-gc-3 / D15 "GC is a confirmed op, not
+// undoable"): opened once the rail's dry-run preview resolves the reclaim counts,
+// it surfaces them and, on Clean up, commits a real (`preview=false`) sweep — an
+// irreversible delete is never one un-previewed click. Cancel sweeps nothing. Drawn
+// every frame from the rail so BeginPopupModal stays balanced; the scripted preview
+// lives on the Dockspace so the counts survive across frames. Stable slash-free
+// `###` widget ids (`###gc_confirm` / `###gc_cancel`) for the e2e.
+void draw_gc_modal(Dockspace& dockspace, ProjectGateway& gateway) {
+  const char* popup_id = "Clean Up";
+  if (dockspace.gc_modal_open() && !ImGui::IsPopupOpen(popup_id)) {
+    ImGui::OpenPopup(popup_id);
+  }
+  const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  if (ImGui::BeginPopupModal(popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    const GcSummary& preview = dockspace.gc_preview();
+    ImGui::Text("Reclaim %llu orphaned asset blob(s), freeing %llu bytes?",
+                static_cast<unsigned long long>(preview.reclaimed_files),
+                static_cast<unsigned long long>(preview.reclaimed_bytes));
+    if (ImGui::Button("Clean Up###gc_confirm")) {
+      gateway.clean_up(/*preview=*/false); // the committed, irreversible sweep
+      dockspace.close_gc_modal();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel###gc_cancel")) {
+      dockspace.close_gc_modal(); // a cancelled Clean up sweeps nothing
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+}
+
 // The rail's Project section (D18 home base / D22): New / Open / Open Recent, each
 // terminating in a sibling `exec` through the gateway (never swapping this
 // process's one Document, D19). Present only when a gateway is wired; the folder
@@ -111,6 +144,14 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   // synchronous feedback to render). Stable slash-free `###` id for the e2e.
   if (ImGui::Selectable("Save As…###save_as")) {
     gateway.save_as();
+  }
+  // Clean up (GC) sits beside Save As — another in-process verb (A13). It reclaims
+  // the on-disk `assets/` orphans the grow-only save sink left behind (D13/§8). A
+  // confirmed op (D15): the click runs a dry-run PREVIEW and opens a confirm modal
+  // with the reclaim counts; only the modal's Clean up commits the real sweep. Stable
+  // slash-free `###gc` id for the e2e.
+  if (ImGui::Selectable("Clean up…###gc")) {
+    dockspace.open_gc_modal(gateway.clean_up(/*preview=*/true));
   }
   // Stable, slash-free `###` widget ids (the visible label carries the ellipsis /
   // path; the id after `###` is what the e2e drives by) so a path in the label
@@ -157,6 +198,7 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
     ImGui::TextWrapped("%s", dockspace.project_feedback().c_str());
   }
   draw_new_project_modal(dockspace, gateway);
+  draw_gc_modal(dockspace, gateway);
 }
 
 // The canonical undo affordance (Decision D-undo-3): the keyboard chords Ctrl+Z

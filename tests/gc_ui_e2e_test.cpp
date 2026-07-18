@@ -16,25 +16,28 @@
 
 #include <GLES3/gl3.h>
 
-// editor.project.save_as — the rail's Save As… UI e2e (Acceptance / §9), mirroring
-// tests/save_ui_e2e_test.cpp: offscreen SDL + software GL, driving the rail BY
-// STABLE WIDGET ID. A fake ProjectGateway (records save_as()) is injected so the
-// Save As… button is exercised without a real folder dialog or session — the
-// pick→publish→exec follow-up is the L4 AppProjectGateway's job, unit-tested
-// headless in app_project_gateway_test.cpp. No byte-exact golden (software-GL pixels
-// are flaky, per the open_ui/save e2e precedent); the assertion is on the recorded
-// save_as() call driven by the rail button.
+// editor.project.gc — the rail's Clean up… + confirm modal UI e2e (Acceptance / §9),
+// mirroring tests/save_ui_e2e_test.cpp: offscreen SDL + software GL, driving the
+// rail BY STABLE WIDGET ID. A fake ProjectGateway records clean_up(preview) calls
+// and returns a scripted GcSummary, so the confirmed-op flow (D15) is exercised
+// without a real session: a Clean up click runs a dry-run PREVIEW and opens the
+// confirm modal with the reclaim counts; the modal's Clean Up commits the real
+// sweep; Cancel sweeps nothing. No byte-exact golden (software-GL pixels are flaky,
+// per the save_ui precedent); the assertions are on the recorded calls, the modal's
+// presence, and the previewed counts the Dockspace holds.
 
 using ace::app::Shell;
 using ace::app::ShellOptions;
 
 namespace {
 
-// Records save_as(); the other actions are inert (this e2e is scoped to the Save As…
-// button wiring, the fork verb of A13/D-save_as).
+// Records clean_up(preview) as two counters and returns a scripted reclaim report;
+// every other verb is inert (this e2e is scoped to Clean up + confirm).
 class FakeGateway final : public ace::dock::ProjectGateway {
 public:
-  int save_as_calls = 0;
+  int preview_calls = 0;
+  int commit_calls = 0;
+  ace::dock::GcSummary scripted{3, 4096, true}; // reclaimed_files, reclaimed_bytes, ran
 
   bool open_project(const std::filesystem::path&) override { return true; }
   bool new_project(const std::filesystem::path&, const std::string&) override { return true; }
@@ -43,10 +46,17 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
-  void save_as() override { ++save_as_calls; }
-  ace::dock::GcSummary clean_up(bool) override { return {}; } // inert (see gc_ui_e2e_test)
-  // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
-  // undo_ui_e2e_test.cpp.
+  void save_as() override {}
+
+  ace::dock::GcSummary clean_up(bool preview) override {
+    if (preview) {
+      ++preview_calls;
+    } else {
+      ++commit_calls;
+    }
+    return scripted;
+  }
+
   bool undo() override { return false; }
   bool redo() override { return false; }
   bool can_undo() const override { return false; }
@@ -66,7 +76,8 @@ bool capture_pixels(ImGuiID /*viewport_id*/, int x, int y, int w, int h, unsigne
 
 } // namespace
 
-TEST_CASE("save_as e2e: the rail's Save As… button drives the gateway's save_as") {
+TEST_CASE(
+    "gc e2e: Clean up previews into a confirm modal; Clean Up commits, Cancel sweeps nothing") {
   Shell shell;
   ShellOptions opts;
   opts.headless = true;
@@ -87,7 +98,7 @@ TEST_CASE("save_as e2e: the rail's Save As… button drives the gateway's save_a
   ImGuiTestEngine_Start(engine, shell.imgui_context());
 
   E2EState state{&dockspace, &gateway};
-  ImGuiTest* test = IM_REGISTER_TEST(engine, "save_as", "rail_save_as");
+  ImGuiTest* test = IM_REGISTER_TEST(engine, "gc", "rail_clean_up_confirm");
   test->UserData = &state;
   test->TestFunc = [](ImGuiTestContext* ctx) {
     auto* state = static_cast<E2EState*>(ctx->Test->UserData);
@@ -95,12 +106,32 @@ TEST_CASE("save_as e2e: the rail's Save As… button drives the gateway's save_a
     const std::string rail = ace::dock::tool_rail_title();
     const auto rail_ref = [&rail](const char* label) { return rail + "/" + label; };
 
-    // Clicking Save As… drives the gateway's save_as() exactly once (the async
-    // pick→publish→exec follow-up is owned by the L4 impl, not asserted here).
-    IM_CHECK(gateway.save_as_calls == 0);
-    ctx->ItemClick(rail_ref("###save_as").c_str());
+    // Clean up… runs a dry-run PREVIEW and opens the confirm modal with the counts.
+    IM_CHECK(gateway.preview_calls == 0);
+    ctx->ItemClick(rail_ref("###gc").c_str());
     ctx->Yield(2);
-    IM_CHECK(gateway.save_as_calls == 1);
+    IM_CHECK(gateway.preview_calls == 1);
+    IM_CHECK(gateway.commit_calls == 0); // no commit until the user confirms
+    IM_CHECK(ctx->ItemExists("Clean Up/###gc_confirm"));
+    // The modal surfaces the previewed reclaim counts (the scripted GcSummary).
+    IM_CHECK(state->dockspace->gc_preview().reclaimed_files == 3);
+    IM_CHECK(state->dockspace->gc_preview().reclaimed_bytes == 4096);
+
+    // Confirm → the committed (preview=false) sweep runs exactly once; modal closes.
+    ctx->ItemClick("Clean Up/###gc_confirm");
+    ctx->Yield(2);
+    IM_CHECK(gateway.commit_calls == 1);
+    IM_CHECK(!ctx->ItemExists("Clean Up/###gc_confirm"));
+
+    // Reopen and Cancel → the preview runs again, but NO new committed sweep fires.
+    ctx->ItemClick(rail_ref("###gc").c_str());
+    ctx->Yield(2);
+    IM_CHECK(gateway.preview_calls == 2);
+    IM_CHECK(ctx->ItemExists("Clean Up/###gc_cancel"));
+    ctx->ItemClick("Clean Up/###gc_cancel");
+    ctx->Yield(2);
+    IM_CHECK(gateway.commit_calls == 1); // an irreversible delete is never a mis-click
+    IM_CHECK(!ctx->ItemExists("Clean Up/###gc_cancel"));
   };
   ImGuiTestEngine_QueueTest(engine, test);
 

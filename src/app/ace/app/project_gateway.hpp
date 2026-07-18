@@ -44,6 +44,7 @@ public:
   bool save() override;
   bool is_dirty() const override;
   void save_as() override;
+  ace::dock::GcSummary clean_up(bool preview) override;
   bool undo() override;
   bool redo() override;
   bool can_undo() const override;

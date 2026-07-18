@@ -5,6 +5,7 @@
 #include <ace/dockmodel/view_registry.hpp>
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -20,6 +21,19 @@ namespace ace::dock {
 
 // The dock component. See docs/01-architecture.md §8 (component levelization).
 const char* name();
+
+// The Clean up (GC) reclaim report, in the dock's OWN vocabulary (Decision D-gc-5):
+// a dock-local POD, NOT `project::GcOutcome` / `arbc::GcReport`. Returning a
+// `project`/`arbc` type through the L3 gateway would add a `dock -> project` (or
+// `dock -> arbc`) include edge — a `check_levels` DAG change — for a two-field
+// report; the arbc -> project -> dock mapping lives in L4 `app` (which sees all
+// three) so this seam stays edge-neutral. `ran` is false when no sweep ran (a GC
+// error or an unwired gateway), so the confirm modal never claims a phantom reclaim.
+struct GcSummary {
+  std::uint64_t reclaimed_files = 0; // orphaned blobs deleted (would-be, in a preview)
+  std::uint64_t reclaimed_bytes = 0; // their total size
+  bool ran = false;                  // a sweep actually completed
+};
 
 // The project-entry seam (docs/01-architecture.md A12, docs/00-design.md D22).
 // The tool rail's New / Open / Recent affordances drive this ABSTRACT interface,
@@ -80,6 +94,15 @@ public:
   // chosen target — so it returns void (no synchronous outcome to render). A
   // cancelled pick publishes nothing and execs nothing.
   virtual void save_as() = 0;
+
+  // Clean up (GC): reclaim the in-process session's on-disk `assets/` orphans
+  // (D13/§8/A13). Like `save()` this acts on THIS process's one owned session, not
+  // a sibling exec. A `preview` (dry-run) run reports the reclaim plan WITHOUT
+  // deleting — the rail runs it first to fill the confirm modal (D15 "confirmed op",
+  // Constraint 5) — then a `preview=false` run commits the sweep on user confirm.
+  // Returns the reclaim counts as a dock-local `GcSummary` (Decision D-gc-5); the
+  // L4 impl drives `commands::gc_project` against the one owned `AppState`.
+  virtual GcSummary clean_up(bool preview) = 0;
 
   // Undo / redo the in-process session by navigating libarbc's document-wide
   // transaction journal (D15 / A13 / editor.project.undo). Like `save()`, these act
@@ -178,6 +201,18 @@ public:
   }
   void close_new_project_modal() { new_project_modal_open_ = false; }
 
+  // The Clean up (GC) confirm-modal state the rail drives (D-gc-3 / D15). Opened
+  // once a dry-run preview resolves the reclaim counts; the modal shows them and
+  // commits a real sweep on confirm. The scripted preview lives on the Dockspace so
+  // the modal renders the same counts every frame until the user acts.
+  bool gc_modal_open() const { return gc_modal_open_; }
+  const GcSummary& gc_preview() const { return gc_preview_; }
+  void open_gc_modal(GcSummary preview) {
+    gc_preview_ = preview;
+    gc_modal_open_ = true;
+  }
+  void close_gc_modal() { gc_modal_open_ = false; }
+
   // Inline feedback the rail renders for the last project action (a non-project
   // Open selection, an unavailable recent, an invalid New name). The rail reads
   // and writes it; empty means "no message".
@@ -194,7 +229,9 @@ private:
   std::array<char, 128> new_project_name_{};  // New Project modal name buffer
   std::filesystem::path new_project_parent_;  // parent the folder pick seeded
   std::string project_feedback_;              // inline feedback for the last action
+  GcSummary gc_preview_;                      // the last Clean up dry-run reclaim counts
   bool new_project_modal_open_ = false;       // the New Project modal is showing
+  bool gc_modal_open_ = false;                // the Clean up confirm modal is showing
   bool built_ = false;                        // DockBuilder seeded at least once
   bool rebuild_ = false;                      // a programmatic open/reopen needs a re-seed
   unsigned int dockspace_id_ = 0;             // ImGuiID; assigned on first draw()

@@ -293,6 +293,44 @@ TEST_CASE("AppProjectGateway::undo/redo navigate the in-process session's journa
   REQUIRE_FALSE(launcher.invoked);
 }
 
+TEST_CASE("AppProjectGateway::clean_up previews then reclaims the session's orphan blobs (A13)",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // Publish a canonical to root the sweep on, then seed an orphan blob under the
+  // session's assets/tiles/ (nothing in the canonical references it).
+  REQUIRE(gateway.save());
+  const std::filesystem::path tiles = session.layout().assets_dir / "tiles" / "aa";
+  std::error_code ec;
+  std::filesystem::create_directories(tiles, ec);
+  const std::string orphan(32, 'a');        // a well-formed 32-hex tile hash
+  const std::string bytes = "orphan-bytes"; // 12 bytes
+  std::ofstream(tiles / orphan, std::ios::binary) << bytes;
+
+  // Preview (dry-run) reports the orphan — files + bytes — and deletes nothing.
+  const ace::dock::GcSummary preview = gateway.clean_up(/*preview=*/true);
+  CHECK(preview.ran);
+  CHECK(preview.reclaimed_files == 1);
+  CHECK(preview.reclaimed_bytes == bytes.size());
+  CHECK(std::filesystem::exists(tiles / orphan));
+
+  // Commit reclaims it; the arbc -> project -> dock mapping carries the counts.
+  const ace::dock::GcSummary swept = gateway.clean_up(/*preview=*/false);
+  CHECK(swept.ran);
+  CHECK(swept.reclaimed_files == 1);
+  CHECK(swept.reclaimed_bytes == bytes.size());
+  CHECK_FALSE(std::filesystem::exists(tiles / orphan));
+
+  // Clean up is an in-process verb (A13), not a sibling exec.
+  REQUIRE_FALSE(launcher.invoked);
+}
+
 TEST_CASE("AppProjectGateway::pick_folder forwards and survives teardown mid-pick",
           "[app_project_gateway]") {
   ScratchDir scratch;

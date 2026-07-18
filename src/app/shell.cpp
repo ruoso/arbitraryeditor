@@ -89,7 +89,8 @@ bool Shell::init(const ShellOptions& opts) {
 
   // Keep windowed runs visible from creation time. Some Wayland/libdecor
   // combinations crash during explicit SDL_ShowWindow() on a hidden window.
-  const SDL_WindowFlags flags = SDL_WINDOW_OPENGL | (opts_.headless ? SDL_WINDOW_HIDDEN : 0);
+  const SDL_WindowFlags flags =
+      SDL_WINDOW_OPENGL | (opts_.headless ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE);
   window_ = SDL_CreateWindow(k_window_title, opts_.width, opts_.height, flags);
   if (!window_) {
     return fail("SDL_CreateWindow");
@@ -264,6 +265,16 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     shell.draw_ui();
     shell.render();
   }
+  // On-close GC (§8 "runs `gc_project_directory` … on close", D-gc-3 / Constraint 6):
+  // a SILENT, best-effort sweep of the on-disk `assets/` orphans before teardown. It
+  // runs while the Document's `HousekeepingThread` may still be checkpointing
+  // `workspace/` — a DISJOINT directory, and the sweep roots on the on-disk canonical
+  // and reads no live Document state, so there is no shared mutable state to race. Its
+  // result is ignored: a mandated-automatic maintenance op must never nag or block
+  // shutdown (no confirm modal here, unlike the rail). No-ops when no `project.arbc`
+  // has been published yet (the no-canonical guard).
+  (void)ace::commands::gc_project(app_state, /*dry_run=*/false);
+
   // Clear the body before the ProbeView it captures is destroyed — the seam is
   // process-global, so a later shell run must not call into a dangling capture.
   ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});

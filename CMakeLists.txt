@@ -62,6 +62,37 @@ set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 # enabled. We do not rely on that path for editor behavior, so keep it disabled
 # to avoid a hard dependency on the system XTEST dev package.
 set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
+# Likewise, X11 Xcursor (themed/animated cursors) is optional: newer SDL's
+# CheckX11 hard-fails configure when libXcursor dev headers are absent. The CI
+# container ships only libx11/libxext/libwayland/libxkbcommon dev packages (no
+# libxcursor-dev), and the editor runs headless (SDL_VIDEO_DRIVER=offscreen)
+# with no reliance on themed cursors — disable it to drop the hard dependency.
+set(SDL_X11_XCURSOR OFF CACHE BOOL "" FORCE)
+# Same story for X11 XInput2 (multitouch / extended input devices): newer SDL's
+# CheckX11 hard-fails configure when the XInput dev headers are absent. The CI
+# container ships no libxi-dev, and the headless editor drives input through the
+# ImGui Test Engine rather than X11 devices — disable it to drop the hard
+# dependency (error message itself prescribes -DSDL_X11_XINPUT=OFF).
+set(SDL_X11_XINPUT OFF CACHE BOOL "" FORCE)
+# Same story for X11 Xfixes (cursor-hide / barriers / region ops): newer SDL's
+# CheckX11 hard-fails configure when the Xfixes dev headers are absent. The CI
+# container ships no libxfixes-dev, and the headless editor
+# (SDL_VIDEO_DRIVER=offscreen) never touches those X11 features — disable it to
+# drop the hard dependency (error message itself prescribes -DSDL_X11_XFIXES=OFF).
+set(SDL_X11_XFIXES OFF CACHE BOOL "" FORCE)
+# Same story for X11 XRandR (display mode / multi-monitor geometry): newer SDL's
+# CheckX11 hard-fails configure when the XRandR dev headers are absent. The CI
+# container ships no libxrandr-dev, and the headless editor
+# (SDL_VIDEO_DRIVER=offscreen) never queries display modes — disable it to drop
+# the hard dependency (error message itself prescribes -DSDL_X11_XRANDR=OFF).
+set(SDL_X11_XRANDR OFF CACHE BOOL "" FORCE)
+# Same story for X11 XScreenSaver (screensaver inhibit): newer SDL's CheckX11
+# hard-fails configure when the XScreenSaver dev headers are absent. The CI
+# container ships no libxss-dev, and the headless editor
+# (SDL_VIDEO_DRIVER=offscreen) never inhibits the screensaver — disable it to
+# drop the hard dependency (error message itself prescribes
+# -DSDL_X11_XSCRNSAVER=OFF).
+set(SDL_X11_XSCRNSAVER OFF CACHE BOOL "" FORCE)
 # The shell inits SDL_INIT_VIDEO only (src/app/shell.cpp) — audio and camera are
 # unused. Disable both subsystems: it trims the build and, crucially, drops SDL's
 # PipeWire backends (audio + camera both build SDL_pipewire.c), which fail to
@@ -192,7 +223,8 @@ add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
                          tests/project_open_test.cpp tests/commands_test.cpp
                          tests/project_save_test.cpp tests/exec_new_test.cpp
                          tests/recent_projects_test.cpp tests/project_entry_test.cpp
-                         tests/save_as_test.cpp tests/undo_test.cpp)
+                         tests/save_as_test.cpp tests/undo_test.cpp
+                         tests/project_gc_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands arbc::arbc
                                         Catch2::Catch2WithMain)
@@ -214,7 +246,8 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/exec_new_argv_test.cpp tests/exec_new_e2e_test.cpp
                               tests/app_project_gateway_test.cpp tests/open_ui_e2e_test.cpp
                               tests/save_ui_e2e_test.cpp tests/save_as_ui_e2e_test.cpp
-                              tests/undo_ui_e2e_test.cpp tests/history_e2e_test.cpp)
+                              tests/undo_ui_e2e_test.cpp tests/history_e2e_test.cpp
+                              tests/gc_ui_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

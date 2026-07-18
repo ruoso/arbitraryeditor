@@ -92,6 +92,22 @@ bool AppProjectGateway::can_undo() const { return app_state_.document().journal(
 
 bool AppProjectGateway::can_redo() const { return app_state_.document().journal().can_redo(); }
 
+ace::dock::GcSummary AppProjectGateway::clean_up(bool preview) {
+  // Clean up (GC) acts on the in-process session (A13), not a sibling exec: drive
+  // `commands::gc_project` against the one owned `AppState`. This is where the
+  // arbc -> project -> dock type mapping lives (D-gc-5): the L1 sweep returns a
+  // `project::GcOutcome`, which we re-vocabularize into the dock-local `GcSummary`
+  // the rail's confirm modal renders. `preview` (dry-run) reports the plan without
+  // deleting; `preview=false` commits. Errors are values — a failed/guarded sweep
+  // returns `ran=false` (no phantom reclaim), never a throw across the seam.
+  const ace::platform::Result<ace::project::GcOutcome> outcome =
+      ace::commands::gc_project(app_state_, /*dry_run=*/preview);
+  if (!outcome.has_value()) {
+    return {}; // fail-safe: nothing reclaimed, ran = false
+  }
+  return ace::dock::GcSummary{outcome.value().deleted, outcome.value().bytes_reclaimed, true};
+}
+
 void AppProjectGateway::save_as() {
   // Save As is New/Open's async-pick shape (D-save_as-3) applied to THIS session:
   // pick a target folder, then publish a copy there and exec a sibling on it. The

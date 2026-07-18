@@ -140,11 +140,12 @@ task editor "Editor — host GUI over libarbc" {
       depends !app_state
       note "Undo/redo IS libarbc's transaction journal (doc 14), not a reimplementation; continuous gestures (a stroke, a drag) coalesce into one step. Viewport-camera navigation is transient (not undoable); a saved shot's framing is scene data (undoable). Design: D15. Refinement: tasks/refinements/editor/undo.md"
     }
-    task gc "Clean up (GC) + consolidate + relink" {
+    task gc "Clean up (GC)" {
       effort 2d
       allocate team
+      complete 100
       depends !save
-      note "Clean up runs the library's gc_project_directory over assets/ (roots = this one document); Consolidate copies borrowed files in + relativizes URIs for a portable bundle; missing borrow -> placeholder + relink. GC never touches workspace/ or borrowed files. Design: D13. Refinement: tasks/refinements/gc_consolidate.md"
+      note "Clean up runs the library's gc_project_directory over assets/ (roots = this one document); GC never touches workspace/ or borrowed files. Consolidate + relink split to editor.import.consolidate. Design: D13. Refinement: tasks/refinements/editor/gc.md"
     }
   }
 
@@ -314,6 +315,12 @@ task editor "Editor — host GUI over libarbc" {
       allocate team
       depends !image
       note "Place another project (.arbc) -> an org.arbc.nested cell referencing it (the library's external nested reference). Design: D12. Refinement: tasks/refinements/import_nested.md"
+    }
+    task consolidate "Consolidate project (borrowed -> owned + relativize URIs) + relink missing borrows" {
+      effort 2.5d
+      allocate team
+      depends editor.import.paste, editor.import.nested
+      note "Consolidate copies borrowed files into assets/ and rewrites their URIs to project-relative (a reversible scene transaction, D15), producing a self-contained portable bundle; relink surfaces a locate-file / reveal affordance for a moved borrow. Design: D11/D12/D13, docs/00-design.md §8 (Import & assets: Consolidate, missing/moved -> placeholder + relink), D15 (consolidate reversible -> a dispatched transaction). Source-of-debt: tasks/refinements/editor/gc.md"
     }
   }
 

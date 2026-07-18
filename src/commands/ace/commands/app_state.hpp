@@ -4,6 +4,7 @@
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
 #include <ace/platform/result.hpp>
+#include <ace/project/gc.hpp>
 #include <ace/project/project.hpp>
 #include <ace/project/save.hpp>
 
@@ -188,5 +189,16 @@ platform::Result<project::SaveOutcome> save_project_as(AppState& state,
                                                        const platform::ProcessLauncher& launcher,
                                                        const std::filesystem::path& executable,
                                                        const std::filesystem::path& target_root);
+
+// Clean up (GC): reclaim the on-disk `assets/` orphans this session's saves left
+// behind, through the L1 `project::gc_project` sweep over `state.layout()`
+// (D13/§8/D-gc-1). Unlike a dispatched edit this is NOT a transaction: it bumps no
+// document revision, adds no journal entry, and does NOT call `mark_saved` — GC is a
+// maintenance op over on-disk blobs, not a document edit (D13/D15/Constraint 3), so
+// `is_dirty()`, `document().pin()->revision()`, and `layout()` are left UNCHANGED.
+// `dry_run` previews the reclaim plan without deleting (the rail's confirm-before-
+// sweep). Errors are values. The L4 `AppProjectGateway::clean_up()` drives this
+// against the one in-process `AppState`; the on-close sweep drives it silently.
+platform::Result<project::GcOutcome> gc_project(AppState& state, bool dry_run);
 
 } // namespace ace::commands

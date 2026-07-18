@@ -46,6 +46,7 @@ public:
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
   void save_as() override {}
+  ace::dock::GcSummary clean_up(bool) override { return {}; } // inert (see gc_ui_e2e_test)
 
   bool undo() override {
     ++undo_calls;

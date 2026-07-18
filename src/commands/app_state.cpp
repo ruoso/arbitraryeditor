@@ -128,4 +128,13 @@ platform::Result<project::SaveOutcome> save_project_as(AppState& state,
   return published;
 }
 
+platform::Result<project::GcOutcome> gc_project(AppState& state, bool dry_run) {
+  // The sweep lives in `project` (D-gc-1); `commands` only selects this session's
+  // layout and drives it. NOT a transaction (Constraint 3): no revision bump, no
+  // journal entry, no `mark_saved` — the dirty baseline and revision are untouched.
+  // Roots on the on-disk canonical (D-gc-2), so it needs no live-document
+  // serialization and no `FileSystem` seam.
+  return project::gc_project(state.layout(), dry_run);
+}
+
 } // namespace ace::commands
