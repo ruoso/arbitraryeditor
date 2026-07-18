@@ -70,3 +70,20 @@ itself should filter or warn, and whether a "replace" path should require the
 target's own project to be closed first. These are product-design questions that
 cannot be mechanically resolved by an agent implementer. No WBS task was
 created; the choice is parked here for human review.
+
+---
+
+## Async submit-queue (off-UI-thread writer) for large-edit latency
+
+**Source:** `tasks/refinements/editor/frame_sync.md` (frame_sync, 2026-07-18), D-frame_sync-2 / Open questions.
+
+The render thread is off the UI thread and `commands::dispatch`/`undo`/`redo`
+remain synchronous on the UI thread (the single writer). This is correct per
+A4: `transact` is a cheap model mutation; the expensive work (rendering) is what
+moves off-thread. If future profiling ever shows that UI-thread `transact` /
+`dispatch` latency is stalling the event loop on large edits (e.g. a bulk
+import), moving the writer behind an async submit-queue (with a dedicated writer
+thread, a cross-thread command queue, serialized undo-cursor navigation, and a
+journal-read guard) may become warranted. That is a monitor-and-decide call
+gated on real telemetry, not implementable work today. No WBS task was created;
+record here for human review when profiling data is available.

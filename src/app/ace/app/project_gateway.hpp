@@ -50,6 +50,13 @@ public:
   bool can_undo() const override;
   bool can_redo() const override;
 
+  // Install a listener invoked after an in-process edit that mutates the Document
+  // (a moved undo/redo) — the edit poke seam (editor.canvas.frame_sync,
+  // D-frame_sync-2): the UI thread stays the single writer and wakes the off-thread
+  // canvas driver to re-render the damage promptly. Default: no listener (a no-op),
+  // so a headless test or a session without a live canvas is unaffected.
+  void set_edit_listener(std::function<void()> on_edit);
+
 private:
   bool spawn(const std::filesystem::path& dir);
 
@@ -59,6 +66,7 @@ private:
   const ace::platform::ProcessLauncher& launcher_;
   std::filesystem::path executable_;
   ace::commands::AppState& app_state_; // the one in-process session (A7) Save/dirty drive
+  std::function<void()> on_edit_;      // wakes the off-thread canvas after an edit (poke)
 };
 
 } // namespace ace::app

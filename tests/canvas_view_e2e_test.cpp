@@ -1,19 +1,29 @@
-// editor.canvas.view — Canvas view UI e2e (docs/01-architecture.md §9 :189).
-// Reuse the offscreen SDL + software-GL rig: boot the shell over a REAL
-// commands::AppState (ScratchDir + create_project), seed the fresh document with a
-// solid fill so it has visible content, register the driver-backed Canvas body,
-// and drive the default-open canvas#1 view BY STABLE ID. Asserts the window
-// exists + is docked, the driver produced a live frame (frames_issued() >= 1), and
-// a captured pixel matches the seeded render colour — DISTINCT from the shell clear
-// colour (not a byte-exact golden; software-GL pixels are flaky by construction —
-// the byte-exactness lives in tests/canvas_view_test.cpp's CPU golden).
+// editor.canvas.frame_sync — Canvas view UI e2e (docs/01-architecture.md §9 :189,
+// the UI↔driver-handoff ASan/TSan lane). Reuse the offscreen SDL + software-GL rig:
+// boot the shell over a REAL commands::AppState (ScratchDir + create_project), seed
+// the fresh document with a solid fill so it has visible content, register the
+// driver-backed Canvas body, and drive the default-open canvas#1 view BY STABLE ID.
+// The driver now runs OFF the UI thread (editor.canvas.frame_sync), so frames arrive
+// asynchronously through the latest-frame double-buffer — the test waits (bounded,
+// yielding CPU to the render thread) for a published frame rather than assuming one
+// is ready inline. Asserts the window exists + is docked, the driver produced a live
+// frame, a captured pixel matches the seeded render colour (distinct from the shell
+// clear colour), that an edit submitted THROUGH THE GATEWAY pokes the driver into a
+// fresh off-thread frame (sequence advances → gl::update_rgba8 in-place), and that
+// teardown stops+joins the render thread cleanly. NOT a byte-exact golden (software-GL
+// pixels are flaky — the byte-exactness lives in tests/canvas_driver_test.cpp's CPU
+// golden).
 #include <ace/app/canvas_view.hpp>
+#include <ace/app/folder_dialog.hpp>
+#include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/dock/dock.hpp>
+#include <ace/dockmodel/recent_projects.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/gl/gl.hpp>
 #include <ace/platform/filesystem.hpp>
+#include <ace/platform/process_launcher.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/render.hpp>
 #include <ace/views/views.hpp>
@@ -31,12 +41,16 @@
 #include <imgui_te_engine.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -54,7 +68,8 @@ namespace {
 // with the other suites in the one ace_shell_test binary.
 struct ScratchDir {
   std::filesystem::path root;
-  ScratchDir() : root(std::filesystem::temp_directory_path() / "ace_canvas_view_e2e_test") {
+  explicit ScratchDir(const char* tag)
+      : root(std::filesystem::temp_directory_path() / (std::string("ace_canvas_view_e2e_") + tag)) {
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
@@ -73,24 +88,9 @@ bool capture_pixels(ImGuiID /*viewport_id*/, int x, int y, int w, int h, unsigne
   return glGetError() == GL_NO_ERROR;
 }
 
-// TestFunc is a plain function pointer (std::function is disabled in this build),
-// so the CanvasView is threaded through UserData rather than captured.
-struct E2EState {
-  CanvasView* canvas;
-};
-
-} // namespace
-
-TEST_CASE("canvas_view e2e: canvas#1 shows the live document, docked and drivable by id") {
-  ScratchDir scratch;
-  ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "canvas");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-
-  // A fresh create_project document has no composition and renders transparent, so
-  // seed it with a composition + an unbounded solid fill (the probe colour, chosen
-  // distinct from the shell clear colour) — the canvas then has content to show.
+// Seed a fresh document with a full-frame solid fill (the probe colour, distinct from
+// the shell clear colour) so the canvas has content to show. Returns the composition id.
+arbc::ObjectId seed_solid_fill(AppState& state) {
   const arbc::ObjectId comp =
       state.document().add_composition(static_cast<double>(ace::project::k_probe_width),
                                        static_cast<double>(ace::project::k_probe_height));
@@ -98,6 +98,63 @@ TEST_CASE("canvas_view e2e: canvas#1 shows the live document, docked and drivabl
       std::make_shared<arbc::SolidContent>(ace::project::k_probe_color));
   const arbc::ObjectId layer = state.document().add_layer(content, arbc::Affine::identity());
   state.document().attach_layer(comp, layer);
+  return comp;
+}
+
+// The canvas driver renders on its own thread; the busy no-throttle test loop would
+// otherwise starve it, so between UI yields we sleep briefly to hand the render thread
+// CPU. Pumps until `ready()` or a wall-clock deadline — deadline-based (not a fixed
+// iteration count) so it holds under a sanitizer build's large slowdown.
+template <class Ready> bool pump_until(ImGuiTestContext* ctx, Ready ready) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (ready()) {
+      return true;
+    }
+    ctx->Yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return ready();
+}
+
+// Inert gateway collaborators — the undo edit path this e2e drives touches none of the
+// folder dialog / launcher / recent store.
+class NoopFolderDialog final : public ace::app::FolderDialog {
+public:
+  void show(Callback) override {}
+};
+class NoopLauncher final : public ace::platform::ProcessLauncher {
+public:
+  std::error_code spawn_detached(const std::filesystem::path&,
+                                 const std::vector<std::string>&) const override {
+    return {};
+  }
+};
+
+// TestFunc is a plain function pointer (std::function is disabled in this build), so
+// the collaborators are threaded through UserData rather than captured.
+struct E2EState {
+  CanvasView* canvas;
+  ace::app::AppProjectGateway* gateway;
+  // The ImGui Test Engine runs TestFunc on its own coroutine thread, but the Document
+  // is single-writer-thread-confined (libarbc SlotStore) — the writer is the MAIN
+  // thread that owns it, exactly as the shell's UI thread is in production. So the
+  // coroutine only reads (frames_issued) and requests the edit through this flag; the
+  // MAIN render loop performs gateway.undo() (the writer op) when it sees the request.
+  std::atomic<bool> request_undo{false};
+  std::atomic<bool> undo_moved{false};
+};
+
+} // namespace
+
+TEST_CASE(
+    "canvas_view e2e: canvas#1 shows the live document off-thread, docked and drivable by id") {
+  ScratchDir scratch("show");
+  ace::platform::NativeFileSystem fs;
+  auto created = ace::project::create_project(fs, scratch.root / "canvas");
+  REQUIRE(created.has_value());
+  AppState state(std::move(*created));
+  seed_solid_fill(state);
 
   Shell shell;
   ShellOptions opts;
@@ -106,9 +163,10 @@ TEST_CASE("canvas_view e2e: canvas#1 shows the live document, docked and drivabl
   opts.height = 480;
   REQUIRE(shell.init(opts));
 
-  // The driver-backed Canvas body over the one owned Document — the same seam the
-  // L4 shell uses. Cleared after the loop so the process-global seam never outlives
-  // this CanvasView/AppState into a later test in the ace_shell_test binary.
+  // The driver-backed Canvas body over the one owned Document — the same seam the L4
+  // shell uses. Constructing it spawns the render thread; it is joined by
+  // canvas.destroy() at teardown. Cleared after the loop so the process-global seam
+  // never outlives this CanvasView/AppState into a later test in the binary.
   CanvasView canvas(state);
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -125,22 +183,22 @@ TEST_CASE("canvas_view e2e: canvas#1 shows the live document, docked and drivabl
   te_io.ScreenCaptureFunc = capture_pixels;
   ImGuiTestEngine_Start(engine, shell.imgui_context());
 
-  E2EState e2e{&canvas};
+  E2EState e2e{&canvas, nullptr};
   ImGuiTest* test = IM_REGISTER_TEST(engine, "canvas_view", "shows_live_document");
   test->UserData = &e2e;
   test->TestFunc = [](ImGuiTestContext* ctx) {
     auto* e2e = static_cast<E2EState*>(ctx->Test->UserData);
     CanvasView& canvas = *e2e->canvas;
 
-    // canvas#1 is open + docked by default; let it lay out and render. Yield well
-    // past the mid-run edit (below) so the re-rendered frame is pumped too.
-    ctx->Yield(4);
+    // The driver renders OFF the UI thread: wait (bounded) for the double-buffer to
+    // publish its first frame rather than assuming a synchronous inline step.
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued() >= 1; }));
     IM_CHECK(ctx->WindowInfo("canvas#1").ID != 0);
     ImGuiWindow* w_canvas = ctx->GetWindowByRef("canvas#1");
     IM_CHECK(w_canvas != nullptr);
     IM_CHECK(w_canvas->DockNode != nullptr);
 
-    // The driver produced at least one live frame of the shared document.
+    // The off-thread driver produced at least one live frame of the shared document.
     IM_CHECK(canvas.frames_issued() >= 1);
     ctx->Yield(12);
   };
@@ -162,7 +220,7 @@ TEST_CASE("canvas_view e2e: canvas#1 shows the live document, docked and drivabl
     }
   };
 
-  const int k_max_frames = 400;
+  const int k_max_frames = 200000;
   int frames = 0;
   while (!ImGuiTestEngine_IsTestQueueEmpty(engine) && frames < k_max_frames) {
     shell.new_frame();
@@ -183,10 +241,9 @@ TEST_CASE("canvas_view e2e: canvas#1 shows the live document, docked and drivabl
   CHECK(count_tested == 1);
   CHECK(count_success == 1);
 
-  // The live render reached the screen: some captured pixel matches the seeded
-  // solid sRGB8 colour (within a tolerance for software-GL variance), distinct from
-  // the shell clear colour (0.10,0.10,0.12) — proof the canvas shows the render,
-  // not the background. NOT a byte-exact golden (D-canvas_view / render_probe).
+  // The live render reached the screen: some captured pixel matches the seeded solid
+  // sRGB8 colour (within a tolerance for software-GL variance), distinct from the
+  // shell clear colour (0.10,0.10,0.12) — proof the canvas shows the render.
   const ace::render::Srgb8Image expected =
       ace::render::render_probe_srgb8(ace::project::k_probe_width, ace::project::k_probe_height);
   REQUIRE(expected.pixels.size() >= 4);
@@ -205,9 +262,134 @@ TEST_CASE("canvas_view e2e: canvas#1 shows the live document, docked and drivabl
   }
   CHECK(found);
 
-  // Teardown order (shell_e2e rationale): destroy the ImGui context (inside
-  // shell.shutdown()) before the engine, and release the canvas texture while the
-  // GL context is still valid.
+  // Teardown: destroy the ImGui context (inside shell.shutdown()) before the engine,
+  // and stop+join the render thread + release the canvas texture while the GL context
+  // is still valid (canvas.destroy()) — a clean stop→wake→join (Constraint 5).
+  canvas.destroy();
+  shell.shutdown();
+  ImGuiTestEngine_DestroyContext(engine);
+}
+
+TEST_CASE(
+    "canvas_view e2e: an edit through the gateway pokes the driver into a new off-thread frame") {
+  ScratchDir scratch("poke");
+  ace::platform::NativeFileSystem fs;
+  auto created = ace::project::create_project(fs, scratch.root / "poke");
+  REQUIRE(created.has_value());
+  AppState state(std::move(*created));
+  const arbc::ObjectId comp = seed_solid_fill(state);
+
+  // A journal tip to navigate: a covering layer (one dispatched transaction). The
+  // document now shows the covering colour; undo reverts it — a visible edit whose
+  // re-render is what the poke drives.
+  ace::commands::dispatch(
+      state, ace::commands::Command{"cover", [comp](arbc::Document& doc) {
+                                      const arbc::ObjectId content =
+                                          doc.add_content(std::make_shared<arbc::SolidContent>(
+                                              arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}));
+                                      const arbc::ObjectId layer =
+                                          doc.add_layer(content, arbc::Affine::identity());
+                                      doc.attach_layer(comp, layer);
+                                    }});
+
+  Shell shell;
+  ShellOptions opts;
+  opts.headless = true;
+  opts.width = 640;
+  opts.height = 480;
+  REQUIRE(shell.init(opts));
+
+  CanvasView canvas(state); // spawns the render thread
+
+  // The in-process gateway wired to poke the canvas after a moved edit (the shell's
+  // wiring, D-frame_sync-2). undo() touches none of the inert collaborators.
+  ace::dockmodel::RecentProjects recent(scratch.root / "prefs", fs);
+  NoopFolderDialog dialog;
+  NoopLauncher launcher;
+  ace::app::AppProjectGateway gateway(recent, fs, dialog, launcher, "/usr/bin/arbitraryeditor",
+                                      state);
+  gateway.set_edit_listener([&canvas]() { canvas.poke(); });
+
+  ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view) {
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    canvas.draw_content(static_cast<int>(avail.x), static_cast<int>(avail.y));
+  });
+
+  ace::dock::Dockspace dockspace;
+  shell.set_draw_content([&dockspace]() { dockspace.draw(); });
+
+  ImGuiTestEngine* engine = ImGuiTestEngine_CreateContext();
+  ImGuiTestEngineIO& te_io = ImGuiTestEngine_GetIO(engine);
+  te_io.ConfigRunSpeed = ImGuiTestRunSpeed_Fast;
+  te_io.ConfigNoThrottle = true;
+  te_io.ScreenCaptureFunc = capture_pixels;
+  ImGuiTestEngine_Start(engine, shell.imgui_context());
+
+  E2EState e2e{&canvas, &gateway};
+  ImGuiTest* test = IM_REGISTER_TEST(engine, "canvas_view", "edit_poke_refreshes");
+  test->UserData = &e2e;
+  test->TestFunc = [](ImGuiTestContext* ctx) {
+    auto* e2e = static_cast<E2EState*>(ctx->Test->UserData);
+    CanvasView& canvas = *e2e->canvas;
+
+    // Wait for the first off-thread frame (covering colour) + its GL upload.
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued() >= 1; }));
+
+    // Let the scene SETTLE (the still-scene early-out): once no new frame lands over a
+    // quiet window, the sequence is stable, so a later advance is attributable to the
+    // edit and not to a still-settling frame racing the assertion.
+    std::uint64_t last = canvas.frames_issued();
+    for (int quiet = 0; quiet < 40;) {
+      ctx->Yield();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      const std::uint64_t now = canvas.frames_issued();
+      if (now == last) {
+        ++quiet;
+      } else {
+        quiet = 0;
+        last = now;
+      }
+    }
+    const std::uint64_t before = canvas.frames_issued();
+
+    // Request an edit THROUGH THE GATEWAY, performed on the MAIN thread (the writer):
+    // a moved undo pokes the driver, which re-renders the damage off-thread into the
+    // double-buffer; the UI then uploads it in place (same size → gl::update_rgba8).
+    e2e->request_undo.store(true);
+    IM_CHECK(pump_until(ctx, [&] { return e2e->undo_moved.load(); }));
+    // The poke drives a fresh off-thread frame; the settled sequence now advances.
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued() > before; }));
+    IM_CHECK(canvas.frames_issued() > before);
+    ctx->Yield(4);
+  };
+  ImGuiTestEngine_QueueTest(engine, test);
+
+  const int k_max_frames = 200000;
+  int frames = 0;
+  while (!ImGuiTestEngine_IsTestQueueEmpty(engine) && frames < k_max_frames) {
+    shell.new_frame();
+    shell.draw_ui();
+    shell.render();
+    ImGuiTestEngine_PostSwap(engine);
+    // The writer op runs on THIS (main) thread — the Document's writer, matching the
+    // shell's UI thread. Fires once when the coroutine requests it.
+    if (e2e.request_undo.exchange(false) && gateway.can_undo()) {
+      e2e.undo_moved.store(gateway.undo());
+    }
+    ++frames;
+  }
+
+  int count_tested = 0, count_success = 0;
+  ImGuiTestEngine_GetResult(engine, count_tested, count_success);
+  ImGuiTestEngine_Stop(engine);
+
+  ace::views::register_view_body(ViewType::Canvas, {});
+
+  CHECK(frames < k_max_frames);
+  CHECK(count_tested == 1);
+  CHECK(count_success == 1);
+
+  // Clean stop→wake→join of the render thread on teardown (Constraint 5).
   canvas.destroy();
   shell.shutdown();
   ImGuiTestEngine_DestroyContext(engine);
@@ -222,9 +404,8 @@ TEST_CASE(
   opts.height = 240;
   REQUIRE(shell.init(opts));
 
-  // gl::update_rgba8 (this leaf's new tile→GL primitive): a same-size in-place
-  // refresh of a live texture issues no GL error — the path a re-rendering canvas
-  // (a later edit / camera nudge, editor.canvas.frame_sync / nav) takes instead of
+  // gl::update_rgba8 (the tile→GL in-place primitive): a same-size refresh of a live
+  // texture issues no GL error — the path a re-rendering canvas takes instead of
   // churning glGen/glDelete.
   std::vector<unsigned char> px(static_cast<std::size_t>(64) * 64 * 4, 64);
   const unsigned int tex = ace::gl::upload_rgba8(px.data(), 64, 64);
@@ -234,33 +415,38 @@ TEST_CASE(
   CHECK(glGetError() == static_cast<GLenum>(GL_NO_ERROR));
   ace::gl::destroy_texture(tex);
 
-  // CanvasView pane-resize (Constraint 7 — the resize/reallocate branch): a size
-  // change reallocates the driver target and swaps the GL texture object, reusing
-  // no stale handle. Drive draw_content inside a real ImGui frame (draw_canvas_image
-  // issues an ImGui::Image, which needs a current window).
-  ScratchDir scratch;
+  // CanvasView pane-resize (Constraint 7 — the resize/reallocate branch). The driver
+  // renders off-thread, so pump draw_content until the double-buffer publishes the
+  // first frame at 64x64 (sleeping to hand the render thread CPU), then a size change
+  // reallocates the driver target and swaps the GL texture object. Drive inside a real
+  // ImGui frame (draw_canvas_image issues an ImGui::Image, which needs a window).
+  ScratchDir scratch("resize");
   ace::platform::NativeFileSystem fs;
   auto created = ace::project::create_project(fs, scratch.root / "resize");
   REQUIRE(created.has_value());
   AppState state(std::move(*created));
-  const arbc::ObjectId comp =
-      state.document().add_composition(static_cast<double>(ace::project::k_probe_width),
-                                       static_cast<double>(ace::project::k_probe_height));
-  const arbc::ObjectId content = state.document().add_content(
-      std::make_shared<arbc::SolidContent>(ace::project::k_probe_color));
-  const arbc::ObjectId layer = state.document().add_layer(content, arbc::Affine::identity());
-  state.document().attach_layer(comp, layer);
+  seed_solid_fill(state);
 
   CanvasView canvas(state);
+  bool published = false;
+  for (int i = 0; i < 600 && !published; ++i) {
+    shell.new_frame();
+    ImGui::Begin("canvas_host");
+    canvas.draw_content(64, 64); // request 64x64; upload once the off-thread frame lands
+    ImGui::End();
+    shell.render();
+    published = canvas.frames_issued() >= 1;
+    if (!published) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+  CHECK(canvas.frames_issued() >= 1);
+
   shell.new_frame();
   ImGui::Begin("canvas_host");
-  canvas.draw_content(64, 64); // first frame: a fresh upload
-  const std::uint64_t after_first = canvas.frames_issued();
   canvas.draw_content(48, 32); // a size change: destroy the old texture + re-upload
   ImGui::End();
   shell.render();
-
-  CHECK(after_first >= 1);
 
   canvas.destroy();
   shell.shutdown();

@@ -260,6 +260,10 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
     app_gateway = std::make_unique<ace::app::AppProjectGateway>(
         *recent_projects, filesystem, *folder_dialog, launcher, executable, app_state);
+    // Edit poke (editor.canvas.frame_sync, D-frame_sync-2): a moved undo/redo through
+    // the gateway wakes the off-thread canvas driver to re-render the damage. The
+    // gateway outlives the draw loop alongside `canvas`, so the capture is safe.
+    app_gateway->set_edit_listener([&canvas]() { canvas.poke(); });
     project_gateway = app_gateway.get();
   }
   dockspace.set_project_gateway(project_gateway);

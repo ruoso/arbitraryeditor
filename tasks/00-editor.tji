@@ -161,8 +161,9 @@ task editor "Editor — host GUI over libarbc" {
     task frame_sync "UI-thread <-> driver frame handoff; edit submission" {
       effort 3d
       allocate team
+      complete 100
       depends !view
-      note "The driver renders off the UI thread; the UI displays the latest frame (double-buffer) and SUBMITS edits, never touching the cache. Honors the library's single-writer / leaf-only-dispatch contract. Arch A4. Refinement: tasks/refinements/frame_sync.md"
+      note "The driver renders off the UI thread; the UI displays the latest frame (double-buffer) and SUBMITS edits, never touching the cache. Honors the library's single-writer / leaf-only-dispatch contract. Arch A4. Refinement: tasks/refinements/editor/frame_sync.md"
     }
     task multi_canvas "N canvases over one Document sharing one WorkerPool" {
       effort 2d

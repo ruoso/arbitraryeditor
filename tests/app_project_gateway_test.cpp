@@ -270,11 +270,17 @@ TEST_CASE("AppProjectGateway::undo/redo navigate the in-process session's journa
   auto session = make_session(fs, scratch.root / "session");
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
+  // The edit poke (editor.canvas.frame_sync, D-frame_sync-2): a moved undo/redo fires
+  // the installed listener so the off-thread canvas re-renders; a no-op does not.
+  int pokes = 0;
+  gateway.set_edit_listener([&pokes]() { ++pokes; });
+
   // A fresh session has an empty journal cursor: nothing to navigate.
   CHECK_FALSE(gateway.can_undo());
   CHECK_FALSE(gateway.can_redo());
   CHECK_FALSE(gateway.undo()); // an empty journal is inert (D-undo)
   CHECK_FALSE(gateway.redo());
+  CHECK(pokes == 0); // a no-op navigation pokes nothing
 
   // One edit through the seam pushes exactly one journal entry.
   ace::commands::dispatch(session,
@@ -285,10 +291,13 @@ TEST_CASE("AppProjectGateway::undo/redo navigate the in-process session's journa
   CHECK_FALSE(gateway.can_redo());
 
   // Undo navigates the cursor back (a forward publish) and reports the move; redo
-  // then navigates forward again. No sibling exec is fired for either (A13).
+  // then navigates forward again. No sibling exec is fired for either (A13). Each
+  // moved navigation pokes the canvas exactly once.
   REQUIRE(gateway.undo());
+  CHECK(pokes == 1);
   CHECK(gateway.can_redo());
   REQUIRE(gateway.redo());
+  CHECK(pokes == 2);
   CHECK(gateway.can_undo());
   REQUIRE_FALSE(launcher.invoked);
 }
