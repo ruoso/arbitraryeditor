@@ -139,6 +139,13 @@ ace_component(platform DEPENDS base LIBS Threads::Threads)
 ace_component(gl DEPENDS base LIBS ${ACE_GLES_LIBRARY})
 # L1 — the UI-agnostic core (project owns the libarbc Document)
 ace_component(project DEPENDS base platform LIBS arbc::arbc)
+# editor.project.save holds an `arbc::CodecTable` (builtin_codecs) to drive the
+# asset-sink save path; its definition (arbc/serialize/codec.hpp) names nlohmann::json,
+# which arbc keeps PRIVATE to arbc_serialize. Link nlohmann header-only + PRIVATE to
+# `ace_project` alone (the exact idiom arbc's own CMake documents: header-only,
+# invisible to check_levels.py, "no levelization edge, no new dependency") so only
+# src/project/save.cpp sees it — no downstream component inherits JSON.
+target_link_libraries(ace_project PRIVATE nlohmann_json::nlohmann_json)
 ace_component(scene DEPENDS base project)
 ace_component(interact DEPENDS base scene)
 ace_component(commands DEPENDS base project scene)
@@ -179,8 +186,8 @@ add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
                          tests/dockmodel_test.cpp tests/view_registry_test.cpp
                          tests/tool_rail_test.cpp tests/workspaces_test.cpp
                          tests/project_open_test.cpp tests/commands_test.cpp
-                         tests/exec_new_test.cpp tests/recent_projects_test.cpp
-                         tests/project_entry_test.cpp)
+                         tests/project_save_test.cpp tests/exec_new_test.cpp
+                         tests/recent_projects_test.cpp tests/project_entry_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands arbc::arbc
                                         Catch2::Catch2WithMain)
@@ -200,7 +207,8 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/view_registry_e2e_test.cpp tests/tool_rail_e2e_test.cpp
                               tests/workspaces_e2e_test.cpp tests/app_state_e2e_test.cpp
                               tests/exec_new_argv_test.cpp tests/exec_new_e2e_test.cpp
-                              tests/app_project_gateway_test.cpp tests/open_ui_e2e_test.cpp)
+                              tests/app_project_gateway_test.cpp tests/open_ui_e2e_test.cpp
+                              tests/save_ui_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

@@ -87,6 +87,23 @@ void draw_new_project_modal(Dockspace& dockspace, ProjectGateway& gateway) {
 void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   ImGui::Separator();
   ImGui::TextUnformatted("Project");
+  // Save acts on THIS process's session (A13), unlike New/Open/Recent below which
+  // spawn siblings. It is the primary verb for the current project, so it leads the
+  // section. The dirty indicator (workspace-vs-snapshot drift, D16) is drawn only
+  // when `is_dirty()` — a disabled marker so it carries a stable widget id the e2e
+  // can probe for presence/absence without it being actionable.
+  if (ImGui::Selectable("Save###save_project")) {
+    if (gateway.save()) {
+      dockspace.project_feedback().clear();
+    } else {
+      dockspace.project_feedback() = "Save failed.";
+    }
+  }
+  if (gateway.is_dirty()) {
+    ImGui::BeginDisabled();
+    ImGui::SmallButton("Unsaved changes###dirty_indicator");
+    ImGui::EndDisabled();
+  }
   // Stable, slash-free `###` widget ids (the visible label carries the ellipsis /
   // path; the id after `###` is what the e2e drives by) so a path in the label
   // never confuses the test-engine ref parser.

@@ -122,8 +122,15 @@ task editor "Editor — host GUI over libarbc" {
     task save "Save = re-dump project.arbc + assets; dirty state" {
       effort 1.5d
       allocate team
+      complete 100
       depends !app_state
-      note "Save re-emits the canonical project.arbc (+ changed owned tiles) from the live workspace — a publish step, not a crash race (the workspace is durable by default). Dirty indicator = workspace-vs-snapshot drift. Design: D16 §9. Refinement: tasks/refinements/project_save.md"
+      note "Save re-emits the canonical project.arbc (+ changed owned tiles) from the live workspace — a publish step, not a crash race (the workspace is durable by default). Dirty indicator = workspace-vs-snapshot drift. Design: D16 §9. Refinement: tasks/refinements/editor/save.md"
+    }
+    task save_as "Save As = publish + copy project dir + exec sibling" {
+      effort 1d
+      allocate team
+      depends !save, !exec_new
+      note "Save As: dump the current state, recursively copy project.arbc + assets/ to the chosen target (excluding workspace/, which the sibling regenerates), write the workspace/-excluding .gitignore, then hand the new directory to commands::open_another_project (editor.project.exec_new). Design: D16 §9 (Save As = copy the directory), A7/D19 (process-per-project). Source-of-debt: tasks/refinements/editor/save.md. Refinement: tasks/refinements/editor/save_as.md"
     }
     task undo "Undo/redo wired to library transactions" {
       effort 2d

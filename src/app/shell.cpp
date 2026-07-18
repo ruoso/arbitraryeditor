@@ -248,7 +248,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
         workspace_prefs_root().parent_path(), filesystem);
     folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
     app_gateway = std::make_unique<ace::app::AppProjectGateway>(
-        *recent_projects, filesystem, *folder_dialog, launcher, executable);
+        *recent_projects, filesystem, *folder_dialog, launcher, executable, app_state);
     project_gateway = app_gateway.get();
   }
   dockspace.set_project_gateway(project_gateway);

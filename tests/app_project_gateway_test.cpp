@@ -1,8 +1,10 @@
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
+#include <ace/commands/app_state.hpp>
 #include <ace/dockmodel/recent_projects.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
+#include <ace/project/project.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -85,6 +87,15 @@ std::filesystem::path make_project(const std::filesystem::path& parent, const st
 
 const std::filesystem::path k_exe = "/usr/bin/arbitraryeditor";
 
+// A minimal in-process session for the gateway to hold. The entry actions
+// (open/new/recent) never touch it; only Save + dirty (A13) do.
+ace::commands::AppState make_session(const ace::platform::FileSystem& fs,
+                                     const std::filesystem::path& root) {
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  return ace::commands::AppState(std::move(*created));
+}
+
 } // namespace
 
 using ace::app::AppProjectGateway;
@@ -97,7 +108,8 @@ TEST_CASE("AppProjectGateway::open_project validates, records MRU-front, spawns"
   RecordingLauncher launcher;
   ScriptedFolderDialog dialog;
   RecentProjects recent(scratch.root / "prefs", fs);
-  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
   const std::filesystem::path project = make_project(scratch.root, "proj");
   REQUIRE(gateway.open_project(project));
@@ -118,7 +130,8 @@ TEST_CASE("AppProjectGateway::open_project rejects a non-project, spawning nothi
   RecordingLauncher launcher;
   ScriptedFolderDialog dialog;
   RecentProjects recent(scratch.root / "prefs", fs);
-  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
   const std::filesystem::path plain = scratch.root / "plain";
   std::error_code ec;
@@ -135,7 +148,8 @@ TEST_CASE("AppProjectGateway::new_project composes a non-existent target and spa
   RecordingLauncher launcher;
   ScriptedFolderDialog dialog;
   RecentProjects recent(scratch.root / "prefs", fs);
-  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
   REQUIRE(gateway.new_project(scratch.root, "Fresh"));
   REQUIRE(launcher.invoked);
@@ -160,7 +174,8 @@ TEST_CASE("AppProjectGateway::open_recent re-orders MRU-front and spawns",
   RecordingLauncher launcher;
   ScriptedFolderDialog dialog;
   RecentProjects recent(scratch.root / "prefs", fs);
-  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
   const std::filesystem::path one = make_project(scratch.root, "one");
   const std::filesystem::path two = make_project(scratch.root, "two");
@@ -179,6 +194,24 @@ TEST_CASE("AppProjectGateway::open_recent re-orders MRU-front and spawns",
   REQUIRE_FALSE(launcher.invoked);
 }
 
+TEST_CASE("AppProjectGateway::save publishes the in-process session; is_dirty tracks it",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // Save acts on the in-process session (A13), not a sibling exec: no launch.
+  CHECK(gateway.is_dirty()); // a fresh create_project session
+  REQUIRE(gateway.save());
+  CHECK_FALSE(gateway.is_dirty());
+  CHECK(fs.exists(session.layout().canonical));
+  REQUIRE_FALSE(launcher.invoked);
+}
+
 TEST_CASE("AppProjectGateway::pick_folder forwards and survives teardown mid-pick",
           "[app_project_gateway]") {
   ScratchDir scratch;
@@ -186,10 +219,11 @@ TEST_CASE("AppProjectGateway::pick_folder forwards and survives teardown mid-pic
   RecordingLauncher launcher;
   ScriptedFolderDialog dialog;
   RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
 
   // Immediate delivery: pick_folder forwards to the dialog and the callback runs.
   {
-    AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe);
+    AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
     dialog.next = scratch.root / "chosen";
     std::optional<std::filesystem::path> got;
     gateway.pick_folder([&got](std::optional<std::filesystem::path> p) { got = p; });
@@ -204,7 +238,7 @@ TEST_CASE("AppProjectGateway::pick_folder forwards and survives teardown mid-pic
   bool delivered = false;
   dialog.defer = true;
   {
-    AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe);
+    AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
     gateway.pick_folder([&delivered](std::optional<std::filesystem::path>) { delivered = true; });
   }
   dialog.deliver();

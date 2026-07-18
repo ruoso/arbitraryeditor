@@ -1,5 +1,6 @@
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
+#include <ace/commands/app_state.hpp>
 #include <ace/commands/exec_new.hpp>
 #include <ace/project/project.hpp>
 
@@ -16,9 +17,10 @@ AppProjectGateway::AppProjectGateway(ace::dockmodel::RecentProjects& recent,
                                      const ace::platform::FileSystem& filesystem,
                                      FolderDialog& dialog,
                                      const ace::platform::ProcessLauncher& launcher,
-                                     std::filesystem::path executable)
+                                     std::filesystem::path executable,
+                                     ace::commands::AppState& app_state)
     : recent_(recent), filesystem_(filesystem), dialog_(dialog), launcher_(launcher),
-      executable_(std::move(executable)) {}
+      executable_(std::move(executable)), app_state_(app_state) {}
 
 bool AppProjectGateway::spawn(const std::filesystem::path& dir) {
   // Empty error_code == a successful launch (D-open-6); a non-empty one means the
@@ -66,5 +68,15 @@ std::vector<std::filesystem::path> AppProjectGateway::recent_projects() const {
     return ace::project::is_project_directory(filesystem_, dir);
   });
 }
+
+bool AppProjectGateway::save() {
+  // Publish the in-process session (A13), not a sibling exec. `commands::save_project`
+  // dumps `project.arbc` + `assets/` and marks the session clean on success; a
+  // returned error value is surfaced to the rail as a failed Save (session stays
+  // dirty). Errors are values — never a throw across the seam.
+  return ace::commands::save_project(app_state_, filesystem_).has_value();
+}
+
+bool AppProjectGateway::is_dirty() const { return app_state_.is_dirty(); }
 
 } // namespace ace::app

@@ -4,6 +4,7 @@
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/result.hpp>
 #include <ace/project/project.hpp>
+#include <ace/project/save.hpp>
 
 #include <arbc/contract/registry.hpp>
 #include <arbc/runtime/document.hpp>
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace ace::commands {
@@ -54,12 +56,31 @@ public:
   // `create_project`).
   bool rebuilt_from_canonical() const { return rebuilt_from_canonical_; }
 
+  // The dirty indicator (D16/A13/D-save-4): workspace-vs-snapshot drift, modelled as
+  // session revision-drift and CONSERVATIVE toward "dirty" — it never reports a
+  // false clean (telling the user unpublished edits are safely in `project.arbc`
+  // when they are not). `saved_revision_` is the last known-published revision this
+  // session: set clean at a `rebuilt_from_canonical` open (the workspace was just
+  // built from `project.arbc`) and on each successful publish; `nullopt` (dirty) for
+  // a fresh `create_project` or a workspace-mapped open (no known-published snapshot
+  // this session). Persisting a cross-session baseline is a deliberate non-goal.
+  bool is_dirty() const {
+    return !saved_revision_ || *saved_revision_ != document_->pin()->revision();
+  }
+
+  // Mark the session clean at `revision` — the revision a successful publish dumped.
+  // Called by `save_project` after `project::save_project` returns; not part of the
+  // edit path (a revision-bumping `dispatch` re-dirties by advancing past it).
+  void mark_saved(std::uint64_t revision) { saved_revision_ = revision; }
+
 private:
   std::unique_ptr<arbc::Document> document_;
   project::ProjectLayout layout_;
   arbc::Registry registry_;
   Selection selection_;
   bool rebuilt_from_canonical_ = false;
+  // The last-published revision this session, or `nullopt` when none is known.
+  std::optional<std::uint64_t> saved_revision_;
 };
 
 // A dispatchable editor action (refinement Decision D-app_state-5). This leaf
@@ -96,5 +117,14 @@ DispatchOutcome dispatch(AppState& state, const Command& command);
 // `NativeFileSystem` and holds the result for the process lifetime.
 platform::Result<AppState> open_or_create_app_state(const platform::FileSystem& fs,
                                                     const std::filesystem::path& root);
+
+// Publish the session's live `Document` as the canonical `project.arbc` (+ owned
+// `assets/`) through the L1 `project::save_project` dump (A13/D-save-1) and, on
+// success, mark the session clean at the published revision. Errors are values (a
+// failed publish returns cleanly and the session stays dirty — the workspace is
+// durable regardless). The L4 `AppProjectGateway::save()` drives this against the
+// one in-process `AppState`; the rail never reaches into `project` directly (A13).
+platform::Result<project::SaveOutcome> save_project(AppState& state,
+                                                    const platform::FileSystem& fs);
 
 } // namespace ace::commands

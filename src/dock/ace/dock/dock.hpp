@@ -60,6 +60,17 @@ public:
 
   // The current pruned MRU list (most-recent-first) for the rail to render.
   virtual std::vector<std::filesystem::path> recent_projects() const = 0;
+
+  // Publish the IN-PROCESS session's canonical `project.arbc` (+ owned `assets/`)
+  // — the one front-door verb that acts on this process's own Document rather than
+  // spawning a sibling (A13). Returns false when the publish failed (the rail
+  // renders inline feedback and the session stays dirty). The L4 impl drives
+  // `commands::save_project` against the one owned `AppState`.
+  virtual bool save() = 0;
+
+  // Whether the session has unpublished workspace-vs-snapshot drift (D16/A13): the
+  // rail draws the dirty indicator when true. Conservative — never a false clean.
+  virtual bool is_dirty() const = 0;
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by

@@ -36,3 +36,21 @@ or is it subsumed by the Layers list's referenced-vs-painted surface
 (`editor.panels.layers`, per D11)? No new WBS leaf was created; the choice is
 parked here for human review before a downstream panel-content task is
 scheduled.
+
+---
+
+## Cross-session dirty precision on mapped-workspace reopen
+
+**Source:** `tasks/refinements/editor/save.md` (save, 2026-07-18), D-save-4.
+
+The current dirty model is conservative and session-scoped: a workspace-mapped
+reopen (e.g. crash-recovered session) starts dirty even if `project.arbc` is
+already up to date, because we cannot prove they are in sync without reloading
+the canonical. D-save-4 calls this the honest call — a false-dirty causes an
+unnecessary re-dump, which is cheap and idempotent; a false-clean would tell the
+user their edits are safe in `project.arbc` when they are not. Improving
+precision (persisting a cross-session published-revision sidecar in `workspace/`
+so a mapped reopen reads clean) would require touching the shipped open/create
+path and adding I/O for a degree of precision the durable-workspace +
+idempotent-re-dump model does not need. This is a product-polish judgment call
+for a human to weigh; no WBS task was created.
