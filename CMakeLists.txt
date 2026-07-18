@@ -224,7 +224,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/binding_test.cpp
                          tests/project_save_test.cpp tests/exec_new_test.cpp
                          tests/recent_projects_test.cpp tests/project_entry_test.cpp
                          tests/save_as_test.cpp tests/undo_test.cpp
-                         tests/project_gc_test.cpp)
+                         tests/project_gc_test.cpp tests/canvas_view_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands arbc::arbc
                                         Catch2::Catch2WithMain)
@@ -247,7 +247,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/app_project_gateway_test.cpp tests/open_ui_e2e_test.cpp
                               tests/save_ui_e2e_test.cpp tests/save_as_ui_e2e_test.cpp
                               tests/undo_ui_e2e_test.cpp tests/history_e2e_test.cpp
-                              tests/gc_ui_e2e_test.cpp)
+                              tests/gc_ui_e2e_test.cpp tests/canvas_view_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

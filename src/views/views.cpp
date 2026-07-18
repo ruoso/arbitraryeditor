@@ -39,6 +39,12 @@ void draw_probe_image(unsigned int texture, int width, int height) {
                ImVec2(static_cast<float>(width), static_cast<float>(height)));
 }
 
+void draw_canvas_image(unsigned int texture, int width, int height) {
+  // The Canvas body reuses the render_probe tile→GL display primitive: an Image
+  // into the dockspace-owned canvas#N window (D-canvas_view-4).
+  draw_probe_image(texture, width, height);
+}
+
 void draw_probe_pane(unsigned int texture, int width, int height) {
   ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
   // Auto-resize so the fixed-size image is never clipped by a default window.

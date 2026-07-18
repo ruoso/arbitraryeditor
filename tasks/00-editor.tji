@@ -154,8 +154,9 @@ task editor "Editor — host GUI over libarbc" {
     task view "Canvas view = HostViewport + InteractiveRenderer; tile -> GL" {
       effort 3d
       allocate team
+      complete 100
       depends editor.project.app_state
-      note "A canvas view drives a libarbc HostViewport + InteractiveRenderer over the shared Document and uploads settled CPU tiles as GL textures. A GPU Backend later needs no editor change (behind the Backend seam). Arch A4/A6. Refinement: tasks/refinements/canvas_view.md"
+      note "A canvas view drives a libarbc HostViewport + InteractiveRenderer over the shared Document and uploads settled CPU tiles as GL textures. A GPU Backend later needs no editor change (behind the Backend seam). Arch A4/A6. Refinement: tasks/refinements/editor/canvas_view.md"
     }
     task frame_sync "UI-thread <-> driver frame handoff; edit submission" {
       effort 3d

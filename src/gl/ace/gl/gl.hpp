@@ -16,6 +16,15 @@ void clear(float r, float g, float b, float a);
 // tile→GL step — editor.canvas.view reuses the identical primitive for settled
 // tiles. A GL context must be current. `destroy_texture` releases the handle.
 unsigned int upload_rgba8(const void* pixels, int width, int height);
+
+// Re-upload tightly-packed straight-alpha RGBA8 pixels into an EXISTING texture
+// of the SAME dimensions (glTexSubImage2D). editor.canvas.view uses this so a
+// canvas that re-renders (a later camera nudge, an edit) reuses its texture
+// object instead of churning glGen/glDelete every changed frame — reallocating
+// (a fresh upload_rgba8) only on a genuine pane resize. A GL context must be
+// current and `texture` must be a live upload_rgba8 handle of size w*h.
+void update_rgba8(unsigned int texture, const void* pixels, int width, int height);
+
 void destroy_texture(unsigned int texture);
 
 } // namespace ace::gl

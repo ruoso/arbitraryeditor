@@ -32,6 +32,13 @@ void draw_probe_pane(unsigned int texture, int width, int height);
 // dockspace owns the window + the tab ✕). draw_probe_pane wraps this.
 void draw_probe_image(unsigned int texture, int width, int height);
 
+// The Canvas view body (editor.canvas.view; D18 "the canvas is a view"): draws
+// the driver's current GL texture as an Image into the CURRENT ImGui window (no
+// Begin/End — the dockspace owns the canvas#N window + the tab ✕). `texture` is a
+// gl::upload_rgba8 handle for the settled sRGB8 frame; `width`/`height` are the
+// texture's pixel dimensions. Reuses the render_probe tile→GL display primitive.
+void draw_canvas_image(unsigned int texture, int width, int height);
+
 // A per-type view body: draws the view's content into the CURRENT ImGui window.
 // `view_id` is the dockmodel instance id being drawn (a type may draw multiple
 // instances). The dockspace owns the enclosing Begin/End + the close button.

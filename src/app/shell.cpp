@@ -1,5 +1,5 @@
+#include <ace/app/canvas_view.hpp>
 #include <ace/app/folder_dialog.hpp>
-#include <ace/app/probe.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
@@ -204,17 +204,21 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   if (on_ready) {
     on_ready(app_state);
   }
-  // The probe texture is created once (GL context current after init), drawn
-  // every frame, and destroyed before shutdown while the context is still valid
-  // (refinement Constraint 8). Owned here in the app layer, not in the shell.
-  ProbeView probe;
-  probe.upload();
-  // The Canvas view IS the render_probe pane (D18 "the canvas is a view"): the
-  // app owns the GL texture, so it registers the Canvas body the dockspace draws
-  // inside the canvas window it owns. Every other view type draws a placeholder
-  // until its downstream panel leaf lands (D-view-registry-5).
-  ace::views::register_view_body(ace::dockmodel::ViewType::Canvas,
-                                 [&probe](std::string_view) { probe.draw_content(); });
+  // The Canvas view is a LIVE interactive render of the one owned Document
+  // (editor.canvas.view; D18 "the canvas is a view"): the app owns the driver +
+  // its GL texture, steps the HostViewport each frame on the UI thread (the
+  // deterministic inline executor, D-canvas_view-2), and uploads the settled
+  // frame — a texture created once, updated in place, and destroyed before
+  // shutdown while the context is still valid (Constraint 6/8). Owned here in the
+  // app layer, not in the shell. Every other view type draws a placeholder until
+  // its downstream panel leaf lands (D-view-registry-5).
+  CanvasView canvas(app_state);
+  ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, [&canvas](std::string_view) {
+    // The dockspace owns the canvas#N window; render at the pane's pixel
+    // size (Constraint 7). A degenerate pane draws nothing.
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    canvas.draw_content(static_cast<int>(avail.x), static_cast<int>(avail.y));
+  });
   // The History view IS the undo journal made visible and click-navigable (D18
   // "History is a view"; editor.panels.history). It reads the one owned session's
   // journal and loops the shipped undo/redo verbs, so the body captures the same
@@ -275,11 +279,11 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   // has been published yet (the no-canonical guard).
   (void)ace::commands::gc_project(app_state, /*dry_run=*/false);
 
-  // Clear the body before the ProbeView it captures is destroyed — the seam is
+  // Clear the body before the CanvasView it captures is destroyed — the seam is
   // process-global, so a later shell run must not call into a dangling capture.
   ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
   ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
-  probe.destroy();
+  canvas.destroy();
   shell.shutdown();
   return 0;
 }

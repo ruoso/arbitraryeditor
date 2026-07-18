@@ -29,6 +29,14 @@ unsigned int upload_rgba8(const void* pixels, int width, int height) {
   return texture;
 }
 
+void update_rgba8(unsigned int texture, const void* pixels, int width, int height) {
+  glBindTexture(GL_TEXTURE_2D, texture);
+  // Tightly packed RGBA8, no row padding (the surface span has no stride).
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+  glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 void destroy_texture(unsigned int texture) {
   const GLuint handle = texture;
   glDeleteTextures(1, &handle);
