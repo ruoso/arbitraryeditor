@@ -147,6 +147,18 @@ task editor "Editor — host GUI over libarbc" {
       depends !save
       note "Clean up runs the library's gc_project_directory over assets/ (roots = this one document); GC never touches workspace/ or borrowed files. Consolidate + relink split to editor.import.consolidate. Design: D13. Refinement: tasks/refinements/editor/gc.md"
     }
+    task welcome "Welcome dialog: interactive no-arg launch offers New / Open / Recent" {
+      effort 1.5d
+      allocate team
+      depends !open_ui
+      note "Interactive no-arg launch (empty project_dir, non-headless) shows a modal welcome offering New / Open / Open Recent, backed by the dock::ProjectGateway (A12) the tool rail already uses. The launcher process owns NO Document: New/Open/Recent spawn a detached sibling on the chosen (or newly created) project directory (commands::open_another_project, spawn-not-swap, A7/D19) and the launcher then exits. Headless no-arg keeps auto-scratch (shell.cpp scratch_project_dir) so the driven path always holds a Document. Refines A7 (a pre-project launcher owns zero Documents; a project process still owns exactly one for its lifetime) and SUPERSEDES D-app_state-6 (scratch-when-none-given as the interactive default). Design: D16/D19/D22, arch A7/A12. Source-of-debt: tasks/refinements/editor/app_state.md. Refinement: tasks/refinements/welcome.md"
+    }
+    task dir_is_project "Project = directory: New and Save As refuse any existing target" {
+      effort 1d
+      allocate team
+      depends !open, !save_as
+      note "The project directory IS the project (D16, project-as-a-directory): creation targets a path that does not yet exist, and the tool creates the directory. Tighten project::create_project (project_open.cpp) and project::save_project_as (save.cpp) to refuse ANY existing target directory — not just one already holding a project.arbc — so New and Save As behave identically; surface the refusal as a clear in-app message via dock::ProjectGateway. REVERSES D-save_as-4's narrow 'a populated directory without project.arbc is a fine destination' guard (flips the save_as_test populated-target case) and adds a create-time existence check to the open path. Design: D16 (project-as-a-directory), D19. Source-of-debt: tasks/refinements/editor/save_as.md, tasks/refinements/editor/open.md. Refinement: tasks/refinements/dir_is_project.md"
+    }
   }
 
   # ---- Canvas & rendering (A4/A5/A6) ----

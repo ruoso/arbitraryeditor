@@ -5,27 +5,6 @@ Items surfaced by refinements that a WBS implementer cannot decide and that do
 
 ---
 
-## History view real-body owner
-
-**Source:** `tasks/refinements/editor/view_registry.md` (view_registry, 2026-07-17)
-
-The History view type is registered and draws a labeled placeholder. Its real
-body is a design judgment call: does it get a dedicated panel implementation, or
-does its content fold into `editor.project.undo` (`tasks/00-editor.tji` — the
-transaction-journal wiring, which already owns the undo history data)? No new
-WBS leaf was created; the choice is parked here for human review before a
-downstream panel-content task is scheduled.
-
----
-
-## No-project first-launch UX
-
-**Source:** `tasks/refinements/editor/app_state.md` (app_state, 2026-07-17)
-
-The current bootstrap creates a scratch project when no project path is given, so the single-Document-per-process invariant (A7) always holds and the app is drivable headless. What the first-launch experience should actually *show* the user once a picker exists (`editor.project.open_ui`) is a design judgment call: show the scratch document, show a welcome/recent-projects screen, or block on a picker. This decision is deferred until `editor.project.open_ui` lands. No new WBS task was created; the choice is parked here for human review before that leaf is refined.
-
----
-
 ## Assets view real-body owner
 
 **Source:** `tasks/refinements/editor/view_registry.md` (view_registry, 2026-07-17)
@@ -57,22 +36,6 @@ for a human to weigh; no WBS task was created.
 
 ---
 
-## Save As overwrite-with-confirmation UX
-
-**Source:** `tasks/refinements/editor/save_as.md` (save_as, 2026-07-18), D-save_as-4.
-
-`project::save_project_as` refuses to clobber a target directory that already
-contains a `project.arbc` — returning an error value rather than silently
-replacing another project's canonical. The safe default is implemented and
-tested. The "target exists — replace?" confirmation prompt is a UI/UX judgment
-call: which layer surfaces the dialog, what copy it shows, whether the picker
-itself should filter or warn, and whether a "replace" path should require the
-target's own project to be closed first. These are product-design questions that
-cannot be mechanically resolved by an agent implementer. No WBS task was
-created; the choice is parked here for human review.
-
----
-
 ## One shared render thread vs N render threads for multi-canvas
 
 **Source:** `tasks/refinements/editor/multi_canvas.md` (multi_canvas, 2026-07-18), D-multi_canvas-2.
@@ -101,6 +64,7 @@ record here for human review when profiling data is available.
 ## libarbc per-kind state-slab walk hook (cross-repo, long-term fix for A15)
 
 **Source:** `tasks/refinements/cameras/workspace_reopen_slab.md` (workspace_reopen_slab, 2026-07-19), D-slab-1 / Open questions.
+**Tracking:** ruoso/arbitrarycomposer#5 (filed 2026-07-19).
 
 `editor.cameras.workspace_reopen_slab` fixes the fast-path-reopen crash with an editor-side policy (force rebuild-from-canonical for editor-kind sessions, A15). The proper long-term fix is a libarbc per-kind **state-slab walk hook** that lets `Document::open`'s map path carry a custom kind's persisted state across reopen — `arbc v0.1.0` reserves the location (`model.cpp:768-770`) but does not expose it (`Registry::add` accepts only factory/metadata/codec/binder). Exposing and consuming it requires: (1) a new `arbitrarycomposer` release adding the hook, (2) an editor pin bump (`CMakeLists.txt:25`), (3) an editor-side walk implementation registered on the `Registry`. When landed, A15's policy is superseded and the fast path carries a custom editable kind directly (reversing D-slab-2's durability cost). This is cross-repo work the in-repo implementer cannot drive alone; no WBS leaf was created.
 
@@ -117,6 +81,7 @@ A15 (workspace_reopen_slab) leaves one narrow residual: a **never-saved project 
 ## render_offline does not settle or composite nested compositions
 
 **Source:** `tasks/refinements/editor/nested_composition_binding.md` (nested_composition_binding, 2026-07-19), parking lot note.
+**Tracking:** ruoso/arbitrarycomposer#6 (filed 2026-07-19).
 
 `render_offline` (`offline.cpp`) never calls `bind_operators`, so it composites **no** nested-composition operator — settled or not. A nested child referenced by an external URI renders entirely blank through the offline path. This is broader than the noted "doesn't settle external loads": even an in-memory settled child is not composited because `bind_operators` is never called. The interactive path is now fixed; the offline/export path has no seam to attach a fix to yet (no export path exists). For whoever builds the export path (`editor.packaging` / `editor.cameras.export`).
 
@@ -125,6 +90,7 @@ A15 (workspace_reopen_slab) leaves one narrow residual: a **never-saved project 
 ## arbc writer-thread identity under sustained mixed load
 
 **Source:** `tasks/refinements/editor/edit_render_sync.md` (edit_render_sync, 2026-07-19), Open questions.
+**Tracking:** ruoso/arbitrarycomposer#7 (filed 2026-07-19).
 
 `doc_mu` serializes the render-thread `HostViewport::settle_external_loads` writer-publish against UI-thread `transact` mutations — so the **data race** closed by `editor.canvas.edit_render_sync` is fully resolved. However, arbc's `SlotStore` binds the writer thread on first write. If arbc additionally requires a single consistent *writer-thread identity* (not merely serialized access), a UI-thread `transact` following a render-thread settle could trip an arbc-internal writer-identity assertion under sustained mixed load. This is a libarbc-contract question that only the arbc maintainers (or an arbc version bump) can settle. No WBS task was created; the data-race fix does not gate on this. Flag to arbc upstream when filing the slab-hook request (see "libarbc per-kind state-slab walk hook" entry above).
 
