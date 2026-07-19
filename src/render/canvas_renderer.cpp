@@ -1,3 +1,4 @@
+#include <ace/project/project.hpp> // seed_kind_bridge (render->project, L2->L1)
 #include <ace/render/canvas_renderer.hpp>
 #include <ace/render/render.hpp>
 
@@ -6,10 +7,12 @@
 #include <arbc/base/transform.hpp>
 #include <arbc/cache/key_shapes.hpp>
 #include <arbc/compositor/compositor.hpp>
+#include <arbc/contract/registry.hpp>
 #include <arbc/media/pixel_format.hpp>
 #include <arbc/media/surface_format.hpp>
 #include <arbc/runtime/damage_router.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge
 #include <arbc/runtime/host_viewport.hpp>
 #include <arbc/runtime/interactive.hpp>
 #include <arbc/runtime/worker_pool.hpp>
@@ -29,9 +32,17 @@ constexpr std::size_t k_tile_cache_bytes = 64U * 1024 * 1024;
 
 struct CanvasRenderer::Impl {
   Impl(arbc::Document& doc, arbc::WorkerPool* borrowed, arbc::DamageRouter* damage_router,
-       std::chrono::steady_clock::duration frame_budget)
+       std::chrono::steady_clock::duration frame_budget, const arbc::Registry* reg)
       : document(doc), pool(backend), cache(k_tile_cache_bytes), borrowed_pool(borrowed),
-        router(damage_router), budget(frame_budget) {}
+        router(damage_router), budget(frame_budget), registry(reg) {
+    // Seed the per-renderer KindBridge ONCE from the app's persistent Registry (not per
+    // rebuild()), so it resolves every registered kind's token the same way the save/load
+    // bridges do (A14). Render-thread-confined: owned here, mutated only by step()'s settle.
+    // A null registry leaves the bridge unseeded and the binding empty (Constraint 3).
+    if (registry != nullptr) {
+      project::seed_kind_bridge(bridge, *registry);
+    }
+  }
 
   // Rebuild the size-dependent bundle (target Surface + InteractiveRenderer +
   // HostViewport) at the current width/height. A zero/degenerate size tears the
@@ -79,9 +90,18 @@ struct CanvasRenderer::Impl {
       // every canvas over this document. Null for the single-canvas own-pool golden path
       // (one viewport, the direct single-slot install).
       config.router = router;
-      viewport = std::make_unique<arbc::HostViewport>(
-          *renderer, document, arbc::HostViewport::DocumentBinding{}, backend, pool, cache, *target,
-          arbc::HostViewport::Clock{}, config);
+      // Populate the DocumentBinding only when a registry was supplied: both non-null =>
+      // HostViewport derives settle_external_loads(doc, bridge, *registry) and runs it at the
+      // top of every step(), so a nested child whose bytes arrive from a deferring AssetSource
+      // installs-and-composites (editor.canvas.nested_composition_binding, D-...-1). With no
+      // registry the binding stays {} — the correct shape for a ref-free document
+      // (host_viewport.hpp:122-124), byte-identical to the pre-leaf behaviour (Constraint 3).
+      const arbc::HostViewport::DocumentBinding binding =
+          registry != nullptr ? arbc::HostViewport::DocumentBinding{&bridge, registry}
+                              : arbc::HostViewport::DocumentBinding{};
+      viewport =
+          std::make_unique<arbc::HostViewport>(*renderer, document, binding, backend, pool, cache,
+                                               *target, arbc::HostViewport::Clock{}, config);
       // Pin the playhead so a still, undamaged scene issues zero further frames
       // (the still-scene early-out) — matching the offline path's fixed time.
       viewport->set_playhead_source([] { return arbc::Time::zero(); });
@@ -116,6 +136,13 @@ struct CanvasRenderer::Impl {
   arbc::DamageRouter* router = nullptr;
   std::chrono::steady_clock::duration budget = std::chrono::hours(1);
 
+  // The app's process-persistent kind Registry (borrowed, may be null) + the per-renderer
+  // KindBridge seeded from it once (editor.canvas.nested_composition_binding). The bridge is
+  // the pointer the DocumentBinding hands settle_external_loads; render-thread-confined,
+  // mutated only by this renderer's step() (D-nested_composition_binding-1/2).
+  const arbc::Registry* registry = nullptr;
+  arbc::KindBridge bridge;
+
   int width = 0;
   int height = 0;
 
@@ -132,13 +159,14 @@ struct CanvasRenderer::Impl {
   std::uint64_t converted_frames = 0;
 };
 
-CanvasRenderer::CanvasRenderer(arbc::Document& document)
-    : impl_(std::make_unique<Impl>(document, nullptr, nullptr, std::chrono::hours(1))) {}
+CanvasRenderer::CanvasRenderer(arbc::Document& document, const arbc::Registry* registry)
+    : impl_(std::make_unique<Impl>(document, nullptr, nullptr, std::chrono::hours(1), registry)) {}
 
 CanvasRenderer::CanvasRenderer(arbc::Document& document, arbc::WorkerPool& pool,
                                arbc::DamageRouter& router,
-                               std::chrono::steady_clock::duration budget)
-    : impl_(std::make_unique<Impl>(document, &pool, &router, budget)) {}
+                               std::chrono::steady_clock::duration budget,
+                               const arbc::Registry* registry)
+    : impl_(std::make_unique<Impl>(document, &pool, &router, budget, registry)) {}
 
 CanvasRenderer::~CanvasRenderer() = default;
 

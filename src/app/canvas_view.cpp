@@ -43,7 +43,12 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
   auto it = presenters_.find(view_id);
   if (it == presenters_.end()) {
     it = presenters_.emplace(std::string(view_id), Presenter{}).first;
-    host_.add(std::string(view_id), state_.document());
+    // Thread the app's process-persistent kind Registry into the render path so this canvas's
+    // HostViewport settles deferred external nested children each frame — the same Registry the
+    // save/load paths use, so custom kinds resolve identically across save/load/render (A14,
+    // editor.canvas.nested_composition_binding). The L4 app owns both AppState and CanvasHost;
+    // the Registry crosses as a libarbc const arbc::Registry* (no commands->render edge).
+    host_.add(std::string(view_id), state_.document(), &state_.registry());
   }
   Presenter& p = it->second;
 

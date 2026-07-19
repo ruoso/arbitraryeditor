@@ -114,6 +114,14 @@ A15 (workspace_reopen_slab) leaves one narrow residual: a **never-saved project 
 
 ---
 
+## render_offline does not settle or composite nested compositions
+
+**Source:** `tasks/refinements/editor/nested_composition_binding.md` (nested_composition_binding, 2026-07-19), parking lot note.
+
+`render_offline` (`offline.cpp`) never calls `bind_operators`, so it composites **no** nested-composition operator — settled or not. A nested child referenced by an external URI renders entirely blank through the offline path. This is broader than the noted "doesn't settle external loads": even an in-memory settled child is not composited because `bind_operators` is never called. The interactive path is now fixed; the offline/export path has no seam to attach a fix to yet (no export path exists). For whoever builds the export path (`editor.packaging` / `editor.cameras.export`).
+
+---
+
 ## Deep-zoom navigation aids beyond reset-to-fit
 
 **Source:** `tasks/refinements/editor/nav.md` (nav, 2026-07-18), D-nav-7 / Open questions.

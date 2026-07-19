@@ -208,8 +208,9 @@ task editor "Editor — host GUI over libarbc" {
     task nested_composition_binding "Wire KindBridge/Registry DocumentBinding in CanvasRenderer for nested composition rendering" {
       effort 1d
       allocate team
+      complete 100
       depends !blank_first_frame
-      note "The interactive CanvasRenderer does not wire a KindBridge/Registry DocumentBinding, so a nested-composition canvas renders no coverage (blank) in production. Wire the DocumentBinding so nested cells render correctly in the interactive path. Source-of-debt: tasks/refinements/editor/blank_first_frame.md (2026-07-19). Design: docs/01-architecture.md A5."
+      note "The interactive CanvasRenderer does not wire a KindBridge/Registry DocumentBinding, so a nested-composition canvas renders no coverage (blank) in production. Wire the DocumentBinding so nested cells render correctly in the interactive path. Source-of-debt: tasks/refinements/editor/blank_first_frame.md (2026-07-19). Design: docs/01-architecture.md A5. Refinement: tasks/refinements/editor/nested_composition_binding.md"
     }
   }
 

@@ -38,8 +38,8 @@ constexpr std::chrono::milliseconds k_default_frame_budget{8};
 // mutex — the single-producer/single-consumer handoff.
 struct CanvasHost::Entry {
   Entry(arbc::Document& doc, arbc::WorkerPool& pool, arbc::DamageRouter& router,
-        std::chrono::steady_clock::duration budget)
-      : renderer(doc, pool, router, budget) {}
+        std::chrono::steady_clock::duration budget, const arbc::Registry* registry)
+      : renderer(doc, pool, router, budget, registry) {}
 
   CanvasRenderer renderer;
   Srgb8Image published;                     // front buffer the consumer reads (guarded)
@@ -58,6 +58,7 @@ struct CanvasHost::Impl {
   struct PendingAdd {
     std::string id;
     arbc::Document* document;
+    const arbc::Registry* registry; // the app's persistent kind Registry (may be null)
   };
 
   std::chrono::steady_clock::duration budget;
@@ -110,10 +111,10 @@ CanvasHost::CanvasHost(arbc::WorkerPoolConfig pool_config,
 
 CanvasHost::~CanvasHost() = default;
 
-void CanvasHost::add(std::string id, arbc::Document& document) {
+void CanvasHost::add(std::string id, arbc::Document& document, const arbc::Registry* registry) {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->pending_adds.push_back(Impl::PendingAdd{std::move(id), &document});
+    impl_->pending_adds.push_back(Impl::PendingAdd{std::move(id), &document, registry});
     impl_->dirty = true;
   }
   impl_->cv.notify_all();
@@ -212,8 +213,9 @@ bool CanvasHost::drive_once() {
         if (!router) {
           router = std::make_unique<arbc::DamageRouter>(*pending.document);
         }
-        impl_->entries.emplace(pending.id, std::make_unique<Entry>(*pending.document, impl_->pool,
-                                                                   *router, impl_->budget));
+        impl_->entries.emplace(pending.id,
+                               std::make_unique<Entry>(*pending.document, impl_->pool, *router,
+                                                       impl_->budget, pending.registry));
       }
     }
     impl_->pending_adds.clear();

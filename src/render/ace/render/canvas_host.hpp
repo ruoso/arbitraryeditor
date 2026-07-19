@@ -13,6 +13,7 @@
 namespace arbc {
 class Document;
 class WorkerPool;
+class Registry;
 struct WorkerPoolConfig;
 struct Affine;
 } // namespace arbc
@@ -64,7 +65,14 @@ public:
   // UI thread: ensure an entry rendering `document` exists for `id` (idempotent — a
   // second add with a live id is a no-op). The entry's CanvasRenderer is constructed on
   // the render thread at the top of the next drive iteration; also wakes the loop.
-  void add(std::string id, arbc::Document& document);
+  //
+  // `registry` (optional, default null) is the app's process-persistent kind Registry,
+  // forwarded to the entry's CanvasRenderer so its HostViewport settles deferred external
+  // nested children each frame (editor.canvas.nested_composition_binding). A libarbc type
+  // crossing the seam (no commands->render edge); when null the entry uses the empty binding
+  // — the ref-free path the headless unit fixtures rely on (D-nested_composition_binding-2).
+  // It MUST outlive every entry over the document, like the document itself.
+  void add(std::string id, arbc::Document& document, const arbc::Registry* registry = nullptr);
 
   // UI thread: remove the entry for `id` (idempotent). Its cache is freed on the render
   // thread; a removed id is no longer served (consume/published_sequence go quiet).

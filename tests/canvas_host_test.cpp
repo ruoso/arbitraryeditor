@@ -16,21 +16,28 @@
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
+#include <arbc/builtin_kinds.hpp>                 // register_builtin_kinds (org.arbc.nested/.solid)
 #include <arbc/compositor/anchored_viewports.hpp> // k_reanchor_scale_threshold (nav anchor_depth)
+#include <arbc/contract/registry.hpp>             // arbc::Registry
 #include <arbc/kind_raster/raster_content.hpp>    // DecodedImage / RasterContent (bounded content)
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/document_serialize.hpp> // KindBridge / load_document / settle_external_loads
 #include <arbc/runtime/interactive.hpp>
 #include <arbc/runtime/worker_pool.hpp>
+#include <arbc/serialize/load_context.hpp> // arbc::AssetSource (the deferring double's base)
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "golden_support.hpp"
@@ -554,4 +561,189 @@ TEST_CASE("canvas_host: a blank-then-content first frame publishes under the REA
   host.stop();
   handle->join();
   CHECK(host.published_sequence("canvas#1") > before);
+}
+
+// --- editor.canvas.nested_composition_binding: the external-arrival settle hook ----------
+//
+// The interactive CanvasRenderer/CanvasHost now wires a real KindBridge/Registry
+// DocumentBinding, so a Document holding a nested child whose bytes arrive from a DEFERRING
+// AssetSource after load settles-and-composites that child each frame — where an empty binding
+// leaves it forever blank. These pin the before/after at the L2 unit tier, byte-exact against
+// the offline-settled reference (D-nested_composition_binding-1/3).
+
+namespace {
+// The DEFERRING AssetSource double, libarbc's own async_external_load.t.cpp recipe: request()
+// records (uri, on_ready) and fires NOTHING; fire_all() releases the outstanding continuations
+// on the test's command. A document loaded through it holds pending_external_loads() == 1 until
+// a settle installs the arrived child — so the async boundary is crossed deterministically, no
+// sleeps, no flake.
+class DeferringAssetSource final : public arbc::AssetSource {
+public:
+  void put(std::string uri, std::string bytes) {
+    d_files.insert_or_assign(std::move(uri), std::move(bytes));
+  }
+  void request(std::string_view resolved_uri,
+               std::function<void(std::string_view)> on_ready) override {
+    d_outstanding.push_back(Request{std::string(resolved_uri), std::move(on_ready)});
+  }
+  // Deliver every outstanding request right now (absent bytes == empty, the AssetSource
+  // absence contract), returning how many fired.
+  std::size_t fire_all() {
+    std::vector<Request> firing;
+    firing.swap(d_outstanding);
+    for (const Request& r : firing) {
+      const auto it = d_files.find(r.uri);
+      r.on_ready(it != d_files.end() ? std::string_view(it->second) : std::string_view{});
+    }
+    return firing.size();
+  }
+
+private:
+  struct Request {
+    std::string uri;
+    std::function<void(std::string_view)> on_ready;
+  };
+  std::unordered_map<std::string, std::string> d_files;
+  std::vector<Request> d_outstanding;
+};
+
+// A one-layer parent document embedding `ref` through org.arbc.nested (canvas 16x16), and the
+// green-solid leaf child its ref resolves to (canvas 8x8, so the composited child covers only
+// part of the frame — genuine straight-alpha coverage, not a full-frame fill).
+std::string nesting_doc(std::string_view ref) {
+  std::string layer = R"({"kind":"org.arbc.nested","kind_version":"1","params":{"ref":")";
+  layer += ref;
+  layer += R"("}})";
+  return R"({"arbc":{"format":1},"composition":{"canvas":[0,0,16,16],"layers":[)" + layer + "]}}";
+}
+constexpr const char* k_leaf =
+    R"({"arbc":{"format":1},"composition":{"canvas":[0,0,8,8],"layers":[)"
+    R"({"kind":"org.arbc.solid","kind_version":"1","params":{"color":[0.0,1.0,0.0,1.0]}}]}})";
+
+// Load a parent document that references `mem/child.arbc` through the deferring `source` (which
+// already holds the child bytes): the parent loads WITHOUT the child, so pending == 1 until a
+// settle. `bridge` is the load-side KindBridge (kept alive by the caller); the host seeds its
+// OWN bridge from the same registry.
+std::unique_ptr<arbc::Document> load_pending_nested(DeferringAssetSource& source,
+                                                    arbc::KindBridge& bridge,
+                                                    const arbc::Registry& registry) {
+  source.put("mem/child.arbc", k_leaf);
+  auto doc = std::make_unique<arbc::Document>();
+  REQUIRE(arbc::load_document(nesting_doc("child.arbc"), *doc, bridge, registry, "mem/parent.arbc",
+                              &source));
+  REQUIRE(doc->pending_external_loads() == 1);
+  return doc;
+}
+} // namespace
+
+TEST_CASE("canvas_host: the wired binding settles a deferred external nested child and composites "
+          "it — byte-exact vs the offline-settled reference") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+
+  DeferringAssetSource source;
+  arbc::KindBridge load_bridge;
+  std::unique_ptr<arbc::Document> doc = load_pending_nested(source, load_bridge, registry);
+
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc, &registry); // the wired binding {&bridge, &registry}
+  host.request_resize("canvas#1", k_w, k_h);
+
+  // First drive with nothing arrived: the settle finds an empty queue and the placeholder
+  // composites no coverage, so the content gate withholds (sequence stays 0).
+  host.drive_once();
+  CHECK(host.published_sequence("canvas#1") == 0);
+  CHECK(doc->pending_external_loads() == 1);
+
+  // The bytes come back on the source's own schedule — the host does not know. Its next step()
+  // runs settle_external_loads FIRST, installs the child, and the SAME frame composites it.
+  REQUIRE(source.fire_all() == 1);
+  settle(host);
+
+  CHECK(doc->pending_external_loads() == 0);       // the queue drained
+  CHECK(host.published_sequence("canvas#1") >= 1); // and a content frame published
+  std::uint64_t s = 0;
+  Srgb8Image frame;
+  REQUIRE(host.consume("canvas#1", s, frame));
+  CHECK(ace::render::frame_has_content(frame)); // the child's straight-alpha coverage
+
+  // Byte-exact vs the settled reference. NOTE the reference is NOT render_document_srgb8:
+  // render_offline never binds operators (offline.cpp — no bind_operators/OperatorBindingScope),
+  // so it composites NO nested-composition operator at all, settled or not, and yields a blank
+  // frame for this document. The convergence claim is therefore proved against a MATCHED
+  // compositor: an INDEPENDENT copy pre-settled to quiescence (loop settle_external_loads to 0),
+  // then rendered through an EMPTY-binding interactive host — once the child is installed the
+  // empty binding composites it via bind_operators (the settle hook is what an empty binding
+  // lacks, not the compositor). The wired settle must converge to that fully-settled render
+  // byte-for-byte. (render_offline's inability to render — or settle — nested compositions is a
+  // separate offline/export-path gap, surfaced to the parking lot.)
+  DeferringAssetSource ref_source;
+  arbc::KindBridge ref_bridge;
+  std::unique_ptr<arbc::Document> ref_doc = load_pending_nested(ref_source, ref_bridge, registry);
+  REQUIRE(ref_source.fire_all() == 1);
+  for (int i = 0; i < 8 && arbc::settle_external_loads(*ref_doc, ref_bridge, registry) != 0; ++i) {
+  }
+  REQUIRE(ref_doc->pending_external_loads() == 0); // pre-settled to quiescence
+
+  CanvasHost ref_host = make_inline_host();
+  ref_host.add("canvas#1", *ref_doc); // empty binding: the doc is already settled
+  ref_host.request_resize("canvas#1", k_w, k_h);
+  settle(ref_host);
+  std::uint64_t rs = 0;
+  Srgb8Image reference;
+  REQUIRE(ref_host.consume("canvas#1", rs, reference));
+  CHECK(ace::render::frame_has_content(reference));
+  CHECK(frame.pixels == reference.pixels);
+}
+
+TEST_CASE("canvas_host: the empty binding leaves a deferred external nested child blank (the "
+          "before-state)") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+
+  DeferringAssetSource source;
+  arbc::KindBridge load_bridge;
+  std::unique_ptr<arbc::Document> doc = load_pending_nested(source, load_bridge, registry);
+
+  // No registry supplied -> the empty DocumentBinding{} -> HostViewport derives NO settle hook.
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc); // registry defaults null
+  host.request_resize("canvas#1", k_w, k_h);
+
+  REQUIRE(source.fire_all() == 1); // the bytes arrive, but nothing ever settles them
+  settle(host);
+
+  CHECK(doc->pending_external_loads() == 1);       // never drained — the child never installs
+  CHECK(host.published_sequence("canvas#1") == 0); // blank -> withheld, reproducing the debt
+  std::uint64_t s = 0;
+  Srgb8Image frame;
+  CHECK_FALSE(host.consume("canvas#1", s, frame)); // nothing was ever published
+}
+
+TEST_CASE("canvas_host: a ref-free document renders byte-identically through the wired and empty "
+          "binding (settle is a no-op)") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  const ProbeDocument probe = build_probe_document();
+
+  // One host, one document, two entries: canvas#1 wired (registry supplied), canvas#2 empty.
+  // On a document with no external references the settle hook is a no-op queue check, so both
+  // must composite the identical bytes (Constraint 4) — and both equal the offline reference.
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document); // empty binding
+  host.request_resize("canvas#2", k_w, k_h);
+  settle(host);
+
+  std::uint64_t s1 = 0;
+  Srgb8Image wired;
+  REQUIRE(host.consume("canvas#1", s1, wired));
+  std::uint64_t s2 = 0;
+  Srgb8Image empty;
+  REQUIRE(host.consume("canvas#2", s2, empty));
+
+  CHECK(wired.pixels == empty.pixels);
+  const Srgb8Image offline = ace::render::render_document_srgb8(*probe.document, k_w, k_h);
+  CHECK(wired.pixels == offline.pixels);
 }

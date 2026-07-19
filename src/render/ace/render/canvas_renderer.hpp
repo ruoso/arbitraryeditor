@@ -11,6 +11,7 @@ namespace arbc {
 class Document;
 class WorkerPool;
 class DamageRouter;
+class Registry;
 struct Affine;
 } // namespace arbc
 
@@ -48,14 +49,26 @@ namespace ace::render {
 // HostViewport ctor's lifetime contract).
 class CanvasRenderer {
 public:
-  explicit CanvasRenderer(arbc::Document& document);
+  // The optional `registry` is the app's process-persistent kind Registry
+  // (editor.canvas.nested_composition_binding, D-nested_composition_binding-1/2). When
+  // supplied, this renderer seeds a per-renderer KindBridge from it once and hands the
+  // HostViewport a populated DocumentBinding{&bridge, registry}, so step() derives and runs
+  // settle_external_loads each frame — installing (and compositing) nested children whose
+  // bytes arrive from a deferring AssetSource after the document loaded. When null (the
+  // default), the binding stays empty — the right shape for a ref-free, programmatically-built
+  // document (host_viewport.hpp:122-124), byte-for-byte the pre-leaf behaviour. The Registry
+  // is a libarbc type crossing the seam (no commands->render edge); it MUST outlive this
+  // renderer. Mirrors the {Registry, KindBridge} pair the save/load paths already thread (A14).
+  explicit CanvasRenderer(arbc::Document& document, const arbc::Registry* registry = nullptr);
   // Borrow a shared WorkerPool + a shared per-document DamageRouter, and drive each frame
   // under a bounded budget (editor.canvas.multi_canvas). The router (not the Model's single
   // set_damage_sink slot) fans a commit's damage out to EVERY viewport sharing the
   // document, so N canvases all re-render an edit (`damage_router.hpp`). `pool` and `router`
-  // MUST outlive this renderer.
+  // MUST outlive this renderer. `registry` carries the external-arrival settle binding as
+  // above (default null == empty binding).
   CanvasRenderer(arbc::Document& document, arbc::WorkerPool& pool, arbc::DamageRouter& router,
-                 std::chrono::steady_clock::duration budget);
+                 std::chrono::steady_clock::duration budget,
+                 const arbc::Registry* registry = nullptr);
   ~CanvasRenderer();
 
   CanvasRenderer(const CanvasRenderer&) = delete;
