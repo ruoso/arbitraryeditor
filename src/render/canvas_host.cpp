@@ -76,6 +76,16 @@ struct CanvasHost::Impl {
   bool stop = false;  // stop requested (UI thread -> render thread)
   bool dirty = false; // work pending: an add/remove/resize/poke/self-signal
 
+  // Guards every render-thread document ACCESS (the per-frame read in step(), plus the
+  // resize / camera / cache-construction reads) against a UI-thread document MUTATION.
+  // arbc::Document is single-writer (SlotStore binds the writer thread on first write) and
+  // has NO internal lock, yet the render thread walks the live document each frame
+  // (bind_operators iterates its content) — so a UI-thread edit must be mutually excluded
+  // with that read. The writer stays the UI thread (apply_edit runs on the caller);
+  // doc_mu only serializes it against the render thread's read window. Always taken OUTER
+  // to `mu` on the render thread; UI paths take at most one of the two, never nested.
+  std::mutex doc_mu;
+
   // UI-thread lifecycle requests, serviced on the render thread at the top of a drive
   // iteration so every cache stays render-thread-confined (Constraint 3).
   std::vector<PendingAdd> pending_adds;
@@ -134,6 +144,23 @@ void CanvasHost::request_camera(std::string_view id, const arbc::Affine& camera)
   impl_->cv.notify_all();
 }
 
+void CanvasHost::apply_edit(const std::function<void()>& edit) {
+  // Run the mutation on the CALLING thread (the writer — SlotStore binds the writer thread
+  // lazily on first write, so the document's writer must stay one consistent thread), but
+  // under doc_mu so it cannot overlap the render thread's per-frame document read.
+  {
+    std::lock_guard<std::mutex> edit_lock(impl_->doc_mu);
+    edit();
+  }
+  // Then wake the loop to re-render every live entry over the mutated document (one writer,
+  // N observers — Constraint 4); the edit's damage already fanned out via the DamageRouter.
+  {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->dirty = true;
+  }
+  impl_->cv.notify_all();
+}
+
 void CanvasHost::poke() {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -163,6 +190,13 @@ bool CanvasHost::drive_once() {
   // Entries removed this iteration destruct AFTER the lock is released (a
   // ~InteractiveRenderer drain into the shared pool can block; never hold `mu` for it).
   std::vector<std::unique_ptr<Entry>> dying;
+
+  // Hold doc_mu across the whole iteration: every document access below (cache
+  // construction, resize/camera, step()'s per-frame read) is thereby mutually excluded
+  // with a UI-thread apply_edit mutation. Taken OUTER to `mu` (which is re-acquired for the
+  // snapshot and the publish swap); apply_edit takes only doc_mu, so the orders never
+  // cross and cannot deadlock.
+  std::lock_guard<std::mutex> doc_lock(impl_->doc_mu);
 
   {
     std::lock_guard<std::mutex> lock(impl_->mu);

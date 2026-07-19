@@ -232,8 +232,9 @@ task editor "Editor — host GUI over libarbc" {
     task workspace_reopen_slab "Fast-path reopen slab hook for editor-defined editable kinds" {
       effort 2d
       allocate team
+      complete 100
       depends !reopen_codec
-      note "A checkpointed workspace containing an editor-defined editable Content (camera) aborts/corrupts on the Document::open fast-path remap (missing libarbc per-kind state-slab walk hook, model.cpp:771); a saved camera project crashes on fast-path reopen. Needs a libarbc bump exposing the slab hook, or an editor-side policy to force rebuild-from-canonical when custom editable kinds may be present. Source-of-debt: tasks/refinements/cameras/reopen_codec.md. Design: docs/01-architecture.md A14."
+      note "A checkpointed workspace containing an editor-defined editable Content (camera) aborts/corrupts on the Document::open fast-path remap (missing libarbc per-kind state-slab walk hook, model.cpp:771); a saved camera project crashes on fast-path reopen. Needs a libarbc bump exposing the slab hook, or an editor-side policy to force rebuild-from-canonical when custom editable kinds may be present. Source-of-debt: tasks/refinements/cameras/reopen_codec.md. Design: docs/01-architecture.md A14. Refinement: tasks/refinements/cameras/workspace_reopen_slab.md"
     }
     task manip "Frame resize (hold resolution), aspect-lock, dutch, resolution inspector" {
       effort 2d

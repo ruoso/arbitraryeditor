@@ -98,6 +98,22 @@ record here for human review when profiling data is available.
 
 ---
 
+## libarbc per-kind state-slab walk hook (cross-repo, long-term fix for A15)
+
+**Source:** `tasks/refinements/cameras/workspace_reopen_slab.md` (workspace_reopen_slab, 2026-07-19), D-slab-1 / Open questions.
+
+`editor.cameras.workspace_reopen_slab` fixes the fast-path-reopen crash with an editor-side policy (force rebuild-from-canonical for editor-kind sessions, A15). The proper long-term fix is a libarbc per-kind **state-slab walk hook** that lets `Document::open`'s map path carry a custom kind's persisted state across reopen — `arbc v0.1.0` reserves the location (`model.cpp:768-770`) but does not expose it (`Registry::add` accepts only factory/metadata/codec/binder). Exposing and consuming it requires: (1) a new `arbitrarycomposer` release adding the hook, (2) an editor pin bump (`CMakeLists.txt:25`), (3) an editor-side walk implementation registered on the `Registry`. When landed, A15's policy is superseded and the fast path carries a custom editable kind directly (reversing D-slab-2's durability cost). This is cross-repo work the in-repo implementer cannot drive alone; no WBS leaf was created.
+
+---
+
+## Never-saved camera residual (D-slab-3)
+
+**Source:** `tasks/refinements/cameras/workspace_reopen_slab.md` (workspace_reopen_slab, 2026-07-19), D-slab-3 / Open questions.
+
+A15 (workspace_reopen_slab) leaves one narrow residual: a **never-saved project that holds a camera** (no canonical floor to rebuild from, no safe way to map the workspace). The dirty model (A13/D16, "dirty until first Save") already frames such a project as not-yet-durable. Closing it in-repo would require a create-time canonical baseline — a deviation from D-open's "no `project.arbc` until save is the publish step" and mooted by the libarbc slab-hook above. This is a design judgment the human should weigh; no WBS leaf was created.
+
+---
+
 ## Deep-zoom navigation aids beyond reset-to-fit
 
 **Source:** `tasks/refinements/editor/nav.md` (nav, 2026-07-18), D-nav-7 / Open questions.

@@ -135,8 +135,22 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
   }
 
   // Fast, durable-by-default path (D-open-3): map the crash-durable workspace when
-  // the file is present and this build can map it.
-  if (fs.exists(layout.workspace_file)) {
+  // the file is present and this build can map it — UNLESS this session may hold an
+  // editor-defined *editable* kind and a canonical baseline exists to rebuild from
+  // (A15). libarbc v0.1.0's map path (`Document::open` -> `Model::rebuild_counts`)
+  // asserts on a recovered non-inert `StateHandle` (`model.cpp:771`) and exposes no
+  // per-kind state-slab walk hook, so a checkpointed camera aborts (debug) / corrupts
+  // the handle (release) there. A non-empty `register_extra_kinds` is the only
+  // crash-safe signal a custom editable Content MAY be in the map — an *unpublished*
+  // camera can sit in the map with the canonical still camera-free, so canonical-content
+  // detection would fail open and abort. So we fail safe: force rebuild-from-canonical
+  // for an editor-kind session with a canonical floor (D-slab-1/2), accepting the
+  // conservative false-positive that a camera-free editor session rebuilds too. The
+  // fast path stays verbatim for callers that register no editor kinds (tools/tests,
+  // Constraint 3) and for the never-saved case with no canonical to rebuild from
+  // (Constraint 4 / D-slab-3 — a rebuild would only return `NoProject`).
+  const bool force_rebuild_for_editor_kinds = register_extra_kinds && fs.exists(layout.canonical);
+  if (fs.exists(layout.workspace_file) && !force_rebuild_for_editor_kinds) {
     auto mapped = arbc::Document::open(layout.workspace_file.string());
     if (mapped.has_value()) {
       OpenedProject opened;

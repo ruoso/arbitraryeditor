@@ -153,9 +153,9 @@ TEST_CASE("canvas_host: one edit + poke advances BOTH entries' sequences (N obse
   REQUIRE(host.published_sequence("canvas#1") == 1);
   REQUIRE(host.published_sequence("canvas#2") == 1);
 
-  // One writer-thread edit to the SHARED document, then a single fan-out poke.
-  damage(*probe.document, probe.composition);
-  host.poke();
+  // One edit to the SHARED document via apply_edit (runs synchronously here, under the
+  // document lock), then a drive fans the resulting damage out to both entries.
+  host.apply_edit([&] { damage(*probe.document, probe.composition); });
   host.drive_once();
 
   // Both observers of the one document re-rendered the new revision.
@@ -248,11 +248,13 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
   }));
   CHECK(host.iterations() >= 1); // the render thread drove real iterations
 
-  // A writer-thread edit + fan-out poke advances both entries off-thread.
+  // A UI-thread edit through apply_edit runs on THIS thread but under the document lock the
+  // render thread also holds around its per-frame read, so the two never overlap; the edit
+  // then fans out, advancing both entries off-thread. Mutating the shared document directly
+  // here (outside apply_edit) would race the render thread's live read (TSan).
   const std::uint64_t before1 = host.published_sequence("canvas#1");
   const std::uint64_t before2 = host.published_sequence("canvas#2");
-  damage(*probe.document, probe.composition);
-  host.poke();
+  host.apply_edit([&] { damage(*probe.document, probe.composition); });
   REQUIRE(pump_until([&] {
     return host.published_sequence("canvas#1") > before1 &&
            host.published_sequence("canvas#2") > before2;
