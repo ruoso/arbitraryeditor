@@ -9,6 +9,7 @@
 #include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -134,8 +135,21 @@ struct OpenedProject {
 // (create a fresh workspace, `load_document` the canonical bytes, checkpoint).
 // Directory enumeration and reading `project.arbc` go through `fs`; the workspace
 // file and the document go through libarbc (D-platform_services-4).
-platform::Result<OpenedProject> open_project(const platform::FileSystem& fs,
-                                             const std::filesystem::path& root);
+//
+// `register_extra_kinds` is the extra-kinds registration hook (D-reopen-1,
+// editor.cameras.reopen_codec): an optional callback applied to the TRANSIENT
+// rebuild-from-canonical registry right after `arbc::register_builtin_kinds`, so
+// the load path recognizes an editor-authored `Content` kind (e.g. `org.arbc.camera`)
+// and reconstructs it as its live typed Content instead of degrading it to
+// `arbc::PlaceholderContent`. It is typed ONLY on `arbc::Registry` — `project` stays
+// ignorant of WHICH kind it registers (no `project->scene` edge, Constraint 1); the
+// concrete registrar is named by the caller at a level that already sees `scene`
+// (`commands`). Absent by default (an empty `std::function`, skipped when unset), so
+// current callers and the workspace-map fast path — which runs no codec — are
+// unaffected (Constraint 3/6).
+platform::Result<OpenedProject>
+open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
+             const std::function<void(arbc::Registry&)>& register_extra_kinds = {});
 
 // Scaffold a new project directory (`assets/`, `workspace/`, `exports/`, and a
 // `workspace/`-excluding `.gitignore`) and mint a fresh workspace-backed

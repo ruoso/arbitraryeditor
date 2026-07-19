@@ -11,6 +11,24 @@
 #include <utility>
 
 namespace ace::commands {
+namespace {
+
+// The editor's custom libarbc `Content` kinds — the SINGLE list of "which editor
+// kinds exist" (D-reopen-2), reused on BOTH sides of the persist boundary: the
+// persistent SAVE registry seeds it beside the built-ins (below), and the LOAD path
+// applies it as `open_project`'s extra-kinds callback (`open_or_create_app_state`),
+// so a persisted editor kind reopens as its live typed `Content` rather than degrading
+// to `arbc::PlaceholderContent` (editor.cameras.reopen_codec). Registers only the
+// editor kinds, NOT the built-ins — both call sites seed built-ins separately
+// (`register_builtin_kinds`). Idempotent / first-wins (each `register_*_kind` ignores a
+// duplicate), so it is safe to apply to a registry that already carries the kind
+// (Constraint 4). `commands` is the lowest component that links both `project` and
+// `scene`, so naming `scene::register_camera_kind` here adds no `project->scene` edge
+// (Constraint 1). When a second custom kind ships, adding it HERE restores it on reopen
+// for free.
+void register_editor_kinds(arbc::Registry& registry) { scene::register_camera_kind(registry); }
+
+} // namespace
 
 AppState::AppState(project::OpenedProject opened)
     : document_(std::move(opened.document)), layout_(std::move(opened.layout)),
@@ -18,12 +36,13 @@ AppState::AppState(project::OpenedProject opened)
   // The persistent, lifetime-scoped kind Registry (D-open-7): seeded once here,
   // not rebuilt per open. `save`/export and the future A6 plugin seam reuse it.
   arbc::register_builtin_kinds(registry_);
-  // The editor's first custom kind (editor.cameras.model A14): register
-  // `org.arbc.camera`'s factory + codec beside the built-ins so the generic snapshot
-  // save (`project::save_project(state.registry())`) serializes persisted shot
-  // cameras — the registration wired at a level that already sees `scene`, with no
-  // `project->scene` edge (Constraint 1).
-  scene::register_camera_kind(registry_);
+  // The editor's custom kinds (editor.cameras.model A14): register `org.arbc.camera`'s
+  // factory + codec beside the built-ins so the generic snapshot save
+  // (`project::save_project(state.registry())`) serializes persisted shot cameras — the
+  // registration wired at a level that already sees `scene`, with no `project->scene`
+  // edge (Constraint 1). The SAME registrar restores those kinds on reopen via
+  // `open_project`'s callback (`open_or_create_app_state`, D-reopen-2).
+  register_editor_kinds(registry_);
   // The dirty baseline (D-save-4): a session rebuilt from the canonical `project.arbc`
   // starts CLEAN (the workspace was just built from the snapshot); a fresh
   // `create_project` or a workspace-mapped open starts DIRTY (`saved_revision_`
@@ -67,7 +86,11 @@ UndoOutcome redo(AppState& state) {
 platform::Result<AppState> open_or_create_app_state(const platform::FileSystem& fs,
                                                     const std::filesystem::path& root) {
   if (fs.exists(root)) {
-    auto opened = project::open_project(fs, root);
+    // Thread the editor-kind registrar into the LOAD path so a rebuild-from-canonical
+    // reopen restores persisted cameras as live `scene::CameraContent`, not degraded
+    // `PlaceholderContent` (editor.cameras.reopen_codec, D-reopen-1). `project` calls
+    // it back typed only on `arbc::Registry` — no `project->scene` edge.
+    auto opened = project::open_project(fs, root, register_editor_kinds);
     if (!opened) {
       return opened.error();
     }

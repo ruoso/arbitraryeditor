@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -88,6 +89,27 @@ Command add_camera_command(const arbc::Registry& registry, std::string name, Res
                  [&registry, name = std::move(name), resolution, frame](arbc::Document& doc) {
                    ace::scene::add_camera(doc, registry, name, resolution, frame);
                  }};
+}
+
+// Author cameras (via `author`) in a fresh workspace-backed session, publish
+// `project.arbc`, then release the live session and delete the `workspace/` subtree so
+// a subsequent `open_project` MUST take the REBUILD-FROM-CANONICAL path — the load
+// path `editor.cameras.reopen_codec` fixes (mirrors project_save_test's shed idiom).
+// Returns the project root for the reopen. `author` uses `state.registry()` (seeded
+// with the camera kind) so the stored token matches the save-side bridge.
+std::filesystem::path persist_and_shed_workspace(const ScratchDir& scratch,
+                                                 const ace::platform::FileSystem& fs,
+                                                 const char* leaf,
+                                                 const std::function<void(AppState&)>& author) {
+  const std::filesystem::path root = scratch.root / leaf;
+  {
+    AppState state = session_with_composition(scratch, fs, leaf);
+    author(state);
+    REQUIRE(ace::commands::save_project(state, fs).has_value());
+  } // state destructs → workspace unmapped, its HousekeepingThread joined
+  std::error_code ec;
+  std::filesystem::remove_all(ace::project::project_layout(root).workspace_dir, ec);
+  return root;
 }
 
 } // namespace
@@ -580,4 +602,138 @@ TEST_CASE("cameras round-trip through save_project -> load_document with the cod
   CHECK(cams[1].resolution == Resolution{3840, 2160});
   CHECK(cams[1].frame.a == 2.0);
   CHECK(cams[1].frame.tx == 11.0);
+}
+
+// --- editor.cameras.reopen_codec: cameras survive a COLD reopen as live kinds -------
+
+TEST_CASE("reopen from canonical WITH the callback restores cameras as live CameraContent") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+
+  arbc::ObjectId first_id;
+  const arbc::Affine frame_a = arbc::Affine::translation(3.0, 4.0);
+  const arbc::Affine frame_b{2.0, 0.0, 0.0, 2.0, 11.0, 22.0};
+  const std::filesystem::path root =
+      persist_and_shed_workspace(scratch, fs, "reopen_live", [&](AppState& state) {
+        const arbc::Registry& reg = state.registry();
+        dispatch(state, add_camera_command(reg, "hero \"π\"", Resolution{1920, 1080}, frame_a));
+        dispatch(state, add_camera_command(reg, "wide", Resolution{3840, 2160}, frame_b));
+        first_id = ace::scene::cameras(state.document())[0].id;
+      });
+
+  // Reopen through the rebuild-from-canonical path WITH the camera-kind callback: the
+  // transient load registry learns org.arbc.camera, so each record decodes to a live
+  // CameraContent (the assertion that FAILS against pre-callback code, Constraint 2).
+  auto reopened = ace::project::open_project(fs, root, ace::scene::register_camera_kind);
+  REQUIRE(reopened.has_value());
+  REQUIRE(reopened.value().rebuilt_from_canonical); // the load path, not the map fast path
+  const arbc::Document& doc = *reopened.value().document;
+
+  const std::vector<Camera> cams = ace::scene::cameras(doc);
+  REQUIRE(cams.size() == 2);     // layer order preserved
+  CHECK(cams[0].id == first_id); // ObjectId round-trips
+  CHECK(cams[0].name == "hero \"π\"");
+  CHECK(cams[0].resolution == Resolution{1920, 1080});
+  CHECK(cams[0].frame.tx == 3.0);
+  CHECK(cams[0].frame.ty == 4.0);
+  CHECK(cams[1].name == "wide");
+  CHECK(cams[1].resolution == Resolution{3840, 2160});
+  CHECK(cams[1].frame.a == 2.0);
+  CHECK(cams[1].frame.tx == 11.0);
+
+  // The reopened content is the real typed kind, NOT a degraded placeholder (a
+  // placeholder would fail this cast — cf. the WITHOUT-callback test below).
+  const arbc::Content* content = doc.resolve(cams[0].id);
+  REQUIRE(content != nullptr);
+  CHECK(dynamic_cast<const CameraContent*>(content) != nullptr);
+}
+
+TEST_CASE("reopen from canonical WITHOUT the callback degrades a camera to a placeholder") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+
+  arbc::ObjectId cam_id;
+  const std::filesystem::path root =
+      persist_and_shed_workspace(scratch, fs, "reopen_degrade", [&](AppState& state) {
+        dispatch(state, add_camera_command(state.registry(), "hero", Resolution{1920, 1080},
+                                           arbc::Affine::translation(3.0, 4.0)));
+        cam_id = ace::scene::cameras(state.document())[0].id;
+      });
+
+  // Reopen with the default-empty callback (Constraint 6): the load registry never
+  // learns org.arbc.camera, so the record decodes to a non-typed placeholder. Pins that
+  // the callback — not some incidental change — is what restores the kind.
+  auto reopened = ace::project::open_project(fs, root);
+  REQUIRE(reopened.has_value());
+  REQUIRE(reopened.value().rebuilt_from_canonical);
+  const arbc::Document& doc = *reopened.value().document;
+
+  CHECK(ace::scene::cameras(doc).empty()); // cameras() no longer recognizes it
+  // The record still resolves (ObjectId round-trips) but decodes to a non-typed
+  // fallback (`arbc::PlaceholderContent`), NOT the live CameraContent kind.
+  const arbc::Content* content = doc.resolve(cam_id);
+  REQUIRE(content != nullptr);
+  CHECK(dynamic_cast<const CameraContent*>(content) == nullptr);
+}
+
+// NOTE — the fast-path parity case the refinement scopes (Constraint 3 / acceptance
+// "Fast-path parity") is DEFERRED, not landed: it cannot be written against the pinned
+// libarbc. The workspace-map fast path (`arbc::Document::open`) rebuilds the Model from
+// the mmapped arena via `Model::rebuild_counts`, which asserts on the first reachable
+// `RecordKind::Content` whose `StateHandle` is non-inert (arbc `model.cpp:771`: "a
+// persisted non-inert StateHandle needs a per-kind state-slab walk hook"). A
+// `CameraContent` writes a real handle through `set_content_state`, so a checkpointed
+// workspace holding a camera aborts on remap (debug) / silently corrupts the handle
+// (release). The per-kind state-slab walk hook is explicit future work in the lib; the
+// built-in editable kinds dodge it only because their durable state rides the
+// serialize/deserialize codec path (the same path THIS task fixes), never the workspace
+// map. So a camera does NOT survive the fast path in this lib — the refinement's
+// Constraint 3 premise does not hold here. Out of scope for this load-side codec task
+// (D-reopen-3 pins the fast path unmodified) and unfixable without a libarbc bump;
+// tracked as the follow-up `editor.cameras.workspace_reopen_slab`.
+
+TEST_CASE("a camera reopened from canonical is fully operable (rename preserves ObjectId)") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+
+  arbc::ObjectId original_id;
+  const std::filesystem::path root =
+      persist_and_shed_workspace(scratch, fs, "reopen_operable", [&](AppState& state) {
+        dispatch(state, add_camera_command(state.registry(), "hero", Resolution{1920, 1080},
+                                           arbc::Affine::translation(1.0, 2.0)));
+        original_id = ace::scene::cameras(state.document())[0].id;
+      });
+
+  auto reopened = ace::project::open_project(fs, root, ace::scene::register_camera_kind);
+  REQUIRE(reopened.has_value());
+  AppState state(std::move(*reopened));
+
+  const arbc::ObjectId cam_id = ace::scene::cameras(state.document())[0].id;
+  CHECK(cam_id == original_id); // the persisted identity survived reopen
+
+  // rename resolves + dynamic_casts to CameraContent, then edits in place: it takes
+  // effect ONLY on a live kind, proving the reopened object is the real editable camera
+  // (a placeholder would fail the cast). cameras.manip / cells.selection address it too.
+  dispatch(state, Command{"rename_camera", [&](arbc::Document& doc) {
+                            ace::scene::rename_camera(doc, state.registry(), cam_id, "renamed");
+                          }});
+  const std::vector<Camera> cams = ace::scene::cameras(state.document());
+  REQUIRE(cams.size() == 1);
+  CHECK(cams[0].id == original_id); // rename kept the ObjectId (in-place edit)
+  CHECK(cams[0].name == "renamed");
+}
+
+TEST_CASE("reopen through the callback path is a clean no-op for a camera-free project") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  // No cameras authored — just the composition session_with_composition adds.
+  const std::filesystem::path root =
+      persist_and_shed_workspace(scratch, fs, "reopen_empty", [](AppState&) {});
+
+  // The callback runs harmlessly (registers the kind; nothing decodes to it) — a
+  // camera-free project reopens cleanly through the callback path (Constraint 4).
+  auto reopened = ace::project::open_project(fs, root, ace::scene::register_camera_kind);
+  REQUIRE(reopened.has_value());
+  REQUIRE(reopened.value().rebuilt_from_canonical);
+  CHECK(ace::scene::cameras(*reopened.value().document).empty());
 }

@@ -8,6 +8,7 @@
 #include <arbc/runtime/filesystem_asset_source.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -68,9 +69,14 @@ create_workspace_document(const std::filesystem::path& workspace_file) {
 // Rebuild a document from the canonical `project.arbc` bytes (D-open-3): a fresh
 // workspace, `load_document` of the canonical bytes, then a checkpoint so the
 // recovery is itself crash-durable. The kind Registry + KindBridge + AssetSource
-// are transient to this one load (D-open-7).
+// are transient to this one load (D-open-7). `register_extra_kinds`, when set,
+// augments the transient load registry with the caller's editor-authored kinds
+// right after the built-ins (D-reopen-1) — the seam that keeps a persisted camera a
+// live `scene::CameraContent` on reopen instead of a degraded placeholder — while
+// `project` stays typed only on `arbc::Registry` (no `project->scene` edge).
 platform::Result<std::unique_ptr<arbc::Document>>
-rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_bytes) {
+rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_bytes,
+                       const std::function<void(arbc::Registry&)>& register_extra_kinds) {
   platform::Result<std::unique_ptr<arbc::Document>> minted =
       create_workspace_document(layout.workspace_file);
   if (!minted.has_value()) {
@@ -80,6 +86,12 @@ rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_b
 
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
+  // Apply the caller's editor-kind registrar (idempotent, first-wins) so
+  // `load_document` finds the codec for an editor-authored kind rather than degrading
+  // the record to `PlaceholderContent` (Constraint 2/4). Skipped when unset.
+  if (register_extra_kinds) {
+    register_extra_kinds(registry);
+  }
   arbc::KindBridge bridge;
   arbc::FilesystemAssetSource assets;
   const auto loaded = arbc::load_document(canonical_bytes, *document, bridge, registry,
@@ -111,8 +123,9 @@ ProjectLayout project_layout(const std::filesystem::path& root) {
   return layout;
 }
 
-platform::Result<OpenedProject> open_project(const platform::FileSystem& fs,
-                                             const std::filesystem::path& root) {
+platform::Result<OpenedProject>
+open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
+             const std::function<void(arbc::Registry&)>& register_extra_kinds) {
   const ProjectLayout layout = project_layout(root);
 
   // `root` must be an existing directory: enumerating it fails on a regular file
@@ -152,7 +165,7 @@ platform::Result<OpenedProject> open_project(const platform::FileSystem& fs,
   }
 
   platform::Result<std::unique_ptr<arbc::Document>> rebuilt =
-      rebuild_from_canonical(layout, *bytes);
+      rebuild_from_canonical(layout, *bytes, register_extra_kinds);
   if (!rebuilt.has_value()) {
     return rebuilt.error();
   }
