@@ -73,6 +73,16 @@ struct ScratchDir {
 // Document-bound viewport anchors there. The canvas is sized LARGER than the shell window
 // so the identity framing fills the pane — a zoom about the pane centre then focuses on
 // composition content (not empty space beyond the canvas), so a descendant stays in view.
+//
+// A full-frame INLINE solid background sits on the root UNDER the child: a nested child
+// composition renders no straight-alpha coverage in-view on its own (it settles via a
+// bridge binding the interactive host does not wire), so without the background the first
+// composited frame is all-transparent. Now that editor.canvas.blank_first_frame withholds
+// the published sequence until a frame composites non-empty content, that transparent frame
+// would never publish and frames_issued("canvas#1") would never advance. The background
+// makes the first frame genuinely non-blank (covered content the compositor resolves inline)
+// so the content-gated sequence advances; the nested child is retained for the re-anchor
+// zoom test, and no assertion below depends on the child's pixels.
 constexpr double k_nav_canvas = 2048.0;
 void seed_nested(AppState& state) {
   arbc::Document& doc = state.document();
@@ -81,6 +91,9 @@ void seed_nested(AppState& state) {
   const arbc::ObjectId leaf =
       doc.add_content(std::make_shared<arbc::SolidContent>(ace::project::k_probe_color));
   doc.attach_layer(child, doc.add_layer(leaf, arbc::Affine::identity()));
+  const arbc::ObjectId bg =
+      doc.add_content(std::make_shared<arbc::SolidContent>(arbc::Rgba{0.05F, 0.05F, 0.08F, 1.0F}));
+  doc.attach_layer(root, doc.add_layer(bg, arbc::Affine::identity()));
   doc.attach_layer(root, doc.add_layer(child, arbc::Affine::identity()));
 }
 
@@ -99,7 +112,10 @@ template <class Ready> bool pump_until(ImGuiTestContext* ctx, Ready ready) {
 }
 
 // Let the scene settle so a later frame advance is attributable to the gesture, not a
-// still-settling frame racing the assertion.
+// still-settling frame racing the assertion. The published sequence is now gated on content
+// (editor.canvas.blank_first_frame), so this quiet window soundly detects a settled, non-blank
+// scene — it can no longer go "quiet" on a blank first frame that the driver never published,
+// which is exactly what made a frame-count settle unsound before this leaf.
 void settle(ImGuiTestContext* ctx, CanvasView& canvas) {
   std::uint64_t last = canvas.frames_issued("canvas#1");
   for (int quiet = 0; quiet < 40;) {

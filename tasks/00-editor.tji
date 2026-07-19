@@ -201,8 +201,15 @@ task editor "Editor — host GUI over libarbc" {
     task blank_first_frame "Don't advance published frame sequence until first composited non-empty tile" {
       effort 1d
       allocate team
+      complete 100
       depends !frame_sync
-      note "CanvasDriver publishes a blank first frame and advances frames_issued for it, making any frame-count-based settle heuristic unsound under sanitizer/container slowdown (the settle fires on the blank frame). Don't advance the published sequence until a frame has composited non-empty tile content. Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/01-architecture.md A5."
+      note "CanvasDriver publishes a blank first frame and advances frames_issued for it, making any frame-count-based settle heuristic unsound under sanitizer/container slowdown (the settle fires on the blank frame). Don't advance the published sequence until a frame has composited non-empty tile content. Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/01-architecture.md A5. Refinement: tasks/refinements/editor/blank_first_frame.md"
+    }
+    task nested_composition_binding "Wire KindBridge/Registry DocumentBinding in CanvasRenderer for nested composition rendering" {
+      effort 1d
+      allocate team
+      depends !blank_first_frame
+      note "The interactive CanvasRenderer does not wire a KindBridge/Registry DocumentBinding, so a nested-composition canvas renders no coverage (blank) in production. Wire the DocumentBinding so nested cells render correctly in the interactive path. Source-of-debt: tasks/refinements/editor/blank_first_frame.md (2026-07-19). Design: docs/01-architecture.md A5."
     }
   }
 

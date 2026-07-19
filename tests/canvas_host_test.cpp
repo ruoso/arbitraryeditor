@@ -68,6 +68,14 @@ void damage(arbc::Document& document, arbc::ObjectId composition) {
   document.attach_layer(composition, layer);
 }
 
+// A sized-but-content-free document: one composition, no layers/content — every composite
+// leaves the working-space target transparent black (a blank frame the content gate withholds).
+std::unique_ptr<arbc::Document> build_empty_doc() {
+  auto doc = std::make_unique<arbc::Document>();
+  doc->add_composition(static_cast<double>(k_w), static_cast<double>(k_h));
+  return doc;
+}
+
 // Deadline-based pump for the off-thread lifecycle case — holds under a sanitizer build's
 // slowdown (no fixed iteration count).
 template <class Ready> bool pump_until(Ready ready) {
@@ -226,6 +234,57 @@ TEST_CASE("canvas_host: a hosted entry is byte-exact vs offline + the golden; a 
   Srgb8Image f2;
   REQUIRE(host.consume("canvas#2", s2, f2));
   CHECK(f2.pixels == f1.pixels);
+}
+
+TEST_CASE(
+    "canvas_host: a blank first frame is withheld per entry; a resized content entry republishes") {
+  const ProbeDocument probe = build_probe_document();
+  auto empty = build_empty_doc();
+  CanvasHost host = make_inline_host();
+
+  // canvas#1 over a content-free document: every composite is transparent, so the content
+  // gate withholds its publish and the per-entry sequence stays 0. canvas#2 over the probe
+  // (a solid fill) composites content inline and publishes normally — the gate is per-entry.
+  host.add("canvas#1", *empty);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document);
+  host.request_resize("canvas#2", k_w, k_h);
+  host.drive_once();
+  host.drive_once(); // a second still drive re-scans the blank entry and still withholds
+
+  CHECK(host.published_sequence("canvas#1") == 0); // blank -> withheld
+  CHECK(host.published_sequence("canvas#2") >= 1); // content -> published
+  std::uint64_t sb = 0;
+  Srgb8Image fb;
+  CHECK_FALSE(host.consume("canvas#1", sb, fb)); // nothing published for the blank entry
+
+  // The content gate is once-only, NOT re-keyed per size: after a published content entry
+  // resizes, its transient frames publish normally (the gate does not withhold again), so
+  // the still-scene early-out re-key (published_frames reset to 0) republishes the new size.
+  const std::uint64_t before = host.published_sequence("canvas#2");
+  host.request_resize("canvas#2", 48, 32);
+  host.drive_once();
+  CHECK(host.published_sequence("canvas#2") > before);
+  std::uint64_t s2 = 0;
+  Srgb8Image f2;
+  REQUIRE(host.consume("canvas#2", s2, f2));
+  CHECK(f2.width == 48);
+  CHECK(f2.height == 32);
+}
+
+TEST_CASE("canvas_host: once content has published, a partial refinement publishes normally") {
+  ProbeDocument probe = build_probe_document();
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.drive_once();
+  REQUIRE(host.published_sequence("canvas#1") == 1); // first content frame published
+
+  // Once content has published (content_published latched) the gate is skipped, so a later
+  // damaged frame publishes on the normal frames_issued advance (the sequence stays monotonic).
+  host.apply_edit([&] { damage(*probe.document, probe.composition); });
+  host.drive_once();
+  CHECK(host.published_sequence("canvas#1") == 2);
 }
 
 TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned render thread") {
@@ -466,4 +525,33 @@ TEST_CASE("canvas_host: an interactive-camera frame is byte-exact vs offline + t
   //    threads to the composite EXACTLY, not just approximately (D-nav-3).
   const Srgb8Image offline = ace::render::render_document_srgb8(*doc, k_w, k_h, k_nav_camera);
   CHECK(f.pixels == offline.pixels);
+}
+
+TEST_CASE("canvas_host: a blank-then-content first frame publishes under the REAL bounded pool") {
+  // The gate's liveness path: under a real WorkerPool + bounded budget the first step() can
+  // issue a blank frame (tiles still resolving) that the content gate withholds. There is NO
+  // async-completion wake, so the drive loop must stay armed while the renderer keeps issuing
+  // new frames (tiles in flight) until a content frame composites and publishes — otherwise
+  // the canvas stalls blank at sequence 0. build_raster_doc's full-frame solid background is
+  // covered content the compositor resolves within a few bounded steps.
+  auto doc = build_raster_doc();
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  // No pokes after the initial add/resize: the loop must reach the content frame on its own.
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // A RESIZE re-keys the still-scene early-out (published_frames reset): the first frame at
+  // the new size republishes on its own (the multi_canvas e2e's WindowFocus-resize path).
+  const std::uint64_t before = host.published_sequence("canvas#1");
+  host.request_resize("canvas#1", 48, 40);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") > before; }));
+
+  host.stop();
+  handle->join();
+  CHECK(host.published_sequence("canvas#1") > before);
 }

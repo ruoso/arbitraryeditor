@@ -127,6 +127,8 @@ private:
   Srgb8Image back_;                    // the producer's scratch (render thread)
   std::uint64_t sequence_ = 0;         // the published-frame sequence (guarded)
   std::uint64_t published_frames_ = 0; // frames_issued() last published (render thread)
+  bool content_published_ = false;     // has any content frame published? (render thread;
+                                       // once-only content gate, editor.canvas.blank_first_frame)
 
   std::atomic<std::uint64_t> iterations_{0};
   std::atomic<std::size_t> anchor_depth_{0}; // render-thread snapshot, UI reads lock-free

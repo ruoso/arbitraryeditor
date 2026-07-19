@@ -190,33 +190,21 @@ TEST_CASE(
     auto* e2e = static_cast<E2EState*>(ctx->Test->UserData);
     CanvasView& canvas = *e2e->canvas;
 
-    // The driver renders OFF the UI thread: wait (bounded) for the double-buffer to
-    // publish its first frame rather than assuming a synchronous inline step.
+    // The published sequence is now a SOUND content signal (editor.canvas.blank_first_frame):
+    // the driver withholds it until a frame composites non-empty tile content, so the FIRST
+    // published frame (frames_issued >= 1) is already non-blank — no frame-quiet settle window
+    // is needed to skip a blank partial. Wait (bounded) for that first published frame.
     IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") >= 1; }));
     IM_CHECK(ctx->WindowInfo("canvas#1").ID != 0);
     ImGuiWindow* w_canvas = ctx->GetWindowByRef("canvas#1");
     IM_CHECK(w_canvas != nullptr);
     IM_CHECK(w_canvas->DockNode != nullptr);
 
-    // The off-thread driver produced at least one live frame of the shared document.
+    // The off-thread driver produced at least one live, non-blank frame of the document.
     IM_CHECK(canvas.frames_issued("canvas#1") >= 1);
 
-    // The host renders with a REAL shared WorkerPool now (multi_canvas), so the first
-    // published frame can be a partial (async tiles still resolving); let the scene SETTLE
-    // (its sequence quiet over a window) so the fully-composited frame is uploaded + drawn
-    // before the post-loop pixel scan.
-    std::uint64_t last = canvas.frames_issued("canvas#1");
-    for (int quiet = 0; quiet < 40;) {
-      ctx->Yield();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      const std::uint64_t now = canvas.frames_issued("canvas#1");
-      if (now == last) {
-        ++quiet;
-      } else {
-        quiet = 0;
-        last = now;
-      }
-    }
+    // Hand the main/render loop a few frames to consume + GL-upload + present that first
+    // content frame so the post-loop pixel scan finds the probe colour on screen.
     ctx->Yield(4);
   };
   ImGuiTestEngine_QueueTest(engine, test);
@@ -260,18 +248,15 @@ TEST_CASE(
   const int k_max_frames = 200000;
   int frames = 0;
   bool found = false;
-  // Drive frames until the test queue drains AND the composited probe colour has actually
-  // reached the framebuffer (or a generous wall-clock deadline). The off-thread compositor
-  // renders under a BOUNDED per-frame budget over a shared WorkerPool, so its FIRST
-  // published frame can be blank (the tile is still resolving) and the fully-composited
-  // frame arrives some frames later. Under a sanitizer build the composite can take longer
-  // than any fixed frames_issued-quiet window, so gate the capture on the CONTENT reaching
-  // the screen — not on a frame-quiet heuristic that can settle on the blank first frame
+  // Drive frames until the test queue drains AND the composited probe colour has reached the
+  // framebuffer. The published sequence is now gated on content
+  // (editor.canvas.blank_first_frame): the driver never advances it on a blank first frame, so
+  // once frames_issued("canvas#1") >= 1 the first published frame is already non-blank and the
+  // probe colour reaches the screen a few frames later — no 30 s content-scan workaround is
+  // needed to skip a blank partial. That probe_visible() is found at the first published frame
+  // is the end-to-end proof the sequence never advanced on a blank frame
   // (docs/01-architecture.md §9, the UI↔driver-handoff ASan/TSan lane).
-  const auto capture_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-  while (frames < k_max_frames &&
-         (!ImGuiTestEngine_IsTestQueueEmpty(engine) ||
-          (!found && std::chrono::steady_clock::now() < capture_deadline))) {
+  while (frames < k_max_frames && (!ImGuiTestEngine_IsTestQueueEmpty(engine) || !found)) {
     shell.new_frame();
     shell.draw_ui();
     shell.render(grab_frame);

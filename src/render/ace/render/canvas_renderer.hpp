@@ -78,10 +78,14 @@ public:
   // Drive one HostViewport::step(). The first step always composites
   // (frames_issued() == 1); a subsequent step on an unchanged, playhead-pinned
   // scene issues zero further frames (the still-scene early-out). Re-converts the
-  // settled target to sRGB8 only when a new frame was issued. Returns
-  // StepOutcome::schedule_follow_up — true when the bounded-budget pass did NOT
-  // settle the frame and the caller should re-drive next cycle (D-multi_canvas-3);
-  // always false for the settle-fully inline path.
+  // settled target to sRGB8 only when a new frame was issued. Returns true when the
+  // renderer is NOT settled and the caller should re-drive next cycle
+  // (D-multi_canvas-3): either the bounded-budget pass owes a follow-up frame
+  // (StepOutcome::schedule_follow_up) OR a tile is still in flight (a dispatched worker
+  // miss not yet reaped) — the work-in-flight term keeps the host loop hot through async
+  // tile resolution when editor.canvas.blank_first_frame withholds the blank frame's
+  // publish (there is no async-completion wake). Always false for the settle-fully inline
+  // path (nothing left pending).
   bool step();
 
   // The current settled straight-alpha sRGB8 image (empty before the first frame

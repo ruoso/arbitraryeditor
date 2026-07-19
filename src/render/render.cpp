@@ -11,6 +11,7 @@
 #include <arbc/runtime/offline.hpp>
 #include <arbc/surface/surface.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -44,6 +45,18 @@ Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int 
 Srgb8Image render_probe_srgb8(int width, int height) {
   const project::ProbeDocument probe = project::build_probe_document();
   return render_document_srgb8(*probe.document, width, height);
+}
+
+bool frame_has_content(const Srgb8Image& frame) {
+  // Straight-alpha coverage: alpha lives at byte +3 of each tightly-packed RGBA quad
+  // (render.hpp). Any non-zero alpha byte means a tile composited over the
+  // transparent-black target (D-blank_first_frame-1).
+  for (std::size_t i = 3; i < frame.pixels.size(); i += 4) {
+    if (frame.pixels[i] != 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace ace::render

@@ -168,10 +168,18 @@ bool CanvasRenderer::step() {
     impl_->convert();
     impl_->converted_frames = frames;
   }
-  // schedule_follow_up: the bounded budget did not settle the frame — the shared host
-  // loop re-drives this entry next cycle (D-multi_canvas-3). Always false for the
-  // settle-fully inline path (the hour budget composites in one pass).
-  return outcome.schedule_follow_up;
+  // "Not settled" — the host loop must re-drive this entry until true (D-multi_canvas-3):
+  //   * schedule_follow_up: the bounded budget owes a follow-up frame; OR
+  //   * a tile is still IN FLIGHT (a worker miss dispatched but not yet reaped —
+  //     `InteractiveRenderer::pending().tiles`, the same work-in-flight witness
+  //     HostViewport uses for its own idle early-out, host_viewport.cpp:198).
+  // The in-flight term is load-bearing under editor.canvas.blank_first_frame: a degraded
+  // first frame dispatches a worker miss and returns schedule_follow_up == false, so
+  // without it the loop would go cold on the withheld blank frame and the resolving tile
+  // would never be reaped — there is NO async-completion wake for the render loop. Always
+  // false for the settle-fully inline path (the hour budget composites in one pass, nothing
+  // left pending).
+  return outcome.schedule_follow_up || !impl_->renderer->pending().tiles.empty();
 }
 
 const Srgb8Image& CanvasRenderer::image() const { return impl_->image; }

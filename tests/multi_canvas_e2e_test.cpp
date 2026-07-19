@@ -240,12 +240,16 @@ TEST_CASE("multi_canvas e2e: two canvases over one host render, dock, fan-out, a
 
     // canvas#2 opens as a tab in the panel dock node and its body only runs while it is the
     // active tab; bring it to the front so both panes are visible simultaneously for the
-    // pixel check (canvas#1 is its own leaf node). Focusing resizes it to the now-visible
-    // pane, so wait for that fresh frame and let it upload + draw before snapshotting.
-    const std::uint64_t s2_focus = canvas.frames_issued("canvas#2");
+    // pixel check (canvas#1 is its own leaf node). Its published frame is already NON-BLANK
+    // (editor.canvas.blank_first_frame gates the sequence on content, so frames_issued >= 1
+    // means content is on screen), so the snapshot needs no strictly-fresh frame here — a
+    // focus may or may not resize the pane (the dock layout does not guarantee it), and a
+    // hard "frames_issued advanced after focus" wait would race on that. Focus, confirm
+    // canvas#2 still holds a content frame, and yield generously to let any focus-resize
+    // render + upload + draw before snapshotting.
     ctx->WindowFocus("canvas#2");
-    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#2") > s2_focus; }));
-    ctx->Yield(8);
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#2") >= 1; }));
+    ctx->Yield(16);
 
     // Record each pane's centre for the post-loop pixel check (positions are stable).
     const ImVec2 c1 = ctx->GetWindowByRef("canvas#1")->Rect().GetCenter();

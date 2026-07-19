@@ -30,12 +30,75 @@
 using ace::project::build_probe_document;
 using ace::project::ProbeDocument;
 using ace::render::CanvasDriver;
+using ace::render::frame_has_content;
 using ace::render::Srgb8Image;
 
 namespace {
 constexpr int k_w = ace::project::k_probe_width;
 constexpr int k_h = ace::project::k_probe_height;
+
+// A sized-but-content-free document: one composition, no layers/content — so every
+// composite leaves the working-space target transparent black (a blank frame).
+std::unique_ptr<arbc::Document> build_empty_doc() {
+  auto doc = std::make_unique<arbc::Document>();
+  doc->add_composition(static_cast<double>(k_w), static_cast<double>(k_h));
+  return doc;
+}
 } // namespace
+
+TEST_CASE("frame_has_content keys on straight-alpha coverage, never on colour") {
+  // An empty image carries no coverage.
+  CHECK_FALSE(frame_has_content(Srgb8Image{}));
+
+  // A single all-zero-alpha quad -> no coverage.
+  Srgb8Image blank;
+  blank.width = 1;
+  blank.height = 1;
+  blank.pixels = {0, 0, 0, 0};
+  CHECK_FALSE(frame_has_content(blank));
+
+  // One alpha-255 pixel -> content.
+  Srgb8Image opaque = blank;
+  opaque.pixels = {10, 20, 30, 255};
+  CHECK(frame_has_content(opaque));
+
+  // Opaque BLACK (0,0,0,255) still trips it — it keys on alpha, not colour, so opaque
+  // content of any colour (including a background collision) is coverage.
+  Srgb8Image opaque_black = blank;
+  opaque_black.pixels = {0, 0, 0, 255};
+  CHECK(frame_has_content(opaque_black));
+
+  // Non-zero RGB with zero alpha (200,0,0,0) -> NOT content (colour without coverage).
+  Srgb8Image rgb_no_alpha = blank;
+  rgb_no_alpha.pixels = {200, 0, 0, 0};
+  CHECK_FALSE(frame_has_content(rgb_no_alpha));
+
+  // A multi-pixel buffer trips on ANY single covered pixel (the last one here).
+  Srgb8Image multi;
+  multi.width = 2;
+  multi.height = 1;
+  multi.pixels = {0, 0, 0, 0, 0, 0, 0, 7};
+  CHECK(frame_has_content(multi));
+}
+
+TEST_CASE("canvas_driver: a blank first frame is withheld — the sequence never advances on empty") {
+  auto doc = build_empty_doc();
+  CanvasDriver driver(*doc);
+  driver.request_resize(k_w, k_h);
+
+  // The first drive composites no tile (a transparent frame), so the content gate
+  // withholds the publish: drive_once() returns false and the sequence stays at 0 even
+  // though the first step issued a frame. A further still drive still publishes nothing.
+  CHECK_FALSE(driver.drive_once());
+  CHECK(driver.published_sequence() == 0);
+  CHECK_FALSE(driver.drive_once());
+  CHECK(driver.published_sequence() == 0);
+
+  // The consumer sees no frame (nothing was published).
+  std::uint64_t seq = 0;
+  Srgb8Image frame;
+  CHECK_FALSE(driver.consume(seq, frame));
+}
 
 TEST_CASE("canvas_driver: publish/consume — a settled frame is consumed once, then no new frame") {
   const ProbeDocument probe = build_probe_document();

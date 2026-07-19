@@ -46,6 +46,8 @@ struct CanvasHost::Entry {
   Srgb8Image back;                          // producer scratch (render thread, off-lock)
   std::uint64_t sequence = 0;               // published-frame sequence (guarded)
   std::uint64_t published_frames = 0;       // frames_issued() last published (render thread)
+  bool content_published = false;           // any content frame published? (render thread;
+                                            // once-only content gate, blank_first_frame)
   std::atomic<std::size_t> anchor_depth{0}; // deep-zoom depth, UI reads lock-free (D-nav-5)
 };
 
@@ -253,8 +255,11 @@ bool CanvasHost::drive_once() {
     if (item.do_resize &&
         (item.width != entry->renderer.width() || item.height != entry->renderer.height())) {
       entry->renderer.resize(item.width, item.height);
-      // The reconstructed viewport restarts frame numbering at 0, so re-key the publish
-      // gate to guarantee the first frame at the new size publishes.
+      // The reconstructed viewport restarts frame numbering at 0, so re-key the still-scene
+      // early-out (reset published_frames to 0) — the first frame at a new size always
+      // publishes, even when both sizes settle at the same frames_issued() count. The
+      // content gate does NOT re-arm here (content_published is once-only): a resize after
+      // the canvas has shown the scene publishes its transient frames normally, as before.
       entry->published_frames = 0;
     }
     // Apply the submitted camera after any resize (the renderer holds it, so the resize
@@ -277,12 +282,30 @@ bool CanvasHost::drive_once() {
     if (frames == 0 || frames == entry->published_frames) {
       continue;
     }
-    entry->published_frames = frames;
 
     // Copy the settled image off-lock, then publish under a short lock via a full-buffer
     // swap — a torn frame is never observable and the consumer never aliases the
     // producer's buffers (frame_sync's double-buffer, per entry).
     entry->back = entry->renderer.image();
+    // Withhold the sequence until the FIRST frame composites non-empty tile content: under
+    // the bounded per-frame budget the first step() can issue frame 1 before any tile
+    // resolved, so advancing entry->sequence for that blank frame would make a frame-count
+    // settle heuristic fire on empty (editor.canvas.blank_first_frame, D-blank_first_frame-1).
+    // `content_published` is a once-only latch (NOT re-keyed on resize): it gates only the
+    // very first content frame, so once the canvas has shown the scene every later frame —
+    // partial refinements AND the transient frames after a resize — publishes normally.
+    // Loop liveness through the initial blank phase is preserved by step()'s work-in-flight
+    // return (more_pending, set at the step() call above): a still-resolving canvas keeps
+    // driving until its first content frame composites and publishes; a genuinely blank/empty
+    // document leaves nothing pending, so step() returns false and the loop idles at sequence
+    // 0 — no busy-spin (D-blank_first_frame-3, as corrected: schedule_follow_up alone does not
+    // witness an in-flight tile).
+    if (!entry->content_published && !frame_has_content(entry->back)) {
+      continue;
+    }
+    entry->content_published = true;
+    entry->published_frames = frames;
+
     {
       std::lock_guard<std::mutex> lock(impl_->mu);
       std::swap(entry->published, entry->back);

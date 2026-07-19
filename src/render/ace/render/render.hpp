@@ -40,4 +40,16 @@ Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int 
 // The probe convenience: build the probe document (ace::project) and render it.
 Srgb8Image render_probe_srgb8(int width, int height);
 
+// True iff `frame` carries composited coverage — any straight-alpha byte (the `+3`
+// of each tightly-packed RGBA quad) is non-zero. A freshly-made working-space target
+// is transparent black (arbc CpuBackend) and the compositor composites content over
+// it, so a frame that composited NO tile is all-transparent (every alpha byte 0) and
+// any composited coverage yields >=1 non-zero alpha byte — the exact "did any tile
+// composite" invariant. It keys on coverage, not colour, so opaque-black content
+// (0,0,0,255) trips it and a background colour collision cannot. The canvas drivers
+// gate the first publish per size on this so the published sequence never advances on
+// a blank first frame (editor.canvas.blank_first_frame, D-blank_first_frame-1). Pure,
+// GL-free; an empty image is content-free.
+bool frame_has_content(const Srgb8Image& frame);
+
 } // namespace ace::render

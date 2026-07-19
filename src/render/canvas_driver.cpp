@@ -97,7 +97,6 @@ bool CanvasDriver::drive_once() {
   if (frames == 0 || frames == published_frames_) {
     return false;
   }
-  published_frames_ = frames;
 
   // Copy the settled image on the render thread (outside the lock), then publish it
   // under a short lock via a full-buffer swap — a torn frame is never observable
@@ -106,6 +105,22 @@ bool CanvasDriver::drive_once() {
   // out, the next publish fills a fresh buffer. The consumer never aliases the
   // producer's buffers.
   back_ = renderer_.image();
+  // Withhold the sequence until the FIRST frame composites non-empty tile content:
+  // frames_issued() advances for frame 1 even when the bounded budget resolved no tile
+  // yet, so advancing sequence_ for that blank frame would make a frame-count settle
+  // heuristic fire on empty (editor.canvas.blank_first_frame, D-blank_first_frame-1).
+  // `content_published_` is a once-only latch (NOT re-keyed on resize): it gates only the
+  // very first content frame, so once the canvas has shown the scene, every later frame —
+  // partial refinements AND the transient frames after a resize — publishes normally on the
+  // frames_issued advance, exactly as before this leaf. In this inline settle-fully driver a
+  // blank first frame is a genuinely empty document (no re-drive owed — correctly idle at
+  // sequence_ == 0, D-blank_first_frame-3).
+  if (!content_published_ && !frame_has_content(back_)) {
+    return false;
+  }
+  content_published_ = true;
+  published_frames_ = frames;
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     std::swap(published_, back_);
