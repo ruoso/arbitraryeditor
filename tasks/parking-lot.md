@@ -93,11 +93,3 @@ A15 (workspace_reopen_slab) leaves one narrow residual: a **never-saved project 
 **Tracking:** ruoso/arbitrarycomposer#7 (filed 2026-07-19).
 
 `doc_mu` serializes the render-thread `HostViewport::settle_external_loads` writer-publish against UI-thread `transact` mutations — so the **data race** closed by `editor.canvas.edit_render_sync` is fully resolved. However, arbc's `SlotStore` binds the writer thread on first write. If arbc additionally requires a single consistent *writer-thread identity* (not merely serialized access), a UI-thread `transact` following a render-thread settle could trip an arbc-internal writer-identity assertion under sustained mixed load. This is a libarbc-contract question that only the arbc maintainers (or an arbc version bump) can settle. No WBS task was created; the data-race fix does not gate on this. Flag to arbc upstream when filing the slab-hook request (see "libarbc per-kind state-slab walk hook" entry above).
-
----
-
-## Deep-zoom navigation aids beyond reset-to-fit
-
-**Source:** `tasks/refinements/editor/nav.md` (nav, 2026-07-18), D-nav-7 / Open questions.
-
-D2 §3 lists fit-to-frame, fit-to-cell, and zoom-to-selection as *(open)* navigation aids. `editor.canvas.nav` ships reset-to-fit (fit document to pane) as the minimal orientation affordance. Whether and which of the richer aids are needed, what gestures or menu entries invoke them, and whether they depend on the overview navigator (§5, `editor.panels.overview`) or the selection model (`editor.cells.selection`) is a design-open UX judgment. No WBS task was created; parked here for human review when the selection and overview panels are closer to landing.

@@ -151,13 +151,13 @@ task editor "Editor — host GUI over libarbc" {
       effort 1.5d
       allocate team
       depends !open_ui
-      note "Interactive no-arg launch (empty project_dir, non-headless) shows a modal welcome offering New / Open / Open Recent, backed by the dock::ProjectGateway (A12) the tool rail already uses. The launcher process owns NO Document: New/Open/Recent spawn a detached sibling on the chosen (or newly created) project directory (commands::open_another_project, spawn-not-swap, A7/D19) and the launcher then exits. Headless no-arg keeps auto-scratch (shell.cpp scratch_project_dir) so the driven path always holds a Document. Refines A7 (a pre-project launcher owns zero Documents; a project process still owns exactly one for its lifetime) and SUPERSEDES D-app_state-6 (scratch-when-none-given as the interactive default). Design: D16/D19/D22, arch A7/A12. Source-of-debt: tasks/refinements/editor/app_state.md. Refinement: tasks/refinements/welcome.md"
+      note "Interactive no-arg launch (empty project_dir, non-headless) shows a modal welcome offering New / Open / Open Recent, backed by the dock::ProjectGateway (A12) the tool rail already uses. The launcher process owns NO Document: New/Open/Recent spawn a detached sibling on the chosen (or newly created) project directory (commands::open_another_project, spawn-not-swap, A7/D19) and the launcher then exits. Headless no-arg keeps auto-scratch (shell.cpp scratch_project_dir) so the driven path always holds a Document. Refines A7 (a pre-project launcher owns zero Documents; a project process still owns exactly one for its lifetime) and SUPERSEDES D-app_state-6 (scratch-when-none-given as the interactive default). Design: D16/D19/D22, arch A7/A12. Source-of-debt: tasks/refinements/editor/app_state.md. Refinement: tasks/refinements/welcome.md. Decided (pre-exec 2026-07-19): dismissing/cancelling the welcome without choosing = the launcher EXITS cleanly (nothing to fall back to; keeps the zero-Document invariant absolute — a user wanting a throwaway chooses New). THREE verbs only (New / Open / Open Recent), matching D22 — no scratch/skip verb and no remembered-default in v1."
     }
     task dir_is_project "Project = directory: New and Save As refuse any existing target" {
       effort 1d
       allocate team
       depends !open, !save_as
-      note "The project directory IS the project (D16, project-as-a-directory): creation targets a path that does not yet exist, and the tool creates the directory. Tighten project::create_project (project_open.cpp) and project::save_project_as (save.cpp) to refuse ANY existing target directory — not just one already holding a project.arbc — so New and Save As behave identically; surface the refusal as a clear in-app message via dock::ProjectGateway. REVERSES D-save_as-4's narrow 'a populated directory without project.arbc is a fine destination' guard (flips the save_as_test populated-target case) and adds a create-time existence check to the open path. Design: D16 (project-as-a-directory), D19. Source-of-debt: tasks/refinements/editor/save_as.md, tasks/refinements/editor/open.md. Refinement: tasks/refinements/dir_is_project.md"
+      note "The project directory IS the project (D16, project-as-a-directory): creation targets a path that does not yet exist, and the tool creates the directory. Tighten project::create_project (project_open.cpp) and project::save_project_as (save.cpp) to refuse ANY existing target directory — not just one already holding a project.arbc — so New and Save As behave identically; surface the refusal as a clear in-app message via dock::ProjectGateway. REVERSES D-save_as-4's narrow 'a populated directory without project.arbc is a fine destination' guard (flips the save_as_test populated-target case) and adds a create-time existence check to the open path. Design: D16 (project-as-a-directory), D19. Source-of-debt: tasks/refinements/editor/save_as.md, tasks/refinements/editor/open.md. Refinement: tasks/refinements/dir_is_project.md. Decided (pre-exec 2026-07-19): New AND Save As collect the target via a parent-location pick + typed project NAME (not a folder picker returning an existing dir); the tool creates that directory. 'Existing' means exists-at-all — refuse even an EMPTY existing dir, for full New/Save-As symmetry. So Save As switches from the shipped native-folder-pick UX to the same parent+name compose flow New uses."
     }
   }
 
@@ -203,6 +203,12 @@ task editor "Editor — host GUI over libarbc" {
       complete 100
       depends !nav
       note "reset-to-fit currently restores identity/fit framing (D-canvas_view-5); wire it to the root composition's authored bounds once a Document composition-bounds accessor is available. The general interact::fit(content,pane) math ships in editor.canvas.nav tested for this future wiring + downstream reuse. Source-of-debt: tasks/refinements/editor/nav.md. Design: docs/00-design.md D2 §3. Refinement: tasks/refinements/editor/fit_bounds.md"
+    }
+    task nav_aids "Deep-zoom navigation aids: fit-to-frame / fit-to-cell / zoom-to-selection" {
+      effort 1.5d
+      allocate team
+      depends !fit_bounds, editor.cells.selection
+      note "The richer deep-zoom orientation aids beyond reset-to-fit (editor.canvas.nav/fit_bounds), reusing interact::fit(content,pane): fit-to-frame (fit a chosen camera frame to the pane — cameras only), fit-to-cell and zoom-to-selection (frame the selected cell / current selection — need the selection model). Decided (pre-exec 2026-07-19, resolves the D2 §3 open marker + parking-lot 'Deep-zoom navigation aids'): all three are in scope. The overview's in-panel viewport manipulation + zoom control is a SEPARATE surface owned by editor.panels.overview, not this leaf. Design: docs/00-design.md D2 §3. Source-of-debt: tasks/refinements/editor/nav.md, tasks/refinements/editor/fit_bounds.md. Refinement: tasks/refinements/nav_aids.md"
     }
     task edit_render_sync "Serialize writer-thread Document edits against CanvasHost render reads (TSAN)" {
       effort 2d
@@ -261,7 +267,7 @@ task editor "Editor — host GUI over libarbc" {
       effort 2d
       allocate team
       depends !model
-      note "Resize = re-crop (aspect-locked to resolution, holds resolution); resolution (pixel count + aspect) edited separately; dutch rotation modifier-gated. Design: D9. Refinement: tasks/refinements/camera_manip.md"
+      note "Resize = re-crop (aspect-locked to resolution, holds resolution); resolution (pixel count + aspect) edited separately; dutch rotation modifier-gated. Design: D9. Refinement: tasks/refinements/camera_manip.md. Decided (pre-exec 2026-07-19): dutch rotation is gated behind the SAME modifier chosen for cell shear (keep the two advanced rotate/shear gestures consistent; must not collide with Shift=constrain / Alt=from-center / Cmd-Ctrl=select-behind-bypass-snap / Space=pan). Resolution inspector ships aspect presets 16:9, 4:3, 1:1, 3:2 + a swap-orientation toggle (list is low-stakes, easily extended)."
     }
     task look_through "Activate a shot; multi-canvas look-through" {
       effort 1.5d
@@ -274,7 +280,7 @@ task editor "Editor — host GUI over libarbc" {
       effort 3d
       allocate team
       depends !model
-      note "A camera IS the export spec: pick camera(s) -> library render_offline each at its resolution -> file(s). PNG (working->sRGB8); batch (one file per camera) + contact sheet fall out; transparent/filled bg, N-times scale multiplier; async with progress. Design: D14. Refinement: tasks/refinements/export.md"
+      note "A camera IS the export spec: pick camera(s) -> library render_offline each at its resolution -> file(s). PNG (working->sRGB8); batch (one file per camera) + contact sheet fall out; transparent/filled bg, N-times scale multiplier; async with progress. Design: D14. Refinement: tasks/refinements/export.md. Decided (pre-exec 2026-07-19): default background TRANSPARENT (preserves alpha; filled bg is a deliberate opt-in); N× multiplier default 1×; on filename collision OVERWRITE in place (batch export is idempotent, mirroring Save's re-dump — no auto-suffix, no prompt); contact sheet = uniform grid, each camera rendered then scaled to fit a common tile box preserving aspect, ceil(sqrt(N)) columns, thin gutters, a small per-tile camera-name caption, on the chosen background. NOTE: render_offline binds no nested-composition operators (ruoso/arbitrarycomposer#6) — nested children export blank until that lands."
     }
   }
 
@@ -284,7 +290,7 @@ task editor "Editor — host GUI over libarbc" {
       effort 2d
       allocate team
       depends editor.canvas.view
-      note "Insert a cell of any registered kind (org.arbc.image/raster/nested/solid) off the library Registry::ids(); place it in the composition by affine. Design: D3. Refinement: tasks/refinements/cell_model.md"
+      note "Insert a cell of any registered kind (org.arbc.image/raster/nested/solid) off the library Registry::ids(); place it in the composition by affine. Design: D3. Refinement: tasks/refinements/cell_model.md. Decided (pre-exec 2026-07-19): the editor keeps NO kind allowlist — enumerate ALL Registry-advertised kinds uniformly (arbitrariness is the core principle); kind-specific content acquisition (raster resolution, image/nested file/URI, solid color) is the kind's concern, surfaced generically, not a hard-coded editor set. Cell resolution is a first-class user input at insert (NOT a fixed default — resolves the D3/00-design.md:116 open marker): the user specifies resolution, then PLACES the cell in the overview wireframe to see how it fits the composition. That placement gesture wants editor.panels.overview (not yet built) — this leaf ships the model-level insert (resolution + affine) with a provisional placement; the overview-wireframe placement lands with/after editor.panels.overview."
     }
     task selection "Project-level selection; hit-test; marquee; select-behind" {
       effort 2.5d
@@ -324,7 +330,7 @@ task editor "Editor — host GUI over libarbc" {
       effort 4d
       allocate team
       depends !layers, editor.cameras.model
-      note "The render-free overview: each cell a hatch pattern (shared identity with the list), front fills occlude back with always-on-top dotted borders (z-order without a list), cameras as frames, the live viewport highlighted; editable (drag to place) + navigator + export/shot map. Design: D6/§5. Refinement: tasks/refinements/overview.md"
+      note "The render-free overview: each cell a hatch pattern (shared identity with the list), front fills occlude back with always-on-top dotted borders (z-order without a list), cameras as frames, the live viewport highlighted; editable (drag to place) + navigator + export/shot map. Design: D6/§5. Refinement: tasks/refinements/overview.md. Decided (pre-exec 2026-07-19): hatch density is CONTENT-space (scales/tilts with the cell so scale/orientation read for free). The overview is a full viewport NAVIGATOR — manipulate the active viewport with an in-overview zoom control (partners D2 deep-zoom aids, editor.canvas.nav_aids), NOT navigation-only — and it is the placement surface for editor.cells.model inserts (a new cell is placed here). Remaining open items are visual polish only (hatch style/opacity, pattern-count-before-color, camera visual language)."
     }
     task color "sRGB picker; eyedropper (through camera); linear boundary" {
       effort 2d
@@ -347,7 +353,7 @@ task editor "Editor — host GUI over libarbc" {
       effort 3d
       allocate team
       depends editor.cells.model
-      note "The brush tool: size in % of view (shorter edge, log slider) with an on-canvas ring; strokes dab into an org.arbc.raster cell's editable facet, coalesced into one undo step. Design: D5. Refinement: tasks/refinements/brush.md"
+      note "The brush tool: size in % of view (shorter edge, log slider) with an on-canvas ring; strokes dab into an org.arbc.raster cell's editable facet, coalesced into one undo step. Design: D5. Refinement: tasks/refinements/brush.md. Decided (pre-exec 2026-07-19): brush size is SCREEN-locked only — a canvas-locked (composition-units) mode is deliberately NOT offered; it contradicts the model's principle (brush is screen-relative % of view; resolution is cell-owned, detail floor at the cell). No size-lock toggle."
     }
     task paint_res "Cell-fixed resolution painting; screen->cell mapping; detail-floor readout" {
       effort 2d
@@ -397,7 +403,7 @@ task editor "Editor — host GUI over libarbc" {
       effort 2d
       allocate team
       depends editor.foundation.build
-      note "Per-platform CI building the editor and running a headless smoke (window init + one rendered frame), matching the library's compiler matrix. Refinement: tasks/refinements/ci.md"
+      note "Per-platform CI building the editor and running a headless smoke (window init + one rendered frame), matching the library's compiler matrix. Refinement: tasks/refinements/ci.md. Decided (pre-exec 2026-07-19): v1 is LINUX-ONLY — the full build + headless offscreen-GL smoke reusing the existing llvmpipe/act lane (docs/01-architecture.md:210-245). macOS and Windows lanes (their offscreen-GL rendered-frame smoke needs ANGLE/other, no llvmpipe) are DEFERRED to editor.packaging.package, which owns the release matrix. Title says tri-platform but scope here is Linux; retitle/rescope when packaging picks up mac/Win."
     }
     task package "Installable editor artifacts per platform" {
       effort 3d

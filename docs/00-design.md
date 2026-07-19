@@ -95,9 +95,11 @@ throughout the UI (see §4, brush).
 - **Zoom is shown as a scale bar** (composition units per screen pixel), never as
   a "%" against a nonexistent native grid.
 - Camera frames are overlaid as rectangles; cells are the content beneath.
-- Deep-zoom navigation aids *(open)*: fit-to-frame, fit-to-cell,
-  zoom-to-selection — plus the overview (§5), which subsumes the minimap — so
-  users don't get lost in unbounded space.
+- Deep-zoom navigation aids: **fit-to-frame, fit-to-cell, and zoom-to-selection**
+  are all in scope (landing as the selection and overview surfaces do) — plus the
+  overview (§5), which subsumes the minimap and is itself an interactive
+  **viewport navigator** (manipulate the viewport, with a zoom control) — so users
+  don't get lost in unbounded space.
 
 ## 4. The painting model
 
@@ -111,9 +113,10 @@ The dab is rasterized into the **cell's own fixed working grid** (matching
 `org.arbc.raster` as it exists — a fixed tiled grid at a chosen resolution). The
 camera never owns stored detail. Consequences:
 
-- **A new paint cell needs a working resolution** — a project default (e.g.
-  2048²) or one derived from the camera it's created through, always
-  visible/editable in the inspector. *(open: exact default policy.)*
+- **A new paint cell needs a working resolution** — the user specifies it at
+  insert (resolution is a first-class placement input, not a fixed default),
+  then places the cell in the overview wireframe to see how it fits the
+  composition; always visible/editable in the inspector thereafter.
 - **There is a detail floor at the cell's resolution, with a natural escape
   hatch.** Zoom in until a screen-sized brush maps below one cell pixel and you
   can no longer add real detail (you're painting sub-pixel). The fix is explicit:
@@ -148,10 +151,11 @@ it stays 6% as you zoom; the artwork coverage changes underneath automatically).
   it **doubles as the resolution-health cue** — when it approaches 1, you're at
   the detail floor and should resample the cell up. So "pixels" survives only as
   a description of the mark's real effect, never as the thing you set.
-- **Screen-locked by default** (brush constant on screen). A *canvas-locked*
-  mode (brush constant in composition units, growing on screen as you zoom — the
-  Photoshop model) is a possible fast-follow, not v1. *(open: include the toggle
-  or not.)*
+- **Screen-locked** (brush constant on screen). A *canvas-locked* mode (brush
+  constant in composition units, growing on screen as you zoom — the Photoshop
+  model) is deliberately **not** offered: it contradicts the model's principle
+  that the brush is screen-relative (a % of view) while resolution is cell-owned
+  — the detail floor lives at the cell, not the brush.
 
 ## 5. The composition overview (wireframe)
 
@@ -194,11 +198,12 @@ minimap: the **list** owns exact total order + hierarchy + naming/visibility/loc
 toggles; the **overview** owns space + local z-read + camera crops; both index
 one shared selection.
 
-*(open: hatch style and semi-opacity level; whether pattern density is screen- or
-content-space; how many auto-distinct patterns before color must carry the load;
-whether the overview is an editable layout surface (drag boxes to place) or
-navigation-only — leaning editable, for a layout-first workflow; the camera
-visual language.)*
+Pattern density is **content-space** (the hatch scales and tilts with the cell,
+so scale and orientation read for free), and the overview **is an editable layout
+surface** — drag boxes to place, and manipulate the viewport (with a zoom
+control), not navigation-only. *(open, visual polish deferred to the overview
+leaf: exact hatch style and semi-opacity level; how many auto-distinct patterns
+before color must carry the load; the camera visual language.)*
 
 ## 6. Direct manipulation — cells and cameras
 
@@ -313,7 +318,8 @@ relink) vs a project-footprint readout. *(This resolves the earlier
 - **Drop / Place an image file** → a **borrowed** read-only cell at the drop
   point, sized **native px → composition units 1:1** so pixel dimensions carry
   real relative scale (a 4000px photo genuinely dwarfs a 200px sketch); the user
-  rescales freely. *(open: 1:1 vs fit-to-camera on drop.)*
+  rescales freely. (Sizing is **always 1:1** on drop — fit-to-camera would
+  discard the true relative scale between imports.)
 - **Paste / clipboard** (no source file) → **owned** read-only image; the project
   mints the asset, otherwise it behaves like an import.
 - **Place another `.arbc`** → a **nested composition** cell (the library's
@@ -492,10 +498,17 @@ The conceptual interaction layer (D1–D17) is complete. What remains is
   are now drawn (implemented by `editor.dock.workspaces`).
 - **Full input map.** The complete keyboard/shortcut set and tool palette
   (the pieces are decided; the map isn't written).
-- **Platform & framework.** Native toolkit choice (Qt / Dear ImGui / …), how the
-  C++ editor binds `libarbc`, threading of the async renderer against the UI.
-- **Extensibility.** Whether the editor loads `libarbc` plugins (new kinds) at
-  runtime, and how they surface in the "insert cell" affordances.
+- ~~**Platform & framework.**~~ *Resolved by **A2/A3/A4/A5** (`docs/01-architecture.md`):*
+  Dear ImGui (docking) + SDL3 + OpenGL (the GLES3/WebGL2-common subset), `libarbc`
+  consumed via CMake FetchContent, and the async renderer runs off the UI thread
+  over a shared `WorkerPool` (`render::CanvasHost`).
+- ~~**Extensibility.**~~ *Resolved:* v1 **statically links** all supported kinds
+  (`arbc::register_builtin_kinds` plus the editor's own registrations via the
+  `register_extra_kinds` hook). Runtime plugin loading is deferred but deliberately
+  **not blocked** — the editor consumes kinds only through the `Registry` seam
+  (`registry.ids()` + factory/codec/binder), never a hard-coded kind set (see
+  `editor.cells.model`), so a future plugin host registers on the `Registry` and
+  its kinds surface in every affordance automatically.
 - **Preferences, accessibility, i18n.**
 
 ## How this maps onto `libarbc`
