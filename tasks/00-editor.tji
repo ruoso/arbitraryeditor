@@ -195,8 +195,9 @@ task editor "Editor — host GUI over libarbc" {
     task edit_render_sync "Serialize writer-thread Document edits against CanvasHost render reads (TSAN)" {
       effort 2d
       allocate team
+      complete 100
       depends !multi_canvas
-      note "Pre-existing TSAN race: render thread's for_each_content (CanvasHost render_frame) reads arbc's writer-thread-owned d_contents while an off-thread damage()/add_content mutates it; no synchronization. Surfaced under container CPU contention in CI. Serialize writer-thread Document edits against the render-read path (arbc dep or CanvasHost edit/render contract). Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/01-architecture.md A4/A5."
+      note "Pre-existing TSAN race: render thread's for_each_content (CanvasHost render_frame) reads arbc's writer-thread-owned d_contents while an off-thread damage()/add_content mutates it; no synchronization. Surfaced under container CPU contention in CI. Serialize writer-thread Document edits against the render-read path (arbc dep or CanvasHost edit/render contract). Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/01-architecture.md A4/A5. Refinement: tasks/refinements/editor/edit_render_sync.md"
     }
     task blank_first_frame "Don't advance published frame sequence until first composited non-empty tile" {
       effort 1d

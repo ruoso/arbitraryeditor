@@ -123,6 +123,8 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
   }
 }
 
+void CanvasView::apply_edit(const std::function<void()>& edit) { host_.apply_edit(edit); }
+
 void CanvasView::poke() { host_.poke(); }
 
 void CanvasView::reconcile(const std::vector<std::string>& live_view_ids) {

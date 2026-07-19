@@ -260,7 +260,8 @@ TEST_CASE("AppProjectGateway::save_as on a cancelled pick publishes nothing and 
   REQUIRE_FALSE(launcher.invoked); // a cancelled pick spawns nothing (D-save_as)
 }
 
-TEST_CASE("AppProjectGateway::undo/redo navigate the in-process session's journal (A13)",
+TEST_CASE("AppProjectGateway::undo/redo run their mutation inside the edit runner (A13, "
+          "edit_render_sync)",
           "[app_project_gateway]") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
@@ -270,17 +271,32 @@ TEST_CASE("AppProjectGateway::undo/redo navigate the in-process session's journa
   auto session = make_session(fs, scratch.root / "session");
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
-  // The edit poke (editor.canvas.frame_sync, D-frame_sync-2): a moved undo/redo fires
-  // the installed listener so the off-thread canvas re-renders; a no-op does not.
-  int pokes = 0;
-  gateway.set_edit_listener([&pokes]() { ++pokes; });
+  // The edit-serializing runner (editor.canvas.edit_render_sync, D-edit_render_sync-2): the
+  // shell binds this to CanvasHost::apply_edit so the undo/redo mutation runs inside the
+  // render thread's `doc_mu` window. Here a FAKE runner records the ordering — runner
+  // entered -> mutation ran -> runner exited — proving the gateway funnels the Document
+  // mutation THROUGH the runner (not a bare fire-after poke). `can_redo()` is sampled just
+  // before and just after `edit()` inside the runner: a moved undo flips it false->true
+  // WHILE the runner is on the stack, witnessing that the mutation ran between enter and exit.
+  int entered = 0;
+  int exited = 0;
+  bool redo_before_mutation = true;
+  bool redo_after_mutation = false;
+  gateway.set_edit_runner([&](const std::function<void()>& edit) {
+    ++entered;
+    redo_before_mutation = gateway.can_redo();
+    edit();
+    redo_after_mutation = gateway.can_redo();
+    ++exited;
+  });
 
-  // A fresh session has an empty journal cursor: nothing to navigate.
+  // A fresh session has an empty journal cursor: nothing to navigate. A no-op undo/redo runs
+  // its (inert) mutation through the runner and reports false — harmless, no crash (Constraint 4).
   CHECK_FALSE(gateway.can_undo());
   CHECK_FALSE(gateway.can_redo());
   CHECK_FALSE(gateway.undo()); // an empty journal is inert (D-undo)
   CHECK_FALSE(gateway.redo());
-  CHECK(pokes == 0); // a no-op navigation pokes nothing
+  CHECK(entered == exited); // every entry matched an exit — the runner never dangled
 
   // One edit through the seam pushes exactly one journal entry.
   ace::commands::dispatch(session,
@@ -290,14 +306,46 @@ TEST_CASE("AppProjectGateway::undo/redo navigate the in-process session's journa
   CHECK(gateway.can_undo());
   CHECK_FALSE(gateway.can_redo());
 
-  // Undo navigates the cursor back (a forward publish) and reports the move; redo
-  // then navigates forward again. No sibling exec is fired for either (A13). Each
-  // moved navigation pokes the canvas exactly once.
+  // Undo navigates the cursor back and reports the move; the mutation ran INSIDE the runner
+  // (redo went false->true across `edit()`). No sibling exec is fired for either (A13).
+  const int entered_before_undo = entered;
   REQUIRE(gateway.undo());
-  CHECK(pokes == 1);
+  CHECK(entered == entered_before_undo + 1);
+  CHECK(exited == entered);          // entered -> mutation -> exited, balanced
+  CHECK_FALSE(redo_before_mutation); // pre-mutation: nothing to redo yet
+  CHECK(redo_after_mutation);        // post-mutation (still inside the runner): redo now available
+  CHECK(gateway.can_redo());
+
+  // Redo navigates forward again, likewise through the runner.
+  const int entered_before_redo = entered;
+  REQUIRE(gateway.redo());
+  CHECK(entered == entered_before_redo + 1);
+  CHECK(exited == entered);
+  CHECK(gateway.can_undo());
+  REQUIRE_FALSE(launcher.invoked);
+}
+
+TEST_CASE("AppProjectGateway::undo/redo run the mutation directly when no runner is installed",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // No runner installed (a headless session with no live canvas): the mutation runs directly
+  // on the calling thread — behaviour-identical to a wired runner, still single-threaded, so
+  // undo/redo navigate the journal exactly as before (D-edit_render_sync-2 default path).
+  ace::commands::dispatch(session,
+                          ace::commands::Command{"add_composition", [](arbc::Document& doc) {
+                                                   doc.add_composition(64.0, 64.0);
+                                                 }});
+  REQUIRE(gateway.can_undo());
+  REQUIRE(gateway.undo());
   CHECK(gateway.can_redo());
   REQUIRE(gateway.redo());
-  CHECK(pokes == 2);
   CHECK(gateway.can_undo());
   REQUIRE_FALSE(launcher.invoked);
 }

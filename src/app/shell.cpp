@@ -264,10 +264,15 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
     app_gateway = std::make_unique<ace::app::AppProjectGateway>(
         *recent_projects, filesystem, *folder_dialog, launcher, executable, app_state);
-    // Edit poke (editor.canvas.frame_sync, D-frame_sync-2): a moved undo/redo through
-    // the gateway wakes the off-thread canvas driver to re-render the damage. The
-    // gateway outlives the draw loop alongside `canvas`, so the capture is safe.
-    app_gateway->set_edit_listener([&canvas]() { canvas.poke(); });
+    // Edit-serializing runner (editor.canvas.edit_render_sync, D-edit_render_sync-2): the
+    // gateway hands each undo/redo Document mutation to this runner, which runs it inside
+    // CanvasHost::apply_edit's `doc_mu` window — mutually excluded with the render thread's
+    // per-frame document read — then wakes the off-thread canvas to re-render the damage.
+    // This replaces frame_sync's fire-after poke, which mutated the Document before (and
+    // unserialized against) that read, leaving the shipped path with a latent TSan race.
+    // The gateway outlives the draw loop alongside `canvas`, so the capture is safe.
+    app_gateway->set_edit_runner(
+        [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
     project_gateway = app_gateway.get();
   }
   dockspace.set_project_gateway(project_gateway);

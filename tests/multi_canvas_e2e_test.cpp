@@ -181,13 +181,16 @@ TEST_CASE("multi_canvas e2e: two canvases over one host render, dock, fan-out, a
 
   ace::dock::Dockspace dockspace; // default layout → canvas#1 open + docked
 
-  // The in-process gateway wired to fan the poke out to ALL canvases after a moved edit.
+  // The in-process gateway wired to the shell's edit-serializing runner (D-edit_render_sync-2):
+  // a moved edit runs its Document mutation inside CanvasHost::apply_edit's `doc_mu` window and
+  // then fans the wake out to ALL canvases (one writer, N observers). The production wiring.
   ace::dockmodel::RecentProjects recent(scratch.root / "prefs", fs);
   NoopFolderDialog dialog;
   NoopLauncher launcher;
   ace::app::AppProjectGateway gateway(recent, fs, dialog, launcher, "/usr/bin/arbitraryeditor",
                                       state);
-  gateway.set_edit_listener([&canvas]() { canvas.poke(); });
+  gateway.set_edit_runner(
+      [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
 
   // After the dock draws every body, reconcile the canvas subsystem against the layout —
   // a closed canvas#N leaves view_ids(), freeing its host entry + texture (D-multi_canvas-5).

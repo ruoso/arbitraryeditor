@@ -50,15 +50,22 @@ public:
   bool can_undo() const override;
   bool can_redo() const override;
 
-  // Install a listener invoked after an in-process edit that mutates the Document
-  // (a moved undo/redo) — the edit poke seam (editor.canvas.frame_sync,
-  // D-frame_sync-2): the UI thread stays the single writer and wakes the off-thread
-  // canvas driver to re-render the damage promptly. Default: no listener (a no-op),
-  // so a headless test or a session without a live canvas is unaffected.
-  void set_edit_listener(std::function<void()> on_edit);
+  // Install the edit-serializing runner the UI-thread edit verbs (undo/redo) funnel
+  // their Document mutation through (editor.canvas.edit_render_sync, D-edit_render_sync-2).
+  // The runner receives the mutation as a closure and is responsible for running it
+  // serialized against the off-thread render read and then waking the canvas — the shell
+  // binds it to `CanvasHost::apply_edit` (the mutation runs inside the render thread's
+  // per-frame `doc_mu` window), replacing frame_sync's fire-after poke that mutated the
+  // Document BEFORE — and unserialized against — the render read. Default: none, so a
+  // headless test or a session without a live canvas runs the mutation directly on the
+  // calling thread (behaviour-identical, still single-threaded).
+  void set_edit_runner(std::function<void(const std::function<void()>&)> runner);
 
 private:
   bool spawn(const std::filesystem::path& dir);
+  // Run a Document-mutating edit through the installed runner (serialized against the
+  // render read via CanvasHost::apply_edit), or directly when none is installed.
+  void run_edit(const std::function<void()>& edit);
 
   ace::dockmodel::RecentProjects& recent_;
   const ace::platform::FileSystem& filesystem_;
@@ -66,7 +73,9 @@ private:
   const ace::platform::ProcessLauncher& launcher_;
   std::filesystem::path executable_;
   ace::commands::AppState& app_state_; // the one in-process session (A7) Save/dirty drive
-  std::function<void()> on_edit_;      // wakes the off-thread canvas after an edit (poke)
+  // Serializes a UI-thread edit against the off-thread render read (bound to
+  // CanvasHost::apply_edit by the shell); null in headless tests -> run directly.
+  std::function<void(const std::function<void()>&)> run_edit_;
 };
 
 } // namespace ace::app

@@ -81,27 +81,38 @@ bool AppProjectGateway::is_dirty() const { return app_state_.is_dirty(); }
 
 bool AppProjectGateway::undo() {
   // Navigate the in-process session's journal (D15 / A13), not a sibling exec.
-  // `commands::undo` drives `journal().undo()` as a forward publish and reports
-  // whether the cursor moved; it never touches the dirty baseline (D-undo-4). A
-  // move mutates the Document, so poke the off-thread canvas driver to re-render the
-  // damage (editor.canvas.frame_sync, D-frame_sync-2); a no-op undo pokes nothing.
-  const bool moved = ace::commands::undo(app_state_).moved;
-  if (moved && on_edit_) {
-    on_edit_();
-  }
+  // `commands::undo` drives `journal().undo()` as a forward publish and reports whether
+  // the cursor moved; it never touches the dirty baseline (D-undo-4). The journal drive
+  // MUTATES the Document, which the off-thread render thread reads every frame — so it must
+  // run serialized against that read: hand it to the edit runner as a closure, which runs
+  // it inside CanvasHost::apply_edit's `doc_mu` window and then wakes the canvas
+  // (editor.canvas.edit_render_sync, D-edit_render_sync-2). This replaces frame_sync's
+  // fire-after poke, which mutated the Document BEFORE — and unserialized against — the read.
+  bool moved = false;
+  run_edit([this, &moved] { moved = ace::commands::undo(app_state_).moved; });
   return moved;
 }
 
 bool AppProjectGateway::redo() {
-  const bool moved = ace::commands::redo(app_state_).moved;
-  if (moved && on_edit_) {
-    on_edit_();
-  }
+  bool moved = false;
+  run_edit([this, &moved] { moved = ace::commands::redo(app_state_).moved; });
   return moved;
 }
 
-void AppProjectGateway::set_edit_listener(std::function<void()> on_edit) {
-  on_edit_ = std::move(on_edit);
+void AppProjectGateway::run_edit(const std::function<void()>& edit) {
+  // With a runner installed (the shell binds it to CanvasHost::apply_edit) the mutation
+  // runs serialized against the render read. Without one — a headless test or a session
+  // with no live canvas — run it directly on the calling (writer) thread: behaviour-
+  // identical and still single-threaded, so nothing races it.
+  if (run_edit_) {
+    run_edit_(edit);
+  } else {
+    edit();
+  }
+}
+
+void AppProjectGateway::set_edit_runner(std::function<void(const std::function<void()>&)> runner) {
+  run_edit_ = std::move(runner);
 }
 
 bool AppProjectGateway::can_undo() const { return app_state_.document().journal().can_undo(); }

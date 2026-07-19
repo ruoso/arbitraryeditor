@@ -55,8 +55,18 @@ public:
   // renders nothing (Constraint 7). Requires a current GL context.
   void draw_content(std::string_view view_id, int pane_width, int pane_height);
 
+  // Run a UI-thread Document-mutating edit serialized against the off-thread render read
+  // (editor.canvas.edit_render_sync, D-edit_render_sync-2): forwards to
+  // CanvasHost::apply_edit, so the mutation runs inside the render thread's per-frame
+  // `doc_mu` window and then wakes EVERY live canvas. The race-free replacement for
+  // "mutate the Document, then poke()" — the edit verbs (undo/redo via the gateway runner)
+  // funnel through here. Runs the edit synchronously on the calling (writer) thread.
+  void apply_edit(const std::function<void()>& edit);
+
   // Wake the render thread to re-render EVERY live canvas after a UI-thread edit (the
   // fan-out poke seam the edit points drive; D-frame_sync-2 / Constraint 4). Thread-safe.
+  // NOTE: a bare poke does NOT serialize the preceding mutation against the render read —
+  // use apply_edit() for a Document mutation submitted while the render loop is live.
   void poke();
 
   // Reconcile the live presenters/entries against the dock's current view ids: drop the

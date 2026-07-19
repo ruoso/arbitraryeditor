@@ -326,14 +326,18 @@ TEST_CASE(
 
   CanvasView canvas(state); // spawns the render thread
 
-  // The in-process gateway wired to poke the canvas after a moved edit (the shell's
-  // wiring, D-frame_sync-2). undo() touches none of the inert collaborators.
+  // The in-process gateway wired to the shell's edit-serializing runner (D-edit_render_sync-2):
+  // a moved undo runs its Document mutation inside CanvasHost::apply_edit's `doc_mu` window —
+  // mutually excluded with the render read — then wakes the canvas. This is the exact
+  // production wiring (shell.cpp), so this e2e drives the serialized edit path end-to-end.
+  // undo() touches none of the inert collaborators.
   ace::dockmodel::RecentProjects recent(scratch.root / "prefs", fs);
   NoopFolderDialog dialog;
   NoopLauncher launcher;
   ace::app::AppProjectGateway gateway(recent, fs, dialog, launcher, "/usr/bin/arbitraryeditor",
                                       state);
-  gateway.set_edit_listener([&canvas]() { canvas.poke(); });
+  gateway.set_edit_runner(
+      [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
 
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();

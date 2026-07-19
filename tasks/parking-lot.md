@@ -122,6 +122,14 @@ A15 (workspace_reopen_slab) leaves one narrow residual: a **never-saved project 
 
 ---
 
+## arbc writer-thread identity under sustained mixed load
+
+**Source:** `tasks/refinements/editor/edit_render_sync.md` (edit_render_sync, 2026-07-19), Open questions.
+
+`doc_mu` serializes the render-thread `HostViewport::settle_external_loads` writer-publish against UI-thread `transact` mutations — so the **data race** closed by `editor.canvas.edit_render_sync` is fully resolved. However, arbc's `SlotStore` binds the writer thread on first write. If arbc additionally requires a single consistent *writer-thread identity* (not merely serialized access), a UI-thread `transact` following a render-thread settle could trip an arbc-internal writer-identity assertion under sustained mixed load. This is a libarbc-contract question that only the arbc maintainers (or an arbc version bump) can settle. No WBS task was created; the data-race fix does not gate on this. Flag to arbc upstream when filing the slab-hook request (see "libarbc per-kind state-slab walk hook" entry above).
+
+---
+
 ## Deep-zoom navigation aids beyond reset-to-fit
 
 **Source:** `tasks/refinements/editor/nav.md` (nav, 2026-07-18), D-nav-7 / Open questions.

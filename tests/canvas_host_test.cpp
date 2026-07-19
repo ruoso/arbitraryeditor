@@ -345,6 +345,97 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
   CHECK(host.published_sequence("canvas#1") >= 2);
 }
 
+// --- editor.canvas.edit_render_sync: serialize UI-thread edits against the render read ----
+//
+// The write-side complement of drive_once's doc_mu hold: every UI-thread Document mutation
+// runs through apply_edit's doc_mu window, mutually excluded with the render thread's
+// per-frame for_each_content read. A deterministic mutual-exclusion contract (below) plus a
+// real-pool streamed-edit overlap (the TSan acceptance anchor, D-edit_render_sync-3).
+
+TEST_CASE("canvas_host: apply_edit is mutually excluded with the render read (edit_render_sync)") {
+  ProbeDocument probe = build_probe_document();
+  // Real pool + bounded budget + a spawned render thread: the render read (drive_once ->
+  // for_each_content) genuinely overlaps the UI writer in wall-clock time — the path the race
+  // lives on (D-edit_render_sync-3), not the inline settle-fully executor.
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // The mutual-exclusion contract: drive_once holds doc_mu across its WHOLE iteration and only
+  // then advances `iterations` (canvas_host.cpp), so that counter can move ONLY while the render
+  // thread holds doc_mu. Inside an apply_edit closure the UI thread holds that SAME doc_mu, so a
+  // concurrent drive_once cannot run and the counter must stay frozen — the edit body and the
+  // render read never overlap (an "inside-critical-section" count that never exceeds 1). We poke
+  // the loop from INSIDE the closure so a render drive is actively contending for doc_mu during
+  // the hold: with the lock it parks (counter frozen); with a broken lock it would drive and
+  // advance the counter, failing the CHECK — a genuine regression guard, not a tautology.
+  for (int round = 0; round < 8; ++round) {
+    std::uint64_t iters_start = 0;
+    host.apply_edit([&] {
+      damage(*probe.document, probe.composition); // a real d_contents mutation (the raced write)
+      host.poke(); // wake the render thread so it attempts drive_once WHILE we hold doc_mu
+      iters_start = host.iterations();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      // The poked drive_once is parked on doc_mu (we hold it); it advanced nothing.
+      CHECK(host.iterations() == iters_start);
+    });
+    // Released: the render thread now acquires doc_mu, reads the mutated document, and advances —
+    // proving it really was blocked (alive), so the frozen-counter check above was non-vacuous.
+    REQUIRE(pump_until([&] { return host.iterations() > iters_start; }));
+  }
+
+  host.stop();
+  handle->join();
+  CHECK(host.published_sequence("canvas#1") >= 2);
+}
+
+TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the render read "
+          "(edit_render_sync TSan anchor)") {
+  ProbeDocument probe = build_probe_document();
+  // D-edit_render_sync-3, the acceptance anchor. Real interactive pool (worker threads) + a
+  // bounded budget + a spawned render thread looping drive_once -> for_each_content, so the read
+  // of the writer-owned d_contents genuinely overlaps the UI-thread writes in wall-clock time
+  // (the interleaving CI contention hit). The UI thread streams many edits — each a d_contents
+  // mutation (add_content/add_layer/attach_layer, an implicit transact) — through apply_edit, so
+  // every write lands inside doc_mu, mutually excluded with the read.
+  //
+  // Regression-guard note (NOT a tautology): the SAME interleaving WITHOUT apply_edit — mutating
+  // *probe.document directly and only poke()-ing — is exactly the pre-fix shell.cpp path TSan
+  // flagged on d_contents (the debt this leaf closes). Routing through apply_edit is what makes
+  // it clean; drop the routing and TSan re-reports the race on d_contents.
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // Stream the edits: many rounds so TSan gets a wide overlap window against the looping read.
+  constexpr int k_edits = 64;
+  for (int i = 0; i < k_edits; ++i) {
+    host.apply_edit([&] { damage(*probe.document, probe.composition); });
+  }
+  // Both live readers converge on the streamed revisions off-thread — the fan-out reached them.
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  // Clean stop -> join; entries tear down before the shared pool (Constraint 5).
+  host.stop();
+  handle->join();
+}
+
 // --- editor.canvas.nav: the per-entry camera channel + deep-zoom observability ------
 
 namespace {
