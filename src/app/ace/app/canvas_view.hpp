@@ -4,6 +4,7 @@
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 
+#include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 
 #include <cstddef>
@@ -11,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +20,10 @@
 namespace ace::commands {
 class AppState;
 } // namespace ace::commands
+
+namespace ace::scene {
+struct Camera;
+} // namespace ace::scene
 
 namespace ace::app {
 
@@ -79,6 +85,14 @@ public:
   // proves the off-thread re-render reached that entry's double-buffer).
   std::uint64_t frames_issued(std::string_view view_id) const;
 
+  // The per-canvas active-camera selection for `view_id` (editor.cameras.look_through,
+  // D-look_through-1): `nullopt` = the free viewport camera (default); a shot's `ObjectId`
+  // = look through that shot. Session state, never a transaction (D15/D-model-3). The
+  // Overview's per-camera "look through" button (editor.panels.overview, D-look_through-5)
+  // and the e2e both drive this. An unknown id is a no-op / reports nullopt.
+  void set_look_through(std::string_view view_id, std::optional<arbc::ObjectId> shot);
+  std::optional<arbc::ObjectId> look_through(std::string_view view_id) const;
+
   // The deep-zoom anchor-path depth for `view_id` (0 for an unknown id / in-band): the
   // rebasing observability signal (D-nav-5), surfaced for the e2e to prove wheel-zoom
   // engaged the library's re-anchoring.
@@ -108,7 +122,19 @@ private:
     int tex_height = 0;
     arbc::Affine camera = arbc::Affine::identity(); // the transient viewport camera
     double scale_bar_units = 0.0;                   // last scale-bar length (composition units)
+    // The active-camera selection (editor.cameras.look_through, D-look_through-1): nullopt =
+    // free viewport, an ObjectId = look through that shot. UI-thread-only session state.
+    std::optional<arbc::ObjectId> look_through;
+    // The camera last submitted through host_.request_camera. While a shot is selected the
+    // submitted camera is the shot's (not `camera`, which is left at its free value —
+    // D-look_through-6), so the two diverge; this dedups the per-frame submit across both.
+    arbc::Affine submitted = arbc::Affine::identity();
   };
+
+  // Draw THIS canvas's camera picker (Viewport | shots from scene::cameras) as a compact
+  // overlay at the pane's top-left, setting `p.look_through` on a click (D-look_through-5).
+  void draw_camera_picker(std::string_view view_id, Presenter& p,
+                          const std::vector<scene::Camera>& cameras);
 
   commands::AppState& state_;
   render::CanvasHost host_;

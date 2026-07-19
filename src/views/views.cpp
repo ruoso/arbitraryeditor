@@ -53,7 +53,11 @@ CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height)
   // Overlay an InvisibleButton over the SAME rect: an ImGui::Image is inert (no id, no
   // interaction), so the pane cannot otherwise capture a drag or report hover. Rewind the
   // cursor to the image origin, then place the button covering the image (D-nav-3).
+  // AllowOverlap lets the app draw chrome ON TOP of the pane (the look-through camera
+  // picker, editor.cameras.look_through) and have it stay clickable — where no later item
+  // overlaps, the button behaves exactly as before, so nav gestures are unaffected.
   ImGui::SetCursorScreenPos(origin);
+  ImGui::SetNextItemAllowOverlap();
   ImGui::InvisibleButton("##canvas_nav",
                          ImVec2(static_cast<float>(width), static_cast<float>(height)),
                          ImGuiButtonFlags_MouseButtonLeft);
@@ -75,6 +79,29 @@ CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height)
     in.pan_dy = io.MouseDelta.y;
   }
   return in;
+}
+
+void draw_letterboxed(unsigned int texture, int tex_width, int tex_height, int pane_width,
+                      int pane_height) {
+  if (pane_width <= 0 || pane_height <= 0 || tex_width <= 0 || tex_height <= 0) {
+    return; // nothing to present
+  }
+  // A look-through canvas renders the shot's EXACT crop (the texture is already sized to
+  // the shot's pane-fit resolution, so surrounding composition never bleeds in). Fill the
+  // whole pane with neutral bars, then centre the crop over them — clean letterbox margins,
+  // not the surrounding scene (D-look_through-2/3).
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  const ImVec2 far(origin.x + static_cast<float>(pane_width),
+                   origin.y + static_cast<float>(pane_height));
+  draw_list->AddRectFilled(origin, far, IM_COL32(0, 0, 0, 255));
+  const float off_x = (static_cast<float>(pane_width) - static_cast<float>(tex_width)) * 0.5F;
+  const float off_y = (static_cast<float>(pane_height) - static_cast<float>(tex_height)) * 0.5F;
+  ImGui::SetCursorScreenPos(ImVec2(origin.x + off_x, origin.y + off_y));
+  draw_probe_image(texture, tex_width, tex_height);
+  // Leave the cursor at the pane origin so the caller's overlay chrome (the picker) lands
+  // at a predictable top-left, independent of the centred image position.
+  ImGui::SetCursorScreenPos(origin);
 }
 
 void draw_scale_bar(double units, double device_px) {

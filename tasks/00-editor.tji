@@ -254,8 +254,9 @@ task editor "Editor — host GUI over libarbc" {
     task look_through "Activate a shot; multi-canvas look-through" {
       effort 1.5d
       allocate team
+      complete 100
       depends !model, editor.canvas.multi_canvas
-      note "Make a shot the active camera of a canvas ('look through Hero'); a second canvas can look through a shot for a live export preview beside the editing Viewport. Design: D18. Refinement: tasks/refinements/look_through.md"
+      note "Make a shot the active camera of a canvas ('look through Hero'); a second canvas can look through a shot for a live export preview beside the editing Viewport. Design: D18. Refinement: tasks/refinements/editor/look_through.md"
     }
     task export "Export via cameras (render_offline); PNG; batch; contact sheet" {
       effort 3d

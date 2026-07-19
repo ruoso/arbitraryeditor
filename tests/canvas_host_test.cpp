@@ -9,10 +9,12 @@
 // to the offline reference + the committed golden. The final case drives the REAL shared
 // WorkerPool (worker threads) through the full add->render->edit->remove->teardown
 // lifecycle on a spawned render thread — the escalated ASan/TSan concurrency target.
+#include <ace/interact/interact.hpp>
 #include <ace/platform/threads.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
+#include <ace/scene/camera.hpp>
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
@@ -809,6 +811,77 @@ TEST_CASE("canvas_host: the empty binding leaves a deferred external nested chil
   std::uint64_t s = 0;
   Srgb8Image frame;
   CHECK_FALSE(host.consume("canvas#1", s, frame)); // nothing was ever published
+}
+
+// --- editor.cameras.look_through: a look-through canvas is data-race-clean ---------------
+//
+// The threading acceptance (docs §9 ASan/TSan lane): two entries over one document, canvas#2
+// looking through a shot. The UI thread streams cameras.manip-style frame edits to that shot
+// through apply_edit (doc_mu) while, each iteration, re-reading scene::cameras(doc) via the
+// lock-free pin() snapshot, re-deriving the look-through viewport, and submitting the settled
+// request_resize + request_camera channels — the exact per-frame path draw_content walks. This
+// leaf adds NO new shared mutable state (the selection is UI-thread-only), so the per-frame
+// pin() derivation and the settled channels must coexist race-free with the concurrent writer
+// under the existing doc_mu discipline (D-look_through-7). Residual Mesa leaks via lsan.supp.
+
+TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against the render read "
+          "(look_through TSan anchor)") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  auto doc = build_raster_doc(); // a bounded raster square over a solid bg (a root composition)
+  // Seed the shot in the root composition on THIS (writer) thread, before the render loop.
+  const arbc::ObjectId cam_id = ace::scene::add_camera(
+      *doc, registry, "hero", ace::scene::Resolution{32, 32}, arbc::Affine::translation(8.0, 8.0));
+  REQUIRE(cam_id.valid());
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *doc, &registry); // free
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *doc, &registry); // looks through the shot (submitted in the loop)
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // Stream frame edits to the shot; each round re-derives + re-submits canvas#2's look-through.
+  constexpr int k_iters = 48;
+  for (int i = 0; i < k_iters; ++i) {
+    // A cameras.manip-style frame edit through apply_edit (doc_mu, mutually excluded with the
+    // render read): nudge the shot's binding-layer transform.
+    host.apply_edit([&] {
+      const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
+      if (!cams.empty()) {
+        doc->set_layer_transform(cams.front().layer, arbc::Affine::translation(
+                                                         8.0 + static_cast<double>(i) * 0.25, 8.0));
+      }
+    });
+    // The per-frame look-through resolve: a lock-free pin() read (NO doc_mu), then the settled
+    // resize + camera submit. A vanished shot would fall back to the pane (fail-safe).
+    const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
+    if (!cams.empty()) {
+      const ace::interact::LookThrough lt =
+          ace::interact::look_through(cams.front().frame, cams.front().resolution.width,
+                                      cams.front().resolution.height, k_w, k_h);
+      if (lt.out_w > 0 && lt.out_h > 0) {
+        host.request_resize("canvas#2", lt.out_w, lt.out_h);
+        host.request_camera("canvas#2", lt.camera);
+      }
+    }
+  }
+
+  // Both live entries converge on the streamed revisions off-thread — clean under the sanitizers.
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
 }
 
 TEST_CASE("canvas_host: a ref-free document renders byte-identically through the wired and empty "

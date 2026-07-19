@@ -79,4 +79,40 @@ ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_
   return shot;
 }
 
+arbc::Affine viewport_camera_for_shot(const arbc::Affine& frame, int native_w, int native_h,
+                                      int out_w, int out_h) {
+  if (native_w <= 0 || native_h <= 0 || out_w <= 0 || out_h <= 0) {
+    return arbc::Affine::identity(); // degenerate resolution: a safe no-op (no div-by-zero)
+  }
+  // `frame` maps device -> composition; its inverse is the comp -> device camera at the
+  // shot's NATIVE resolution (the round-trip of new_shot_from_view). A non-invertible
+  // frame has no render camera to derive.
+  const std::optional<arbc::Affine> native = frame.inverse();
+  if (!native) {
+    return arbc::Affine::identity();
+  }
+  // Post-scale the native camera in device space by out/native: the SAME framed region
+  // maps into [0,out_w]x[0,out_h] (device coords scale by k, the composition framing is
+  // preserved), so the shot renders identically framed at any output resolution.
+  const double kx = static_cast<double>(out_w) / static_cast<double>(native_w);
+  const double ky = static_cast<double>(out_h) / static_cast<double>(native_h);
+  return compose(arbc::Affine::scaling(kx, ky), *native);
+}
+
+LookThrough look_through(const arbc::Affine& frame, int shot_w, int shot_h, int pane_w,
+                         int pane_h) {
+  LookThrough lt;
+  if (shot_w <= 0 || shot_h <= 0 || pane_w <= 0 || pane_h <= 0) {
+    return lt; // degenerate: a zero-size no-op (the caller falls back to the free viewport)
+  }
+  // Fit the shot's aspect into the pane (letterbox): the constraining axis touches the
+  // pane edge, the other is inset. Floor to an integer device size, clamped to >= 1.
+  const double scale = std::min(static_cast<double>(pane_w) / static_cast<double>(shot_w),
+                                static_cast<double>(pane_h) / static_cast<double>(shot_h));
+  lt.out_w = std::max(1, static_cast<int>(static_cast<double>(shot_w) * scale));
+  lt.out_h = std::max(1, static_cast<int>(static_cast<double>(shot_h) * scale));
+  lt.camera = viewport_camera_for_shot(frame, shot_w, shot_h, lt.out_w, lt.out_h);
+  return lt;
+}
+
 } // namespace ace::interact

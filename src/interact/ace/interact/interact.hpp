@@ -76,4 +76,35 @@ struct ShotFraming {
 // `editor.cameras.export`'s, deliberately out of scope here.
 ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_h);
 
+// --- Look through a shot (editor.cameras.look_through; D2/D9/D18) --------------
+
+// The inverse of `new_shot_from_view` (D-look_through-4): given a shot's FRAME
+// (device -> composition, the binding layer's `Affine`) and its NATIVE output
+// resolution, the comp -> device render camera that renders the shot's exact crop at
+// an arbitrary `(out_w, out_h)`. It is `frame.inverse()` (the comp -> device camera at
+// the shot's own resolution — the round-trip of `new_shot_from_view`,
+// `interact.hpp:71-73`) post-scaled by `out/native` in device space, so the SAME
+// framed composition region fills the output at any resolution: at `out == native` it
+// reproduces the viewport camera the shot was minted from; at `out == k*native` it is
+// that native camera scaled by `k` (the pane-fit preview and export's D14 N x
+// multiplier, Constraint 4). A non-positive native/out resolution or a non-invertible
+// frame yields identity — a safe no-op, never a div-by-zero. `editor.cameras.export`
+// reuses this verbatim (the sibling leaf simply consumes it).
+arbc::Affine viewport_camera_for_shot(const arbc::Affine& frame, int native_w, int native_h,
+                                      int out_w, int out_h);
+
+// The pane-fit "look through" wrapper (D-look_through-3): the output size + comp ->
+// device camera to preview shot `frame` / `(shot_w, shot_h)` inside a `pane_w`x`pane_h`
+// canvas — the shot's aspect scaled to fit the pane (the letterbox dimensions), NOT the
+// shot's full export resolution. `camera == viewport_camera_for_shot(frame, shot_w,
+// shot_h, out_w, out_h)`, so the preview is byte-convergent to `render_offline` through
+// the shot. A non-positive shot/pane resolution yields a zero-size, identity-camera
+// no-op (the caller falls back to the free viewport).
+struct LookThrough {
+  int out_w = 0;
+  int out_h = 0;
+  arbc::Affine camera = arbc::Affine::identity();
+};
+LookThrough look_through(const arbc::Affine& frame, int shot_w, int shot_h, int pane_w, int pane_h);
+
 } // namespace ace::interact

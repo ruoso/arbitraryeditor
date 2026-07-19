@@ -61,6 +61,15 @@ struct CanvasInput {
 // Draws into the CURRENT window (the dockspace owns Begin/End).
 CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height);
 
+// Present a look-through shot crop letterboxed into the pane (editor.cameras.look_through,
+// D-look_through-2/3): fills the `pane_width`x`pane_height` window with neutral bars and
+// centres the `tex_width`x`tex_height` shot texture (already the shot's pane-fit crop) over
+// them, so the letterbox margins are clean bars — never surrounding composition. Leaves the
+// cursor at the pane origin so the caller can overlay chrome (the camera picker) predictably.
+// Draws into the CURRENT window (the dockspace owns Begin/End).
+void draw_letterboxed(unsigned int texture, int tex_width, int tex_height, int pane_width,
+                      int pane_height);
+
 // The composition-units scale-bar overlay (D2 §3 / D-nav-6): a bar `device_px`
 // wide labelled with its `units` composition-unit length, pinned bottom-left of the
 // CURRENT window — never a "%". A zero/degenerate bar draws nothing. The nice-number
