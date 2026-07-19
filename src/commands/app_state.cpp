@@ -1,5 +1,6 @@
 #include <ace/commands/app_state.hpp>
 #include <ace/commands/exec_new.hpp>
+#include <ace/scene/camera.hpp>
 
 #include <arbc/builtin_kinds.hpp>
 #include <arbc/model/journal.hpp>
@@ -17,6 +18,12 @@ AppState::AppState(project::OpenedProject opened)
   // The persistent, lifetime-scoped kind Registry (D-open-7): seeded once here,
   // not rebuilt per open. `save`/export and the future A6 plugin seam reuse it.
   arbc::register_builtin_kinds(registry_);
+  // The editor's first custom kind (editor.cameras.model A14): register
+  // `org.arbc.camera`'s factory + codec beside the built-ins so the generic snapshot
+  // save (`project::save_project(state.registry())`) serializes persisted shot
+  // cameras — the registration wired at a level that already sees `scene`, with no
+  // `project->scene` edge (Constraint 1).
+  scene::register_camera_kind(registry_);
   // The dirty baseline (D-save-4): a session rebuilt from the canonical `project.arbc`
   // starts CLEAN (the workspace was just built from the snapshot); a fresh
   // `create_project` or a workspace-mapped open starts DIRTY (`saved_revision_`

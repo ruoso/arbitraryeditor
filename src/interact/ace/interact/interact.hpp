@@ -53,4 +53,27 @@ ScaleBar scale_bar(const arbc::Affine& camera, double target_px);
 // identity (nothing to fit).
 arbc::Affine fit(double content_w, double content_h, double pane_w, double pane_h);
 
+// --- New shot from view (editor.cameras.model; D2 §"new shot from view") ------
+
+// The (frame placement, output resolution) a "new shot from view" mints from the
+// transient viewport framing (Constraint 6). The frame is a composition-space `Affine`
+// — the placement of the shot's output rectangle, the same shape a cell's layer
+// transform takes (D7) — and the resolution is device pixels (D9: frame != resolution).
+struct ShotFraming {
+  arbc::Affine frame; // composition-space placement of the output frame (device -> comp)
+  int width = 0;
+  int height = 0;
+};
+
+// Snapshot the transient viewport framing into a shot camera's (frame, resolution),
+// keeping the operation pure L1 (Constraint 6). The viewport `camera` maps composition
+// units -> device pixels over a `pane_w`x`pane_h` on-screen canvas (`Presenter::camera`,
+// D-nav-1); the shot reproduces that framing as its FRAME = the inverse camera
+// (device -> composition, so rendering the shot at its own resolution reproduces the
+// view) and its RESOLUTION = the pane size. A degenerate (non-invertible) camera or a
+// non-positive pane yields an identity frame (nothing to promote). The inverse
+// render-through-camera derivation (frame+resolution -> `arbc::Viewport`) is
+// `editor.cameras.export`'s, deliberately out of scope here.
+ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_h);
+
 } // namespace ace::interact

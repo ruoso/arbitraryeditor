@@ -226,9 +226,10 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/save_as_test.cpp tests/undo_test.cpp
                          tests/project_gc_test.cpp tests/canvas_view_test.cpp
                          tests/canvas_driver_test.cpp tests/canvas_host_test.cpp
-                         tests/composition_bounds_test.cpp)
+                         tests/composition_bounds_test.cpp
+                         tests/camera_model_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
-                                        ace::dockmodel ace::commands arbc::arbc
+                                        ace::dockmodel ace::commands ace::scene arbc::arbc
                                         Catch2::Catch2WithMain)
 # The render_offline golden compares against raw sRGB8 bytes under tests/goldens
 # (D-render_probe-6); the byte-compare helper resolves them by absolute path.

@@ -3,8 +3,10 @@
 #include <ace/platform/filesystem.hpp>
 
 #include <arbc/base/ids.hpp>
+#include <arbc/contract/registry.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge
 
 #include <filesystem>
 #include <memory>
@@ -82,6 +84,16 @@ struct ProjectLayout {
 
 // Resolve the canonical bundle paths for a project rooted at `root` (no I/O).
 ProjectLayout project_layout(const std::filesystem::path& root);
+
+// Seed `bridge` so it resolves EVERY registered kind's `ContentRecord.kind` token,
+// not just the built-in leaf kinds `arbc::KindBridge()` pre-interns
+// (editor.cameras.model A14). Interns each id in `registry.ids()` order with its
+// metadata version; built-in ids intern idempotently (their pre-interned tokens are
+// unchanged, so a solid/probe document is byte-identical). Shared by
+// `save_project`'s writer-thread capture and by a custom-kind author
+// (`scene::add_camera`) so the token stored on a fresh content matches the token the
+// save-side bridge — seeded from the SAME registry, in the SAME order — resolves.
+void seed_kind_bridge(arbc::KindBridge& bridge, const arbc::Registry& registry);
 
 // The `.gitignore` body a project scaffold writes at its root: the machine-local
 // `workspace/` scratch is rebuilt from the canonical core and excluded from

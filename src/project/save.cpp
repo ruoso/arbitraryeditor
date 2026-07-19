@@ -105,10 +105,15 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
 
   // A transient `KindBridge`, symmetric with the load path (D-save-3): the built-in
   // registry makes the token<->kind mapping deterministic, so a fresh bridge
-  // resolves the document's tokens identically to the load that reads it back. The
-  // `CodecTable` is built off the caller's persistent registry (D-app_state-2) —
-  // correct for every kind the editor can represent today (solid/probe).
+  // resolves the document's tokens identically to the load that reads it back.
+  // `KindBridge()` pre-interns only the built-in leaf kinds, so seed it from the
+  // registry too — interning every registered kind id in `ids()` order gives a
+  // custom editor kind (`org.arbc.camera`, editor.cameras.model A14) a token this
+  // fresh bridge resolves, matching the token the author stored via the SAME
+  // registry-seeded ordering. Built-in ids intern idempotently (their pre-interned
+  // tokens are unchanged), so this is byte-identical for a solid/probe document.
   arbc::KindBridge bridge;
+  seed_kind_bridge(bridge, registry);
   const arbc::CodecTable codecs = arbc::builtin_codecs(registry);
 
   // Owned bytes route to `assets/` through the content-addressed sink; the base URI

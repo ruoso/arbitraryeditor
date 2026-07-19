@@ -237,14 +237,54 @@ TEST_CASE(
     }
   };
 
+  // The seeded solid's expected on-screen colour (within a tolerance for software-GL
+  // variance), distinct from the shell clear colour (0.10,0.10,0.12).
+  const ace::render::Srgb8Image expected =
+      ace::render::render_probe_srgb8(ace::project::k_probe_width, ace::project::k_probe_height);
+  REQUIRE(expected.pixels.size() >= 4);
+  const int er = expected.pixels[0];
+  const int eg = expected.pixels[1];
+  const int eb = expected.pixels[2];
+  const int k_tol = 12;
+  auto probe_visible = [&]() {
+    for (std::size_t i = 0; i + 3 < last_frame.size(); i += 4) {
+      if (std::abs(static_cast<int>(last_frame[i]) - er) <= k_tol &&
+          std::abs(static_cast<int>(last_frame[i + 1]) - eg) <= k_tol &&
+          std::abs(static_cast<int>(last_frame[i + 2]) - eb) <= k_tol) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   const int k_max_frames = 200000;
   int frames = 0;
-  while (!ImGuiTestEngine_IsTestQueueEmpty(engine) && frames < k_max_frames) {
+  bool found = false;
+  // Drive frames until the test queue drains AND the composited probe colour has actually
+  // reached the framebuffer (or a generous wall-clock deadline). The off-thread compositor
+  // renders under a BOUNDED per-frame budget over a shared WorkerPool, so its FIRST
+  // published frame can be blank (the tile is still resolving) and the fully-composited
+  // frame arrives some frames later. Under a sanitizer build the composite can take longer
+  // than any fixed frames_issued-quiet window, so gate the capture on the CONTENT reaching
+  // the screen — not on a frame-quiet heuristic that can settle on the blank first frame
+  // (docs/01-architecture.md §9, the UI↔driver-handoff ASan/TSan lane).
+  const auto capture_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (frames < k_max_frames &&
+         (!ImGuiTestEngine_IsTestQueueEmpty(engine) ||
+          (!found && std::chrono::steady_clock::now() < capture_deadline))) {
     shell.new_frame();
     shell.draw_ui();
     shell.render(grab_frame);
     ImGuiTestEngine_PostSwap(engine);
     ++frames;
+    if (!found) {
+      found = probe_visible();
+    }
+    // Once the test itself has finished, hand the render thread CPU between polls so its
+    // off-thread compositor can settle (the busy no-throttle loop would otherwise starve it).
+    if (ImGuiTestEngine_IsTestQueueEmpty(engine) && !found) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
   }
 
   int count_tested = 0, count_success = 0;
@@ -259,24 +299,7 @@ TEST_CASE(
   CHECK(count_success == 1);
 
   // The live render reached the screen: some captured pixel matches the seeded solid
-  // sRGB8 colour (within a tolerance for software-GL variance), distinct from the
-  // shell clear colour (0.10,0.10,0.12) — proof the canvas shows the render.
-  const ace::render::Srgb8Image expected =
-      ace::render::render_probe_srgb8(ace::project::k_probe_width, ace::project::k_probe_height);
-  REQUIRE(expected.pixels.size() >= 4);
-  const int er = expected.pixels[0];
-  const int eg = expected.pixels[1];
-  const int eb = expected.pixels[2];
-  const int k_tol = 12;
-  bool found = false;
-  for (std::size_t i = 0; i + 3 < last_frame.size(); i += 4) {
-    if (std::abs(static_cast<int>(last_frame[i]) - er) <= k_tol &&
-        std::abs(static_cast<int>(last_frame[i + 1]) - eg) <= k_tol &&
-        std::abs(static_cast<int>(last_frame[i + 2]) - eb) <= k_tol) {
-      found = true;
-      break;
-    }
-  }
+  // colour — proof the canvas shows the render.
   CHECK(found);
 
   // Teardown: destroy the ImGui context (inside shell.shutdown()) before the engine,

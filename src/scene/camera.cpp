@@ -1,0 +1,468 @@
+#include <ace/project/project.hpp> // project::seed_kind_bridge
+#include <ace/scene/camera.hpp>
+
+#include <arbc/base/expected.hpp>
+#include <arbc/base/time.hpp> // arbc::TimeRange
+#include <arbc/contract/registry.hpp>
+#include <arbc/model/model.hpp>   // DocRoot readers + Model::Transaction
+#include <arbc/model/records.hpp> // LayerRecord
+#include <arbc/runtime/document.hpp>
+#include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge
+
+#include <cctype>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ace::scene {
+
+// ---------------------------------------------------------------------------
+// CameraContent — the non-rendering org.arbc.camera Content (A14, D-model-1).
+// ---------------------------------------------------------------------------
+
+CameraContent::CameraContent(std::string name, Resolution resolution)
+    : d_name(std::move(name)), d_resolution(resolution) {}
+
+std::optional<arbc::Rect> CameraContent::bounds() const {
+  // An EMPTY rect: the compositor culls the layer before it ever calls `render`, so a
+  // camera contributes zero pixels (Constraint 5). Not `nullopt` — that would be
+  // UNBOUNDED (paints everywhere), the opposite of what a non-rendering kind wants.
+  return arbc::Rect{0.0, 0.0, 0.0, 0.0};
+}
+
+arbc::Stability CameraContent::stability() const { return arbc::Stability::Static; }
+
+std::optional<arbc::TimeRange> CameraContent::time_extent() const { return std::nullopt; }
+
+std::optional<arbc::RenderResult>
+CameraContent::render(const arbc::RenderRequest& request,
+                      std::shared_ptr<arbc::RenderCompletion> /*done*/) {
+  // Never reached in practice (the empty `bounds()` culls the layer), but a valid
+  // inline settlement that writes NO pixels keeps the invariant even if a caller
+  // renders it directly: the target is left untouched.
+  return arbc::RenderResult{request.scale, true};
+}
+
+// ---------------------------------------------------------------------------
+// Codec params grammar: a flat JSON object `{"name":<string>,"width":<int>,
+// "height":<int>}`. Hand-rolled (no JSON library in `scene`'s link surface): the
+// core re-parses + canonicalizes whatever `serialize` emits, so this only needs to
+// emit valid JSON and parse the canonical form back (D-model-2, Route A KindCodec).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Append `text` to `out` as a JSON string literal (RFC 8259 escaping).
+void append_json_string(std::string& out, std::string_view text) {
+  out.push_back('"');
+  for (const char ch : text) {
+    switch (ch) {
+    case '"':
+      out += "\\\"";
+      break;
+    case '\\':
+      out += "\\\\";
+      break;
+    case '\b':
+      out += "\\b";
+      break;
+    case '\f':
+      out += "\\f";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      if (static_cast<unsigned char>(ch) < 0x20) {
+        static const char* k_hex = "0123456789abcdef";
+        out += "\\u00";
+        out.push_back(k_hex[(static_cast<unsigned char>(ch) >> 4) & 0xF]);
+        out.push_back(k_hex[static_cast<unsigned char>(ch) & 0xF]);
+      } else {
+        out.push_back(ch);
+      }
+    }
+  }
+  out.push_back('"');
+}
+
+// A minimal JSON cursor over a flat `{string: string|number}` object — enough for the
+// camera params. Errors are values (a bool return); no exceptions cross the codec.
+struct JsonCursor {
+  std::string_view text;
+  std::size_t pos = 0;
+
+  void skip_ws() {
+    while (pos < text.size() &&
+           (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' || text[pos] == '\r')) {
+      ++pos;
+    }
+  }
+  bool consume(char expected) {
+    skip_ws();
+    if (pos < text.size() && text[pos] == expected) {
+      ++pos;
+      return true;
+    }
+    return false;
+  }
+  bool peek(char expected) {
+    skip_ws();
+    return pos < text.size() && text[pos] == expected;
+  }
+
+  // Parse a JSON string literal into `out` (unescaping). Assumes the opening quote is
+  // the next non-ws char.
+  bool parse_string(std::string& out) {
+    if (!consume('"')) {
+      return false;
+    }
+    out.clear();
+    while (pos < text.size()) {
+      const char ch = text[pos++];
+      if (ch == '"') {
+        return true;
+      }
+      if (ch == '\\') {
+        if (pos >= text.size()) {
+          return false;
+        }
+        const char esc = text[pos++];
+        switch (esc) {
+        case '"':
+          out.push_back('"');
+          break;
+        case '\\':
+          out.push_back('\\');
+          break;
+        case '/':
+          out.push_back('/');
+          break;
+        case 'b':
+          out.push_back('\b');
+          break;
+        case 'f':
+          out.push_back('\f');
+          break;
+        case 'n':
+          out.push_back('\n');
+          break;
+        case 'r':
+          out.push_back('\r');
+          break;
+        case 't':
+          out.push_back('\t');
+          break;
+        case 'u': {
+          if (pos + 4 > text.size()) {
+            return false;
+          }
+          unsigned code = 0;
+          for (int i = 0; i < 4; ++i) {
+            const char hx = text[pos++];
+            code <<= 4;
+            if (hx >= '0' && hx <= '9') {
+              code |= static_cast<unsigned>(hx - '0');
+            } else if (hx >= 'a' && hx <= 'f') {
+              code |= static_cast<unsigned>(hx - 'a' + 10);
+            } else if (hx >= 'A' && hx <= 'F') {
+              code |= static_cast<unsigned>(hx - 'A' + 10);
+            } else {
+              return false;
+            }
+          }
+          // Encode the (BMP) code point as UTF-8 — the camera name round-trips bytes.
+          if (code < 0x80) {
+            out.push_back(static_cast<char>(code));
+          } else if (code < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (code >> 6)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+          } else {
+            out.push_back(static_cast<char>(0xE0 | (code >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+          }
+          break;
+        }
+        default:
+          return false;
+        }
+      } else {
+        out.push_back(ch);
+      }
+    }
+    return false; // unterminated
+  }
+
+  // Parse a non-negative integer literal into `out`.
+  bool parse_int(int& out) {
+    skip_ws();
+    const std::size_t start = pos;
+    while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+      ++pos;
+    }
+    if (pos == start) {
+      return false;
+    }
+    long value = 0;
+    for (std::size_t i = start; i < pos; ++i) {
+      value = value * 10 + (text[i] - '0');
+      if (value > 1'000'000'000L) { // guard: resolutions are device-pixel sized
+        return false;
+      }
+    }
+    out = static_cast<int>(value);
+    return true;
+  }
+};
+
+// Parse the canonical params object into (name, resolution). Returns false on any
+// malformed input — the codec surfaces that as an error value, never a throw.
+bool parse_camera_params(std::string_view params_text, std::string& name, Resolution& resolution) {
+  bool have_name = false;
+  bool have_width = false;
+  bool have_height = false;
+  JsonCursor cur{params_text, 0};
+  if (!cur.consume('{')) {
+    return false;
+  }
+  if (cur.peek('}')) { // empty object is not a valid camera
+    return false;
+  }
+  while (true) {
+    std::string key;
+    if (!cur.parse_string(key)) {
+      return false;
+    }
+    if (!cur.consume(':')) {
+      return false;
+    }
+    if (key == "name") {
+      if (!cur.parse_string(name)) {
+        return false;
+      }
+      have_name = true;
+    } else if (key == "width") {
+      if (!cur.parse_int(resolution.width)) {
+        return false;
+      }
+      have_width = true;
+    } else if (key == "height") {
+      if (!cur.parse_int(resolution.height)) {
+        return false;
+      }
+      have_height = true;
+    } else {
+      return false; // unknown field — the camera grammar is closed
+    }
+    if (cur.consume(',')) {
+      continue;
+    }
+    break;
+  }
+  if (!cur.consume('}')) {
+    return false;
+  }
+  return have_name && have_width && have_height;
+}
+
+std::string serialize_camera_params(const CameraContent& camera) {
+  std::string out = "{\"name\":";
+  append_json_string(out, camera.camera_name());
+  out += ",\"width\":";
+  out += std::to_string(camera.resolution().width);
+  out += ",\"height\":";
+  out += std::to_string(camera.resolution().height);
+  out.push_back('}');
+  return out;
+}
+
+} // namespace
+
+void register_camera_kind(arbc::Registry& registry) {
+  arbc::KindCodec codec;
+  codec.kind_version = CameraContent::kind_version;
+  codec.serialize = [](const arbc::Content& content) -> arbc::expected<std::string, std::string> {
+    const auto* camera = dynamic_cast<const CameraContent*>(&content);
+    if (camera == nullptr) {
+      return arbc::unexpected<std::string>("org.arbc.camera: content is not a CameraContent");
+    }
+    return serialize_camera_params(*camera);
+  };
+  codec.deserialize = [](std::string_view params_text, std::span<const arbc::ContentRef> /*inputs*/,
+                         arbc::ObjectId /*composition*/)
+      -> arbc::expected<std::unique_ptr<arbc::Content>, std::string> {
+    std::string name;
+    Resolution resolution;
+    if (!parse_camera_params(params_text, name, resolution)) {
+      return arbc::unexpected<std::string>("org.arbc.camera: malformed params");
+    }
+    return std::unique_ptr<arbc::Content>(
+        std::make_unique<CameraContent>(std::move(name), resolution));
+  };
+
+  // Factory: the plugin-present witness `builtin_codecs(registry)` keys off. The camera
+  // is authored through `add_camera`, never a `ContentConfig` string, so the factory is
+  // a benign default-construct (config ignored) — enough to mark the kind registered.
+  arbc::ContentFactory factory = [](arbc::ContentConfig /*config*/)
+      -> arbc::expected<std::unique_ptr<arbc::Content>, std::string> {
+    return std::unique_ptr<arbc::Content>(std::make_unique<CameraContent>("", Resolution{}));
+  };
+
+  // First-wins (like `register_builtin_kinds`): a duplicate id is designed idempotency,
+  // not an error — a session that registers the kind twice keeps the first.
+  (void)registry.add(CameraContent::kind_id, std::move(factory),
+                     arbc::KindMetadata{"Camera", CameraContent::kind_version}, std::move(codec));
+}
+
+namespace {
+
+// The `ContentRecord.kind` token for `org.arbc.camera`, computed from a bridge seeded
+// identically to `project::save_project`'s (via `project::seed_kind_bridge`) so the
+// token stored on a freshly-created camera matches what the save-side bridge resolves
+// back to the kind string (D-model-2). `registry` must have `register_camera_kind`
+// applied (else the token is a meaningless post-builtin value and the save skips it).
+std::uint64_t camera_token(const arbc::Registry& registry) {
+  arbc::KindBridge bridge;
+  project::seed_kind_bridge(bridge, registry);
+  return bridge.intern(CameraContent::kind_id, CameraContent::kind_version);
+}
+
+// The root (lowest-id) composition, or an invalid id when the document has none — the
+// same root the compositor anchors on (`find_first_composition`, the v0.1 root rule).
+arbc::ObjectId root_composition(const arbc::DocRoot& state) {
+  arbc::ObjectId root_id;
+  const arbc::CompositionRecord* rec = nullptr;
+  if (!state.find_first_composition(root_id, rec) || rec == nullptr) {
+    return arbc::ObjectId{};
+  }
+  return root_id;
+}
+
+} // namespace
+
+std::vector<Camera> cameras(const arbc::Document& document) {
+  std::vector<Camera> result;
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return result;
+  }
+  arbc::ObjectId root_id;
+  const arbc::CompositionRecord* root_rec = nullptr;
+  if (!state->find_first_composition(root_id, root_rec) || root_rec == nullptr) {
+    return result; // no composition — no cameras
+  }
+  // Walk the root composition's layers in bottom-to-top membership order and surface
+  // each one whose content is a CameraContent (Constraint 7). `resolve` reads the
+  // writer-owned content side-map, so this accessor is UI/writer-thread, like
+  // `capture_snapshot`.
+  state->for_each_layer_in(root_id, [&](arbc::ObjectId layer_id) {
+    const arbc::LayerRecord* layer = state->find_layer(layer_id);
+    if (layer == nullptr || !layer->content.valid()) {
+      return;
+    }
+    const auto* camera = dynamic_cast<const CameraContent*>(document.resolve(layer->content));
+    if (camera == nullptr) {
+      return; // a cell (or other kind), not a camera
+    }
+    result.push_back(Camera{layer->content, layer_id, camera->camera_name(), camera->resolution(),
+                            layer->transform});
+  });
+  return result;
+}
+
+arbc::ObjectId add_camera(arbc::Document& document, const arbc::Registry& registry,
+                          const std::string& name, Resolution resolution,
+                          const arbc::Affine& frame) {
+  arbc::ObjectId composition;
+  {
+    const arbc::DocStatePtr state = document.pin();
+    if (!state) {
+      return arbc::ObjectId{};
+    }
+    composition = root_composition(*state);
+  }
+  if (!composition.valid()) {
+    return arbc::ObjectId{}; // no root composition to place the camera in
+  }
+
+  // The content vtable can only be bound through `Document::add_content` (its own
+  // transaction); the frame layer is then attached in one further transaction. Two
+  // journal entries — libarbc exposes no atomic content+layer+attach for a vtable
+  // content — but a single undo detaches the layer (the camera leaves `cameras()`)
+  // and a single redo restores it.
+  const arbc::ObjectId content = document.add_content(
+      std::make_shared<CameraContent>(name, resolution), camera_token(registry));
+  auto txn = document.transact("add_camera");
+  const arbc::ObjectId layer = txn.add_layer(content, frame);
+  txn.attach_layer(composition, layer);
+  txn.commit();
+  return content;
+}
+
+bool rename_camera(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId camera,
+                   const std::string& new_name) {
+  arbc::ObjectId composition;
+  arbc::ObjectId old_layer;
+  std::uint32_t index = 0;
+  Resolution resolution;
+  arbc::Affine frame;
+  {
+    const arbc::DocStatePtr state = document.pin();
+    if (!state) {
+      return false;
+    }
+    composition = root_composition(*state);
+    if (!composition.valid()) {
+      return false;
+    }
+    // Locate the camera's binding layer and its position in the composition's layer
+    // order, and read back the resolution + frame the rename must preserve.
+    bool found = false;
+    std::uint32_t walk = 0;
+    state->for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
+      const arbc::LayerRecord* layer = state->find_layer(layer_id);
+      if (layer != nullptr && layer->content == camera) {
+        const auto* content = dynamic_cast<const CameraContent*>(document.resolve(camera));
+        if (content != nullptr) {
+          old_layer = layer_id;
+          index = walk;
+          resolution = content->resolution();
+          frame = layer->transform;
+          found = true;
+        }
+      }
+      ++walk;
+    });
+    if (!found) {
+      return false;
+    }
+  }
+
+  // Rename = replace the Content+Layer with a freshly-named pair at the SAME order
+  // index (a camera Content's state is immutable and the leaf-kind param has no
+  // in-place transactional edit). The new Content's vtable binds through
+  // `Document::add_content`; the swap (detach + remove old, add + attach new at
+  // `index`) is one further transaction, so order and framing are preserved.
+  const arbc::ObjectId new_content = document.add_content(
+      std::make_shared<CameraContent>(new_name, resolution), camera_token(registry));
+  auto txn = document.transact("rename_camera");
+  txn.detach_layer(composition, old_layer);
+  txn.remove(old_layer);
+  txn.remove(camera);
+  const arbc::ObjectId new_layer = txn.add_layer(new_content, frame);
+  txn.attach_layer(composition, new_layer, index);
+  txn.commit();
+  return true;
+}
+
+} // namespace ace::scene

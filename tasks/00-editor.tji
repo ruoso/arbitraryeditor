@@ -192,6 +192,18 @@ task editor "Editor — host GUI over libarbc" {
       depends !nav
       note "reset-to-fit currently restores identity/fit framing (D-canvas_view-5); wire it to the root composition's authored bounds once a Document composition-bounds accessor is available. The general interact::fit(content,pane) math ships in editor.canvas.nav tested for this future wiring + downstream reuse. Source-of-debt: tasks/refinements/editor/nav.md. Design: docs/00-design.md D2 §3. Refinement: tasks/refinements/editor/fit_bounds.md"
     }
+    task edit_render_sync "Serialize writer-thread Document edits against CanvasHost render reads (TSAN)" {
+      effort 2d
+      allocate team
+      depends !multi_canvas
+      note "Pre-existing TSAN race: render thread's for_each_content (CanvasHost render_frame) reads arbc's writer-thread-owned d_contents while an off-thread damage()/add_content mutates it; no synchronization. Surfaced under container CPU contention in CI. Serialize writer-thread Document edits against the render-read path (arbc dep or CanvasHost edit/render contract). Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/01-architecture.md A4/A5."
+    }
+    task blank_first_frame "Don't advance published frame sequence until first composited non-empty tile" {
+      effort 1d
+      allocate team
+      depends !frame_sync
+      note "CanvasDriver publishes a blank first frame and advances frames_issued for it, making any frame-count-based settle heuristic unsound under sanitizer/container slowdown (the settle fires on the blank frame). Don't advance the published sequence until a frame has composited non-empty tile content. Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/01-architecture.md A5."
+    }
   }
 
   # ---- Cameras (D2/D9/D14) ----
@@ -199,8 +211,21 @@ task editor "Editor — host GUI over libarbc" {
     task model "Viewport + shot cameras in the document; create" {
       effort 2d
       allocate team
+      complete 100
       depends editor.canvas.view
-      note "Cameras are libarbc Viewports persisted as scene objects: the active viewport camera (screen-sized) plus saved shot cameras (own export resolution). Create / name / 'new shot from view'. Design: D2. Refinement: tasks/refinements/camera_model.md"
+      note "Cameras are libarbc Viewports persisted as scene objects: the active viewport camera (screen-sized) plus saved shot cameras (own export resolution). Create / name / 'new shot from view'. Design: D2. Refinement: tasks/refinements/cameras/model.md"
+    }
+    task rename_stable_id "In-place camera rename preserving ObjectId (Editable facet)" {
+      effort 0.5d
+      allocate team
+      depends !model
+      note "rename_camera currently replaces the Content+Layer (new ObjectId), breaking future selection/manip identity for cells.selection/cameras.manip; implement in-place content-state rename via the Editable facet to preserve ObjectId across renames. Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/00-design.md D7."
+    }
+    task reopen_codec "Thread camera-kind registration into open_project (no PlaceholderContent on reopen)" {
+      effort 1d
+      allocate team
+      depends !model
+      note "scene::register_camera_kind is not threaded into project::open_project's rebuild-from-canonical registry; a project reopened from project.arbc degrades cameras to PlaceholderContent. Wire via a registration callback so open_project restores camera kinds with no project->scene edge. Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/01-architecture.md A14."
     }
     task manip "Frame resize (hold resolution), aspect-lock, dutch, resolution inspector" {
       effort 2d

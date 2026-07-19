@@ -16,6 +16,13 @@ namespace ace::project {
 
 const char* name() { return "project"; }
 
+void seed_kind_bridge(arbc::KindBridge& bridge, const arbc::Registry& registry) {
+  for (const std::string_view id : registry.ids()) {
+    const arbc::KindMetadata* metadata = registry.metadata(id);
+    bridge.intern(id, metadata != nullptr ? metadata->version : std::string_view{});
+  }
+}
+
 ProbeDocument build_probe_document() {
   ProbeDocument probe;
   probe.document = std::make_unique<arbc::Document>();

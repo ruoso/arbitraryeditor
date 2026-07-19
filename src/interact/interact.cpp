@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace ace::interact {
 
@@ -59,6 +60,23 @@ arbc::Affine fit(double content_w, double content_h, double pane_w, double pane_
   const double tx = (pane_w - content_w * scale) * 0.5;
   const double ty = (pane_h - content_h * scale) * 0.5;
   return arbc::Affine{scale, 0.0, 0.0, scale, tx, ty};
+}
+
+ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_h) {
+  ShotFraming shot;
+  shot.width = pane_w;
+  shot.height = pane_h;
+  if (pane_w <= 0 || pane_h <= 0) {
+    return shot; // degenerate pane: identity frame, nothing to promote
+  }
+  // The frame is the inverse camera (device -> composition): it places the shot's
+  // output rectangle [0,pane_w]x[0,pane_h] into composition space exactly where the
+  // viewport is looking, so rendering the shot at its own resolution reproduces the
+  // framing. A non-invertible camera (zero scale) has no frame to promote.
+  if (const std::optional<arbc::Affine> inverse = camera.inverse()) {
+    shot.frame = *inverse;
+  }
+  return shot;
 }
 
 } // namespace ace::interact
