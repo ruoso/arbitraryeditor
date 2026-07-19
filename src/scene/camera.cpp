@@ -23,8 +23,107 @@ namespace ace::scene {
 // CameraContent — the non-rendering org.arbc.camera Content (A14, D-model-1).
 // ---------------------------------------------------------------------------
 
-CameraContent::CameraContent(std::string name, Resolution resolution)
-    : d_name(std::move(name)), d_resolution(resolution) {}
+CameraContent::CameraContent(std::string name, Resolution resolution) {
+  // Mint the initial version and adopt it as the live base, so the camera has state
+  // the moment it exists: `Document::add_content` calls `capture()` and records that
+  // handle in the same transaction, giving the first rename a real undo `before`
+  // (document.cpp:99-111). Single-threaded construction — the lock is for uniformity.
+  const std::lock_guard<std::mutex> lock(d_mutex);
+  d_base = arbc::StateHandle{mint_version(std::move(name), resolution)};
+}
+
+arbc::SlotIndex CameraContent::mint_version(std::string name, Resolution resolution) {
+  arbc::SlotIndex slot;
+  if (!d_free.empty()) {
+    slot = d_free.back();
+    d_free.pop_back();
+    d_versions[slot] = Version{std::move(name), resolution, 0};
+  } else {
+    slot = static_cast<arbc::SlotIndex>(d_versions.size());
+    d_versions.push_back(Version{std::move(name), resolution, 0});
+  }
+  return slot;
+}
+
+arbc::StateHandle CameraContent::capture() { return d_base; } // WRITER-THREAD ONLY
+
+void CameraContent::restore(arbc::StateHandle state) {
+  // The undo/redo path (document's `EditableRestoreSink`): adopt the navigated-to
+  // version as the live base. WRITER-THREAD ONLY, so `d_base` needs no lock (only the
+  // payload store is touched cross-thread, by `release` on the drain thread).
+  d_base = state;
+}
+
+std::size_t CameraContent::state_cost(arbc::StateHandle state) const {
+  const std::lock_guard<std::mutex> lock(d_mutex);
+  if (!state.has_state() || state.slot >= d_versions.size()) {
+    return 0;
+  }
+  return d_versions[state.slot].name.size() + sizeof(Resolution);
+}
+
+void CameraContent::retain(arbc::StateHandle state) {
+  if (!state.has_state()) {
+    return;
+  }
+  const std::lock_guard<std::mutex> lock(d_mutex);
+  if (state.slot < d_versions.size()) {
+    ++d_versions[state.slot].refcount;
+  }
+}
+
+void CameraContent::release(arbc::StateHandle state) {
+  // The DRAIN-THREAD half of the contract: a reclaimed record drops its pin. When the
+  // last pin falls the version is unreachable (no live or undo-reachable record names
+  // it), so recycle its slot — the base is always pinned, so it is never reclaimed
+  // while live (mirrors `RasterStore::release_version`).
+  if (!state.has_state()) {
+    return;
+  }
+  const std::lock_guard<std::mutex> lock(d_mutex);
+  if (state.slot >= d_versions.size()) {
+    return;
+  }
+  Version& version = d_versions[state.slot];
+  if (version.refcount == 0) {
+    return; // defensive: never underflow (a release never precedes its retain)
+  }
+  if (--version.refcount == 0) {
+    version = Version{}; // drop the payload; the slot is now free to reuse
+    d_free.push_back(state.slot);
+  }
+}
+
+void CameraContent::set_name(arbc::Model::Transaction& txn, arbc::ObjectId self,
+                             std::string new_name) {
+  arbc::StateHandle after;
+  {
+    const std::lock_guard<std::mutex> lock(d_mutex);
+    Resolution resolution;
+    if (d_base.has_state() && d_base.slot < d_versions.size()) {
+      resolution = d_versions[d_base.slot].resolution; // rename preserves resolution
+    }
+    after = arbc::StateHandle{mint_version(std::move(new_name), resolution)};
+  }
+  d_base = after; // adopt the new version; the commit retains it and journals the prior
+  txn.set_content_state(self, after);
+}
+
+std::string CameraContent::camera_name() const {
+  const std::lock_guard<std::mutex> lock(d_mutex);
+  if (!d_base.has_state() || d_base.slot >= d_versions.size()) {
+    return {};
+  }
+  return d_versions[d_base.slot].name;
+}
+
+Resolution CameraContent::resolution() const {
+  const std::lock_guard<std::mutex> lock(d_mutex);
+  if (!d_base.has_state() || d_base.slot >= d_versions.size()) {
+    return {};
+  }
+  return d_versions[d_base.slot].resolution;
+}
 
 std::optional<arbc::Rect> CameraContent::bounds() const {
   // An EMPTY rect: the compositor culls the layer before it ever calls `render`, so a
@@ -409,58 +508,25 @@ arbc::ObjectId add_camera(arbc::Document& document, const arbc::Registry& regist
   return content;
 }
 
-bool rename_camera(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId camera,
-                   const std::string& new_name) {
-  arbc::ObjectId composition;
-  arbc::ObjectId old_layer;
-  std::uint32_t index = 0;
-  Resolution resolution;
-  arbc::Affine frame;
-  {
-    const arbc::DocStatePtr state = document.pin();
-    if (!state) {
-      return false;
-    }
-    composition = root_composition(*state);
-    if (!composition.valid()) {
-      return false;
-    }
-    // Locate the camera's binding layer and its position in the composition's layer
-    // order, and read back the resolution + frame the rename must preserve.
-    bool found = false;
-    std::uint32_t walk = 0;
-    state->for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
-      const arbc::LayerRecord* layer = state->find_layer(layer_id);
-      if (layer != nullptr && layer->content == camera) {
-        const auto* content = dynamic_cast<const CameraContent*>(document.resolve(camera));
-        if (content != nullptr) {
-          old_layer = layer_id;
-          index = walk;
-          resolution = content->resolution();
-          frame = layer->transform;
-          found = true;
-        }
-      }
-      ++walk;
-    });
-    if (!found) {
-      return false;
-    }
+bool rename_camera(arbc::Document& document, const arbc::Registry& /*registry*/,
+                   arbc::ObjectId camera, const std::string& new_name) {
+  // Resolve the content vtable and confirm it is a camera. `resolve` returns nullptr
+  // for an unknown id, and the `dynamic_cast` returns nullptr for a non-camera content
+  // — both are the no-op-returning-false path (Constraint 3). No composition walk is
+  // needed: the edit addresses the content by `ObjectId`, not by layer membership.
+  auto* content = dynamic_cast<CameraContent*>(document.resolve(camera));
+  if (content == nullptr) {
+    return false;
   }
 
-  // Rename = replace the Content+Layer with a freshly-named pair at the SAME order
-  // index (a camera Content's state is immutable and the leaf-kind param has no
-  // in-place transactional edit). The new Content's vtable binds through
-  // `Document::add_content`; the swap (detach + remove old, add + attach new at
-  // `index`) is one further transaction, so order and framing are preserved.
-  const arbc::ObjectId new_content = document.add_content(
-      std::make_shared<CameraContent>(new_name, resolution), camera_token(registry));
+  // Rename IN PLACE (D-rename-1): one `set_content_state` transaction that path-copies
+  // the camera's ContentRecord to the new-name version and journals the prior handle
+  // as the undo `before`. The camera keeps its `ObjectId`, binding layer, frame,
+  // resolution, and order — only its name changes — so a consumer holding the id
+  // (the shared selection) keeps its handle, and `undo` restores the old name on the
+  // same object. ONE journal entry (down from two).
   auto txn = document.transact("rename_camera");
-  txn.detach_layer(composition, old_layer);
-  txn.remove(old_layer);
-  txn.remove(camera);
-  const arbc::ObjectId new_layer = txn.add_layer(new_content, frame);
-  txn.attach_layer(composition, new_layer, index);
+  content->set_name(txn, camera, new_name);
   txn.commit();
   return true;
 }

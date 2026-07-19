@@ -218,8 +218,9 @@ task editor "Editor — host GUI over libarbc" {
     task rename_stable_id "In-place camera rename preserving ObjectId (Editable facet)" {
       effort 0.5d
       allocate team
+      complete 100
       depends !model
-      note "rename_camera currently replaces the Content+Layer (new ObjectId), breaking future selection/manip identity for cells.selection/cameras.manip; implement in-place content-state rename via the Editable facet to preserve ObjectId across renames. Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/00-design.md D7."
+      note "rename_camera currently replaces the Content+Layer (new ObjectId), breaking future selection/manip identity for cells.selection/cameras.manip; implement in-place content-state rename via the Editable facet to preserve ObjectId across renames. Source-of-debt: tasks/refinements/cameras/model.md. Design: docs/00-design.md D7. Refinement: tasks/refinements/cameras/rename_stable_id.md"
     }
     task reopen_codec "Thread camera-kind registration into open_project (no PlaceholderContent on reopen)" {
       effort 1d

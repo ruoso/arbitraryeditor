@@ -4,9 +4,13 @@
 #include <arbc/base/ids.hpp>       // arbc::ObjectId
 #include <arbc/base/transform.hpp> // arbc::Affine
 #include <arbc/contract/content.hpp>
+#include <arbc/model/model.hpp>   // arbc::Model::Transaction, set_content_state
+#include <arbc/model/records.hpp> // arbc::StateHandle, arbc::SlotIndex
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,12 +31,15 @@ struct Resolution {
 };
 
 // The editor's FIRST custom libarbc `Content` kind (A14, D-model-1): a persisted,
-// non-rendering shot camera. Its serialized state is the camera's NAME + output
-// RESOLUTION; the camera's frame placement is the binding `Layer`'s `Affine`
+// non-rendering shot camera. Its state is the camera's NAME + output RESOLUTION,
+// carried through the `arbc::Editable` facet as MUTABLE, undoable content state
+// (D-rename-1/2) so a rename edits the name IN PLACE — preserving the camera's
+// `ObjectId` so the shared `ObjectId`-keyed selection keeps its handle across a
+// rename (D7). The camera's frame placement is the binding `Layer`'s `Affine`
 // transform (so a camera is the same ObjectId-addressable placed-object shape as a
 // cell, D7). Contributes ZERO pixels to the composite (`bounds()` is empty, so the
 // compositor culls it): a camera observes, it does not draw (D2, Constraint 5).
-class CameraContent final : public arbc::Content {
+class CameraContent final : public arbc::Content, public arbc::Editable {
 public:
   CameraContent(std::string name, Resolution resolution);
 
@@ -44,16 +51,54 @@ public:
   std::optional<arbc::RenderResult> render(const arbc::RenderRequest& request,
                                            std::shared_ptr<arbc::RenderCompletion> done) override;
 
-  // Read-only accessors the codec + `cameras()` read (mirrors `SolidContent::color`).
-  const std::string& camera_name() const noexcept { return d_name; }
-  Resolution resolution() const noexcept { return d_resolution; }
+  // Opt into the editable-state facet (D-rename-2): the name/resolution is mutable,
+  // undoable content state addressed by an opaque `StateHandle`.
+  arbc::Editable* editable() override { return this; }
+
+  // --- arbc::Editable ---
+  // A small versioned `{name, resolution}` store — the `FakeEditable`/`RasterStore`
+  // shape (slot table + free list + a live `d_base` handle), NOT raster's tile
+  // machinery. Thread contract (Constraint 5, A4/A5): `capture`/`restore`/`retain`/
+  // `state_cost` run on the WRITER thread while `release` arrives on the DRAIN thread,
+  // so the store is mutex-guarded.
+  arbc::StateHandle capture() override;
+  void restore(arbc::StateHandle state) override;
+  std::size_t state_cost(arbc::StateHandle state) const override;
+  void retain(arbc::StateHandle state) override;
+  void release(arbc::StateHandle state) override;
+
+  // Rename in place under transactional discipline (the `RasterContent::paint` shape,
+  // minus the pixels): mint a new version carrying `new_name` over the CURRENT
+  // resolution, adopt it as the live base, and journal it via `set_content_state` so
+  // the camera keeps its `ObjectId` and `undo` restores the prior name on that same
+  // object (D-rename-1, Constraint 2/3). `self` is this content's `ObjectId`.
+  // WRITER-THREAD ONLY; the caller wraps it in a `commands::Command` for undo/redo.
+  void set_name(arbc::Model::Transaction& txn, arbc::ObjectId self, std::string new_name);
+
+  // Read-only accessors the codec + `cameras()` read: the CURRENT base version's state
+  // (so a persisted or round-tripped camera reflects the latest rename, Constraint 4).
+  std::string camera_name() const;
+  Resolution resolution() const;
 
   static constexpr const char* kind_id = "org.arbc.camera";
   static constexpr const char* kind_version = "1";
 
 private:
-  std::string d_name;
-  Resolution d_resolution;
+  // One captured version of the editable state, indexed by `StateHandle::slot`.
+  struct Version {
+    std::string name;
+    Resolution resolution;
+    std::uint32_t refcount = 0; // published-record pins (retain +1 / release -1)
+  };
+
+  // Mint a fresh version carrying `{name, resolution}` and return its slot. Reuses a
+  // recycled slot when one is free, else grows the table. `d_mutex` MUST be held.
+  arbc::SlotIndex mint_version(std::string name, Resolution resolution);
+
+  mutable std::mutex d_mutex;          // guards the store (writer retain vs drain release)
+  std::vector<Version> d_versions;     // indexed by slot
+  std::vector<arbc::SlotIndex> d_free; // recycled slots
+  arbc::StateHandle d_base;            // the live version (what accessors + `capture` read)
 };
 
 // Register `org.arbc.camera`'s factory + JSON-free codec on `registry` (A14,
@@ -97,13 +142,16 @@ arbc::ObjectId add_camera(arbc::Document& document, const arbc::Registry& regist
                           const std::string& name, Resolution resolution,
                           const arbc::Affine& frame);
 
-// Rename the shot camera whose content id is `camera`, preserving its resolution,
-// frame, and position in layer order. Returns true when the camera was found and
-// renamed. WRITER-THREAD ONLY; undoable via the journal (D-model-4). Because a camera
-// Content's serialized state is immutable and libarbc exposes no in-place content-
-// param edit for a leaf kind, a rename REPLACES the camera's Content+Layer with a
-// freshly-named pair at the same order index — so the renamed camera takes a new
-// `ObjectId` (see the `editor.cameras.rename_stable_id` follow-up).
+// Rename the shot camera whose content id is `camera`, preserving its `ObjectId`,
+// binding layer, resolution, frame, and position in layer order (Constraint 2).
+// Returns true when the camera was found and renamed, false when `camera` is unknown
+// or not a `CameraContent` (a no-op, Constraint 3). WRITER-THREAD ONLY; undoable via
+// the journal (D-model-4). The rename edits the name IN PLACE through the camera's
+// `arbc::Editable` facet in ONE `set_content_state` transaction (D-rename-1) — so the
+// renamed camera is the SAME object and any consumer that remembers it by `ObjectId`
+// (the shared selection, the future manip/overview) keeps its handle across the
+// rename. `registry` is unused now (no new Content is minted) but kept for signature
+// stability with `add_camera`.
 bool rename_camera(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId camera,
                    const std::string& new_name);
 

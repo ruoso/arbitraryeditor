@@ -7,6 +7,7 @@
 // workspace-backed Document (A4/§9).
 
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/selection.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/project/project.hpp>
@@ -149,7 +150,10 @@ TEST_CASE("rename_camera changes the name, preserving resolution, frame, and ord
   dispatch(state, add_camera_command(registry, "first", Resolution{800, 600}, frame_a));
   dispatch(state, add_camera_command(registry, "second", Resolution{1024, 768}, frame_b));
 
-  const arbc::ObjectId first_id = ace::scene::cameras(state.document())[0].id;
+  const Camera before = ace::scene::cameras(state.document())[0];
+  const arbc::ObjectId first_id = before.id;
+  const arbc::ObjectId first_layer = before.layer;
+  const arbc::ObjectId second_id = ace::scene::cameras(state.document())[1].id;
   dispatch(state, Command{"rename_camera", [&registry, first_id](arbc::Document& doc) {
                             ace::scene::rename_camera(doc, registry, first_id, "renamed");
                           }});
@@ -159,8 +163,177 @@ TEST_CASE("rename_camera changes the name, preserving resolution, frame, and ord
   CHECK(cams[0].name == "renamed"); // renamed in place (same order index)
   CHECK(cams[0].resolution == Resolution{800, 600});
   CHECK(cams[0].frame.tx == 3.0);
+  // The headline: the renamed camera is the SAME object — content id AND binding-layer
+  // id survive (fails against the old detach/re-add rename, passes on the in-place one).
+  CHECK(cams[0].id == first_id);
+  CHECK(cams[0].layer == first_layer);
   CHECK(cams[1].name == "second"); // untouched
   CHECK(cams[1].frame.tx == 7.0);
+  CHECK(cams[1].id == second_id); // the sibling keeps its identity too
+}
+
+TEST_CASE("an ObjectId-keyed selection survives a rename (the D7 payoff)") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "sel");
+  const arbc::Registry registry = camera_registry();
+
+  dispatch(state, add_camera_command(registry, "first", Resolution{800, 600},
+                                     arbc::Affine::translation(3.0, 4.0)));
+  const arbc::ObjectId first_id = ace::scene::cameras(state.document())[0].id;
+
+  // The shared selection remembers the camera by ObjectId (commands::Selection). A
+  // rename that minted a new id would silently drop it; the in-place rename keeps it.
+  ace::commands::Selection selection;
+  selection.select(first_id);
+  REQUIRE(selection.contains(first_id));
+
+  dispatch(state, Command{"rename_camera", [&registry, first_id](arbc::Document& doc) {
+                            ace::scene::rename_camera(doc, registry, first_id, "renamed");
+                          }});
+
+  CHECK(selection.contains(first_id)); // the selection still names the (same) camera
+  const std::vector<Camera> cams = ace::scene::cameras(state.document());
+  REQUIRE(cams.size() == 1);
+  CHECK(cams[0].id == first_id);
+  CHECK(cams[0].name == "renamed");
+}
+
+TEST_CASE("rename is one journal entry, undone/redone in place on the same ObjectId") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "rename_undo");
+  const arbc::Registry registry = camera_registry();
+  const arbc::Journal& journal = state.document().journal();
+
+  dispatch(state, add_camera_command(registry, "first", Resolution{800, 600},
+                                     arbc::Affine::translation(3.0, 4.0)));
+  const arbc::ObjectId first_id = ace::scene::cameras(state.document())[0].id;
+
+  const std::size_t depth_before = journal.depth();
+  dispatch(state, Command{"rename_camera", [&registry, first_id](arbc::Document& doc) {
+                            ace::scene::rename_camera(doc, registry, first_id, "renamed");
+                          }});
+  CHECK(journal.depth() == depth_before + 1); // exactly ONE undo unit (down from two)
+  CHECK(ace::scene::cameras(state.document())[0].name == "renamed");
+
+  // Undo restores the OLD name on the SAME object — the camera is still present at its
+  // ObjectId (not removed, unlike the add-undo path).
+  const auto undone = ace::commands::undo(state);
+  CHECK(undone.moved);
+  const std::vector<Camera> after_undo = ace::scene::cameras(state.document());
+  REQUIRE(after_undo.size() == 1);
+  CHECK(after_undo[0].id == first_id);
+  CHECK(after_undo[0].name == "first");
+
+  // Redo re-applies the new name in place.
+  const auto redone = ace::commands::redo(state);
+  CHECK(redone.moved);
+  const std::vector<Camera> after_redo = ace::scene::cameras(state.document());
+  REQUIRE(after_redo.size() == 1);
+  CHECK(after_redo[0].id == first_id);
+  CHECK(after_redo[0].name == "renamed");
+}
+
+TEST_CASE("a camera is bound editable and its state calls route to it (tripwire zero)") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "editable");
+  const arbc::Registry registry = camera_registry();
+  arbc::Document& doc = state.document();
+
+  dispatch(state, add_camera_command(registry, "first", Resolution{800, 600},
+                                     arbc::Affine::translation(3.0, 4.0)));
+  const arbc::ObjectId camera_id = ace::scene::cameras(doc)[0].id;
+
+  // add_camera auto-binds the editable content (Document::add_content) — no host wiring.
+  CHECK(doc.editable_binding().bound(camera_id));
+
+  // A full add->rename->undo->redo cycle must land every state call on the camera that
+  // owns the handle: the misrouting tripwire stays zero (Constraint 6).
+  dispatch(state, Command{"rename_camera", [&registry, camera_id](arbc::Document& d) {
+                            ace::scene::rename_camera(d, registry, camera_id, "renamed");
+                          }});
+  ace::commands::undo(state);
+  ace::commands::redo(state);
+  CHECK(doc.editable_binding().unrouted_state_calls() == 0);
+}
+
+TEST_CASE("the editable facet is inert on empty / out-of-range state handles") {
+  // Drive the `arbc::Editable` store's guard branches directly (the writer/drain
+  // contract's null + stale-handle cases the Document path never reaches): a no-state
+  // handle and a has_state() handle whose slot is past the table are both no-ops.
+  CameraContent cam("guarded", Resolution{320, 240});
+
+  const arbc::StateHandle none{};
+  REQUIRE_FALSE(none.has_state());
+  CHECK(cam.state_cost(none) == 0); // no state -> zero cost
+  cam.retain(none);                 // no-op, no throw
+  cam.release(none);                // no-op, no throw
+
+  // A live in-range handle carries a real (non-guard) cost.
+  const arbc::StateHandle base = cam.capture();
+  REQUIRE(base.has_state());
+  CHECK(cam.state_cost(base) > 0);
+
+  // A has_state() handle whose slot is past the table is ignored by release.
+  const arbc::StateHandle out_of_range{arbc::SlotIndex{9999}};
+  REQUIRE(out_of_range.has_state());
+  cam.release(out_of_range); // no-op, no throw
+
+  // Releasing the never-retained base underflow-guards to a no-op (refcount already 0),
+  // so the version stays live.
+  cam.release(base);
+  CHECK(cam.camera_name() == "guarded");
+
+  // Restoring a no-state base clears the accessors (the base-invalidated read path).
+  cam.restore(none);
+  CHECK(cam.camera_name().empty());
+  CHECK(cam.resolution() == Resolution{});
+}
+
+TEST_CASE("renaming after an undo recycles a freed version slot") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "rename_churn");
+  const arbc::Registry registry = camera_registry();
+  arbc::Document& doc = state.document();
+
+  dispatch(state, add_camera_command(registry, "v0", Resolution{800, 600},
+                                     arbc::Affine::translation(1.0, 2.0)));
+  const arbc::ObjectId id = ace::scene::cameras(doc)[0].id;
+
+  const auto rename = [&](const char* to) {
+    dispatch(state, Command{"rename_camera", [&registry, id, to](arbc::Document& d) {
+                              ace::scene::rename_camera(d, registry, id, to);
+                            }});
+  };
+
+  rename("v1");               // mints a 2nd version; the 1st is the journal `before`
+  ace::commands::undo(state); // back to "v0"; "v1" now lives only on the redo stack
+  rename("v2");               // truncates the redo entry -> "v1"'s version is released and
+                              // drained (drain_between_transactions), freeing its slot
+  rename("v3");               // this mint must REUSE the recycled slot, not grow the table
+
+  const std::vector<Camera> cams = ace::scene::cameras(doc);
+  REQUIRE(cams.size() == 1);
+  CHECK(cams[0].id == id); // the same object across all the churn
+  CHECK(cams[0].name == "v3");
+  CHECK(cams[0].resolution == Resolution{800, 600}); // resolution preserved throughout
+}
+
+TEST_CASE("rename_camera on a non-camera content id is a no-op") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "rename_noncam");
+  const arbc::Registry registry = camera_registry();
+  arbc::Document& doc = state.document();
+
+  // A solid cell (not a camera): resolving it and dynamic_cast'ing to CameraContent
+  // fails, so the rename declines rather than editing an unrelated content.
+  const arbc::ObjectId cell =
+      doc.add_content(std::make_shared<arbc::SolidContent>(arbc::Rgba{0.0F, 0.0F, 0.0F, 1.0F}));
+  CHECK_FALSE(ace::scene::rename_camera(doc, registry, cell, "nope"));
 }
 
 TEST_CASE("rename_camera on an unknown id is a no-op") {
@@ -377,6 +550,14 @@ TEST_CASE("cameras round-trip through save_project -> load_document with the cod
            add_camera_command(registry, "hero \"quote\"\n\tπ", Resolution{1920, 1080}, frame_a));
   dispatch(state, add_camera_command(registry, "wide", Resolution{3840, 2160}, frame_b));
 
+  // Rename the first camera in place, then persist: the codec's `serialize` reads the
+  // LIVE base state, so the saved bytes must carry the post-rename name (Constraint 4/7).
+  // The new name still carries JSON metacharacters + non-ASCII to exercise escaping.
+  const arbc::ObjectId first_id = ace::scene::cameras(state.document())[0].id;
+  dispatch(state, Command{"rename_camera", [&registry, first_id](arbc::Document& doc) {
+                            ace::scene::rename_camera(doc, registry, first_id, "renamed\t\"✓\"");
+                          }});
+
   const auto saved = ace::commands::save_project(state, fs);
   REQUIRE(saved.has_value());
 
@@ -391,7 +572,7 @@ TEST_CASE("cameras round-trip through save_project -> load_document with the cod
 
   const std::vector<Camera> cams = ace::scene::cameras(reloaded);
   REQUIRE(cams.size() == 2);
-  CHECK(cams[0].name == "hero \"quote\"\n\tπ"); // escaping survived the roundtrip
+  CHECK(cams[0].name == "renamed\t\"✓\""); // the POST-RENAME name survived the roundtrip
   CHECK(cams[0].resolution == Resolution{1920, 1080});
   CHECK(cams[0].frame.tx == 3.0);
   CHECK(cams[0].frame.ty == 4.0);
