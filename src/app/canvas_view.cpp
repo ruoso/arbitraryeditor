@@ -228,6 +228,23 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       if (in.panning && (in.pan_dx != 0.0F || in.pan_dy != 0.0F)) {
         camera = interact::pan(camera, in.pan_dx, in.pan_dy);
       }
+      // The deep-zoom navigation aid (editor.canvas.nav_aids; D24): Shift+F frames the
+      // current selection's extent into the pane. The three doc-named aids collapse to one
+      // kind-agnostic gesture — a single cell is fit-to-cell, a single camera fit-to-frame,
+      // a multi-selection zoom-to-selection (D-nav_aids-1). The region is the shipped
+      // `selected_extent` over the SAME per-frame `pick_targets` the hit-test builds; it is
+      // a UI-thread read with no transaction (D-nav_aids-4), and the transient camera rides
+      // the unchanged `request_camera` submit below — no journal entry, no dirty (D-nav_aids-3).
+      // A selection with nothing bounded (empty, or only unbounded fills) is REFUSED: the
+      // camera is left exactly where it is (D-nav_aids-5 / Constraint 6).
+      if (in.frame_selection) {
+        const std::vector<interact::PickTarget> aid_targets =
+            interact::pick_targets(state_.document(), state_.registry());
+        if (const std::optional<arbc::Rect> extent =
+                interact::selected_extent(aid_targets, state_.selection().items())) {
+          camera = interact::fit_region(*extent, p.tex_width, p.tex_height);
+        }
+      }
       p.camera = camera;
 
       // The scale bar (composition units per screen span, never a "%"; D2 §3 / D-nav-6):

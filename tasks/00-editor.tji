@@ -213,8 +213,9 @@ task editor "Editor — host GUI over libarbc" {
     task nav_aids "Deep-zoom navigation aids: fit-to-frame / fit-to-cell / zoom-to-selection" {
       effort 1.5d
       allocate team
+      complete 100
       depends !fit_bounds, editor.cells.selection
-      note "The richer deep-zoom orientation aids beyond reset-to-fit (editor.canvas.nav/fit_bounds), reusing interact::fit(content,pane): fit-to-frame (fit a chosen camera frame to the pane — cameras only), fit-to-cell and zoom-to-selection (frame the selected cell / current selection — need the selection model). Decided (pre-exec 2026-07-19, resolves the D2 §3 open marker + parking-lot 'Deep-zoom navigation aids'): all three are in scope. The overview's in-panel viewport manipulation + zoom control is a SEPARATE surface owned by editor.panels.overview, not this leaf. Design: docs/00-design.md D2 §3. Source-of-debt: tasks/refinements/editor/nav.md, tasks/refinements/editor/fit_bounds.md. Refinement: tasks/refinements/nav_aids.md"
+      note "The richer deep-zoom orientation aids beyond reset-to-fit (editor.canvas.nav/fit_bounds), reusing interact::fit(content,pane): fit-to-frame (fit a chosen camera frame to the pane — cameras only), fit-to-cell and zoom-to-selection (frame the selected cell / current selection — need the selection model). Decided (pre-exec 2026-07-19, resolves the D2 §3 open marker + parking-lot 'Deep-zoom navigation aids'): all three are in scope. The overview's in-panel viewport manipulation + zoom control is a SEPARATE surface owned by editor.panels.overview, not this leaf. Design: docs/00-design.md D2 §3. Source-of-debt: tasks/refinements/editor/nav.md, tasks/refinements/editor/fit_bounds.md. Refinement: tasks/refinements/editor/nav_aids.md"
     }
     task edit_render_sync "Serialize writer-thread Document edits against CanvasHost render reads (TSAN)" {
       effort 2d

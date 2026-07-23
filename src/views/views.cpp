@@ -65,7 +65,13 @@ CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height)
   in.focus_y = io.MousePos.y - origin.y;
   if (in.hovered) {
     in.wheel = io.MouseWheel; // wheel-zoom about the cursor (D2 §3)
-    in.reset = ImGui::IsKeyPressed(ImGuiKey_F, /*repeat=*/false); // reset-to-fit (D-nav-7)
+    // F frames the whole document (reset-to-fit, D-nav-7); Shift+F frames the current
+    // selection (the deep-zoom nav aid, D-nav_aids-6). One key press, split by Shift, so
+    // the two are mutually exclusive — Shift+F is never also a reset (Constraint 6: an
+    // empty-selection Shift+F must stay a no-op, not yank the view to the document).
+    const bool f_pressed = ImGui::IsKeyPressed(ImGuiKey_F, /*repeat=*/false);
+    in.reset = f_pressed && !io.KeyShift;
+    in.frame_selection = f_pressed && io.KeyShift;
   }
   // Space-held left-drag pans the viewport camera (D9) — the always-on gesture,
   // independent of the active modal tool (D-nav-4). IsItemActive() holds while the

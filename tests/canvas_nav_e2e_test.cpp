@@ -15,12 +15,15 @@
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/selection.hpp>
 #include <ace/dock/dock.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/project/project.hpp>
+#include <ace/scene/cell.hpp>
 #include <ace/views/views.hpp>
 
+#include <arbc/base/expected.hpp>
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
@@ -133,8 +136,29 @@ void settle(ImGuiTestContext* ctx, CanvasView& canvas) {
   }
 }
 
+// A single root composition with a full-frame opaque background (so the content-gated frame
+// sequence advances) and one small raster cell placed OFF the initial framing — the region the
+// nav aid will fit. `cell_out` receives the cell's id for the selection-driven gesture.
+constexpr double k_aid_canvas = 256.0;
+constexpr double k_aid_cell_x = 180.0; // off-center: [180,180]x[212,212], a 32px raster corner
+constexpr double k_aid_cell_y = 180.0;
+void seed_with_cell(AppState& state, arbc::ObjectId& cell_out) {
+  arbc::Document& doc = state.document();
+  const arbc::ObjectId root = doc.add_composition(k_aid_canvas, k_aid_canvas);
+  const arbc::ObjectId bg =
+      doc.add_content(std::make_shared<arbc::SolidContent>(arbc::Rgba{0.05F, 0.05F, 0.08F, 1.0F}));
+  doc.attach_layer(root, doc.add_layer(bg, arbc::Affine::identity()));
+  const arbc::expected<arbc::ObjectId, std::string> cell =
+      ace::scene::add_cell(doc, state.registry(), "org.arbc.raster", "32x32",
+                           arbc::Affine::translation(k_aid_cell_x, k_aid_cell_y));
+  REQUIRE(cell.has_value());
+  cell_out = *cell;
+}
+
 struct E2EState {
   CanvasView* canvas;
+  AppState* state = nullptr;
+  arbc::ObjectId cell{};
 };
 
 } // namespace
@@ -259,6 +283,123 @@ TEST_CASE("canvas_nav e2e: wheel zooms (anchor_depth rises), Space-drag pans, sc
   CHECK(count_success == 1);
 
   // Clean stop→wake→join of the render thread on teardown (Constraint 5).
+  canvas.destroy();
+  shell.shutdown();
+  ImGuiTestEngine_DestroyContext(engine);
+}
+
+// editor.canvas.nav_aids (D24): Shift+F frames the current selection into the pane. Drives the
+// stable canvas#1 view by id and asserts on model state (the scale-bar proxy), never pixels:
+// (a) selecting an off-framing cell and pressing Shift+F frames it — the scale bar tightens (a
+// zoom onto the small cell) and a published frame advances (the fit-to-cell / zoom-to-selection
+// reach end-to-end); (b) with an EMPTY selection the same key is a no-op (scale bar unchanged,
+// Constraint 6); (c) the document stays NOT dirty across the gesture (a nav aid never transacts,
+// Constraint 4). Modeled on the reset-to-fit e2e above + frame_selection_e2e's selection setup.
+TEST_CASE("canvas_nav e2e: Shift+F frames the selection; empty is a no-op; never dirties") {
+  ScratchDir scratch("aids");
+  ace::platform::NativeFileSystem fs;
+  ace::testing::WriterSession session(scratch.root / "aids");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  arbc::ObjectId cell{};
+  session.on_writer([&] { seed_with_cell(state, cell); });
+  // A clean baseline at the seeded revision, so "stays not dirty" is a real assertion: the
+  // aid mutates nothing, so the revision — and the dirty read — cannot move (Constraint 4).
+  state.mark_saved(state.document().pin()->revision());
+  REQUIRE_FALSE(state.is_dirty());
+
+  Shell shell;
+  ShellOptions opts;
+  opts.headless = true;
+  opts.width = 640;
+  opts.height = 480;
+  REQUIRE(shell.init(opts));
+
+  CanvasView canvas(state, session.writer()); // spawns the render thread
+  ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
+  });
+
+  ace::dock::Dockspace dockspace; // default layout → canvas#1 open + docked
+  shell.set_draw_content([&dockspace]() { dockspace.draw(); });
+
+  ImGuiTestEngine* engine = ImGuiTestEngine_CreateContext();
+  ImGuiTestEngineIO& te_io = ImGuiTestEngine_GetIO(engine);
+  te_io.ConfigRunSpeed = ImGuiTestRunSpeed_Fast;
+  te_io.ConfigNoThrottle = true;
+  ImGuiTestEngine_Start(engine, shell.imgui_context());
+
+  E2EState e2e{&canvas, &state, cell};
+  ImGuiTest* test = IM_REGISTER_TEST(engine, "canvas_nav", "frame_selection_view");
+  test->UserData = &e2e;
+  test->TestFunc = [](ImGuiTestContext* ctx) {
+    auto* e2e = static_cast<E2EState*>(ctx->Test->UserData);
+    CanvasView& canvas = *e2e->canvas;
+    AppState& state = *e2e->state;
+
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") >= 1; }));
+    IM_CHECK(ctx->GetWindowByRef("canvas#1") != nullptr);
+    ctx->WindowFocus("canvas#1");
+    settle(ctx, canvas);
+
+    const ImVec2 center = ctx->GetWindowByRef("canvas#1")->Rect().GetCenter();
+    ctx->MouseSetViewport(ctx->GetWindowByRef("canvas#1"));
+    ctx->MouseMoveToPos(center);
+    ctx->Yield(2);
+
+    const double units_before = canvas.scale_bar_units("canvas#1");
+    IM_CHECK(units_before > 0.0);
+
+    // (b) EMPTY selection: Shift+F is a no-op — the camera (hence the scale bar) is left exactly
+    //     where it is (D-nav_aids-5 / Constraint 6). No frame is published for a no-op gesture.
+    IM_CHECK(state.selection().empty());
+    ctx->MouseMoveToPos(center);
+    ctx->KeyPress(ImGuiMod_Shift | ImGuiKey_F);
+    ctx->Yield(4);
+    IM_CHECK(canvas.scale_bar_units("canvas#1") == units_before);
+    IM_CHECK(!state.is_dirty());
+
+    // (a) Select the off-framing cell and press Shift+F: the aid frames the cell's placed extent
+    //     into the pane — a large scale onto a 32-unit region, so the scale bar reads FEWER
+    //     composition units than the initial framing — and a published frame advances.
+    state.selection().select(e2e->cell);
+    ctx->Yield(2);
+    const std::uint64_t before = canvas.frames_issued("canvas#1");
+    ctx->MouseMoveToPos(center);
+    ctx->KeyPress(ImGuiMod_Shift | ImGuiKey_F);
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") > before; }));
+    settle(ctx, canvas);
+    const double units_framed = canvas.scale_bar_units("canvas#1");
+    IM_CHECK(units_framed > 0.0);
+    IM_CHECK(units_framed < units_before); // zoomed onto the small cell
+
+    // (c) The gesture never transacts: the revision — and the dirty read — did not move.
+    IM_CHECK(!state.is_dirty());
+  };
+  ImGuiTestEngine_QueueTest(engine, test);
+
+  const int k_max_frames = 200000;
+  int frames = 0;
+  while (!ImGuiTestEngine_IsTestQueueEmpty(engine) && frames < k_max_frames) {
+    shell.new_frame();
+    shell.draw_ui();
+    shell.render();
+    ImGuiTestEngine_PostSwap(engine);
+    ++frames;
+  }
+
+  int count_tested = 0;
+  int count_success = 0;
+  ImGuiTestEngine_GetResult(engine, count_tested, count_success);
+  ImGuiTestEngine_Stop(engine);
+
+  ace::views::register_view_body(ViewType::Canvas, {});
+
+  CHECK(frames < k_max_frames);
+  CHECK(count_tested == 1);
+  CHECK(count_success == 1);
+
   canvas.destroy();
   shell.shutdown();
   ImGuiTestEngine_DestroyContext(engine);

@@ -52,6 +52,8 @@ struct CanvasInput {
   float focus_x = 0.0F; // the cursor, relative to the image top-left (device px)
   float focus_y = 0.0F;
   bool reset = false; // reset-to-fit requested (F while hovered, D-nav-7)
+  bool frame_selection =
+      false; // frame-the-selection nav aid requested (Shift+F while hovered, D-nav_aids-6)
   // --- camera-frame gizmo input (editor.cameras.manip; D7/D9) -----------------
   // The raw left-button + modifier read the app threads through the interact frame math
   // to hit-test / drag a shot camera's frame. No camera knowledge here — the app owns the

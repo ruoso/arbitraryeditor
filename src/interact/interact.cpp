@@ -52,13 +52,27 @@ ScaleBar scale_bar(const arbc::Affine& camera, double target_px) {
 }
 
 arbc::Affine fit(double content_w, double content_h, double pane_w, double pane_h) {
-  if (!(content_w > 0.0) || !(content_h > 0.0) || !(pane_w > 0.0) || !(pane_h > 0.0)) {
-    return arbc::Affine::identity(); // degenerate: nothing to fit
+  // Reset-to-fit is the ORIGIN-ANCHORED specialization of the positioned fit: framing
+  // the content's own extent from the origin (D-nav_aids-2). One implementation, one
+  // degenerate guard — the unit pins their field-for-field equality so they never drift.
+  return fit_region(arbc::Rect{0.0, 0.0, content_w, content_h}, pane_w, pane_h);
+}
+
+arbc::Affine fit_region(const arbc::Rect& region, double pane_w, double pane_h) {
+  const double region_w = region.width();
+  const double region_h = region.height();
+  if (region.empty() || !(region_w > 0.0) || !(region_h > 0.0) || !std::isfinite(region_w) ||
+      !std::isfinite(region_h) || !std::isfinite(region.x0) || !std::isfinite(region.y0) ||
+      !(pane_w > 0.0) || !(pane_h > 0.0)) {
+    return arbc::Affine::identity(); // degenerate region/pane: nothing to fit
   }
-  // Uniform scale so the whole content fits the pane, centered in the leftover axis.
-  const double scale = std::min(pane_w / content_w, pane_h / content_h);
-  const double tx = (pane_w - content_w * scale) * 0.5;
-  const double ty = (pane_h - content_h * scale) * 0.5;
+  // Uniform scale so the whole region fits the pane at the pane's OWN aspect, centered in
+  // the leftover axis (Constraint 7 — a view change, never re-aspected). The extra
+  // `-scale * x0/y0` over `fit` is exactly what carries the region's position (its x0,y0),
+  // which the origin-anchored `fit` cannot express.
+  const double scale = std::min(pane_w / region_w, pane_h / region_h);
+  const double tx = (pane_w - region_w * scale) * 0.5 - scale * region.x0;
+  const double ty = (pane_h - region_h * scale) * 0.5 - scale * region.y0;
   return arbc::Affine{scale, 0.0, 0.0, scale, tx, ty};
 }
 

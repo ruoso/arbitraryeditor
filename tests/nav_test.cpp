@@ -2,19 +2,42 @@
 // (docs/01-architecture.md §9, the base of the test pyramid). Exercises
 // ace::interact::pan / zoom / scale_bar / fit — pure arbc::Affine geometry — with
 // no HostViewport, no GL, no ImGui (D-nav-2). Mirrors tests/interact_test.cpp.
+#include <ace/commands/app_state.hpp>
 #include <ace/interact/interact.hpp>
+#include <ace/interact/pick.hpp>
+#include <ace/platform/filesystem.hpp>
+#include <ace/project/project.hpp>
+#include <ace/scene/cell.hpp>
 
+#include <arbc/base/expected.hpp>
 #include <arbc/base/geometry.hpp>
+#include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <optional>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
+using ace::commands::AppState;
+using ace::commands::Command;
+using ace::commands::dispatch;
 using ace::interact::fit;
+using ace::interact::fit_region;
 using ace::interact::pan;
+using ace::interact::pick_targets;
+using ace::interact::PickKind;
+using ace::interact::PickTarget;
 using ace::interact::scale_bar;
+using ace::interact::selected_extent;
 using ace::interact::zoom;
 using Catch::Approx;
 
@@ -24,6 +47,40 @@ arbc::Vec2 unproject(const arbc::Affine& camera, arbc::Vec2 device) {
   const auto inv = camera.inverse();
   REQUIRE(inv.has_value());
   return inv->apply(device);
+}
+
+arbc::ObjectId oid(std::uint64_t value) { return arbc::ObjectId{value}; }
+
+// A hand-built pick target, the frame_selection_test mould: the extent is content-space,
+// nullopt for an unbounded fill.
+PickTarget cell_target(std::uint64_t id, const arbc::Affine& placement,
+                       std::optional<arbc::Rect> extent) {
+  return PickTarget{oid(id), oid(id + 1000), PickKind::Cell, placement, extent};
+}
+
+// A fresh workspace-backed session with a root composition (the frame_selection_test mould),
+// for the combined-wiring case that drives the aid over a real document.
+struct ScratchDir {
+  std::filesystem::path root;
+  ScratchDir() : root(std::filesystem::temp_directory_path() / "ace_nav_aids_test") {
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root, ec);
+  }
+  ~ScratchDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+  }
+};
+
+AppState session_with_composition(const ScratchDir& scratch, const ace::platform::FileSystem& fs,
+                                  const char* leaf) {
+  auto created = ace::project::create_project(fs, scratch.root / leaf);
+  REQUIRE(created.has_value());
+  AppState state(std::move(*created));
+  dispatch(state, Command{"add_composition",
+                          [](arbc::Document& doc) { doc.add_composition(256.0, 256.0); }});
+  return state;
 }
 } // namespace
 
@@ -135,4 +192,119 @@ TEST_CASE("nav fit: frames the content in the pane with a uniform, centered scal
 
   // A degenerate content/pane falls back to identity (nothing to fit).
   CHECK(fit(0.0, 10.0, 10.0, 10.0) == arbc::Affine::identity());
+}
+
+// --- editor.canvas.nav_aids: the positioned fit (D24 / D-nav_aids-2) ------------------------
+
+TEST_CASE("nav_aids: fit_region frames a positioned region centered, uniform-scaled") {
+  // A region FAR from the origin (its position is exactly what `fit` cannot express): W=100,
+  // H=50, framed into a non-square 200x200 pane.
+  const arbc::Rect region{100.0, 100.0, 200.0, 150.0};
+  const arbc::Affine f = fit_region(region, 200.0, 200.0);
+
+  // Uniform scale = min(200/100, 200/50) = 2; the region center (150,125) lands on the pane
+  // center (100,100), so tx = 100 - 2*150 = -200, ty = 100 - 2*125 = -150.
+  CHECK(f.a == Approx(2.0));
+  CHECK(f.d == Approx(2.0));
+  CHECK(f.b == Approx(0.0));
+  CHECK(f.c == Approx(0.0));
+  CHECK(f.tx == Approx(-200.0));
+  CHECK(f.ty == Approx(-150.0));
+
+  const arbc::Vec2 center = f.apply(arbc::Vec2{150.0, 125.0});
+  CHECK(center.x == Approx(100.0));
+  CHECK(center.y == Approx(100.0));
+
+  // All four region corners land within [0,200]x[0,200], and the TIGHT (width) axis touches
+  // both pane edges — the region is centered with the leftover on the height axis.
+  const arbc::Vec2 tl = f.apply(arbc::Vec2{100.0, 100.0});
+  const arbc::Vec2 br = f.apply(arbc::Vec2{200.0, 150.0});
+  CHECK(tl.x == Approx(0.0));   // width axis is tight: touches x=0
+  CHECK(br.x == Approx(200.0)); // ... and x=200
+  CHECK(tl.y == Approx(50.0));  // height axis centered: leftover 100px split
+  CHECK(br.y == Approx(150.0));
+  for (const arbc::Vec2 c : {tl, br}) {
+    CHECK(c.x >= -1e-9);
+    CHECK(c.x <= 200.0 + 1e-9);
+    CHECK(c.y >= -1e-9);
+    CHECK(c.y <= 200.0 + 1e-9);
+  }
+}
+
+TEST_CASE("nav_aids: fit_region is the positioned generalization of fit; fit delegates") {
+  // Reset-to-fit is exactly the origin-anchored specialization: for several shapes,
+  // fit(w,h,pw,ph) equals fit_region({0,0,w,h}, pw,ph) field-for-field (D-nav_aids-2).
+  struct Case {
+    double w, h, pw, ph;
+  };
+  for (const Case k : {Case{200.0, 100.0, 100.0, 100.0}, Case{64.0, 64.0, 64.0, 64.0},
+                       Case{30.0, 120.0, 400.0, 200.0}, Case{7.0, 3.0, 50.0, 90.0}}) {
+    const arbc::Affine a = fit(k.w, k.h, k.pw, k.ph);
+    const arbc::Affine b = fit_region(arbc::Rect{0.0, 0.0, k.w, k.h}, k.pw, k.ph);
+    CHECK(a == b);
+  }
+}
+
+TEST_CASE("nav_aids: a degenerate region or pane yields identity (no NaN escapes)") {
+  const arbc::Affine id = arbc::Affine::identity();
+  CHECK(fit_region(arbc::Rect{10.0, 10.0, 10.0, 60.0}, 200.0, 200.0) == id); // empty (zero width)
+  CHECK(fit_region(arbc::Rect{50.0, 10.0, 10.0, 60.0}, 200.0, 200.0) == id); // inverted x
+  CHECK(fit_region(arbc::Rect{10.0, 10.0, 60.0, 60.0}, 0.0, 200.0) == id);   // non-positive pane
+  CHECK(fit_region(arbc::Rect{10.0, 10.0, 60.0, 60.0}, 200.0, -5.0) == id);
+  const double inf = std::numeric_limits<double>::infinity();
+  CHECK(fit_region(arbc::Rect{10.0, 10.0, inf, 60.0}, 200.0, 200.0) == id); // non-finite region
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  CHECK(fit_region(arbc::Rect{nan, 10.0, 60.0, 60.0}, 200.0, 200.0) == id);
+}
+
+TEST_CASE("nav_aids: the fit-to-cell chain frames a real cell's placed extent into the pane") {
+  // The exact chain the Shift+F branch runs, headless: pick_targets -> selected_extent ->
+  // fit_region over a real document (mirrors frame_selection_test's full-chain case).
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "fit_to_cell");
+
+  // A 64x48 raster placed unscaled at a known off-center offset: placed extent [10,20]x[74,68].
+  const arbc::expected<arbc::ObjectId, std::string> added =
+      ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster", "64x48",
+                           arbc::Affine::translation(10.0, 20.0));
+  REQUIRE(added.has_value());
+  state.selection().select(*added);
+
+  const std::vector<PickTarget> targets = pick_targets(state.document(), state.registry());
+  const std::optional<arbc::Rect> extent = selected_extent(targets, state.selection().items());
+  REQUIRE(extent.has_value());
+  CHECK(extent->x0 == Approx(10.0));
+  CHECK(extent->y0 == Approx(20.0));
+  CHECK(extent->x1 == Approx(74.0));
+  CHECK(extent->y1 == Approx(68.0));
+
+  // Frame it into a 128x128 pane: W=64,H=48 -> scale = min(128/64, 128/48) = 2; the cell
+  // center (42,44) maps to the pane center (64,64).
+  const arbc::Affine camera = fit_region(*extent, 128.0, 128.0);
+  const arbc::Vec2 center = camera.apply(arbc::Vec2{42.0, 44.0});
+  CHECK(center.x == Approx(64.0));
+  CHECK(center.y == Approx(64.0));
+  // The tight (width) axis touches both pane edges; the whole cell is inside the pane.
+  const arbc::Vec2 tl = camera.apply(arbc::Vec2{10.0, 20.0});
+  const arbc::Vec2 br = camera.apply(arbc::Vec2{74.0, 68.0});
+  CHECK(tl.x == Approx(0.0));
+  CHECK(br.x == Approx(128.0));
+  CHECK(tl.y == Approx(16.0)); // (128 - 48*2)/2 = 16 leftover on the height axis
+  CHECK(br.y == Approx(112.0));
+}
+
+TEST_CASE("nav_aids: selected_extent refusal preconditions are nullopt (the no-op trigger)") {
+  // The two cases the app branch guards on: an empty selection and an all-unbounded selection
+  // both yield nullopt, so Shift+F leaves the camera untouched (D-nav_aids-5 / Constraint 6).
+  const std::vector<PickTarget> bounded = {
+      cell_target(1, arbc::Affine::translation(0.0, 0.0), arbc::Rect{0.0, 0.0, 10.0, 10.0})};
+  const std::vector<arbc::ObjectId> none{};
+  CHECK_FALSE(selected_extent(bounded, none).has_value()); // empty selection
+
+  const std::vector<PickTarget> unbounded = {
+      cell_target(1, arbc::Affine::translation(0.0, 0.0), std::nullopt),
+      cell_target(2, arbc::Affine::translation(40.0, 40.0), std::nullopt)};
+  const std::vector<arbc::ObjectId> both = {oid(1), oid(2)};
+  CHECK_FALSE(selected_extent(unbounded, both).has_value()); // only unbounded fills
 }

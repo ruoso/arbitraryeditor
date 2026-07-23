@@ -51,9 +51,20 @@ ScaleBar scale_bar(const arbc::Affine& camera, double target_px);
 
 // The reset-to-fit camera (D-nav-7): a uniform-scale, centered `Affine` framing a
 // `content_w`×`content_h` composition into a `pane_w`×`pane_h` pane — the "don't
-// get lost in unbounded space" recovery. A degenerate content/pane yields
-// identity (nothing to fit).
+// get lost in unbounded space" recovery. The ORIGIN-ANCHORED specialization of
+// `fit_region` (`fit(w,h,pw,ph) == fit_region({0,0,w,h}, pw,ph)`, D-nav_aids-2), to
+// which it delegates. A degenerate content/pane yields identity (nothing to fit).
 arbc::Affine fit(double content_w, double content_h, double pane_w, double pane_h);
+
+// The deep-zoom navigation-aid camera (editor.canvas.nav_aids; D24): the POSITIONED
+// generalization of `fit` — a uniform-scale, centered `Affine` framing an arbitrary
+// composition-space `region` into a `pane_w`×`pane_h` pane, preserving the pane's
+// aspect and simply centering the region (no re-aspecting, no pixel rounding — it is a
+// VIEW change, not a shot mint, D-nav_aids-2/Constraint 7). All three aids
+// (fit-to-frame / fit-to-cell / zoom-to-selection) frame `interact::selected_extent`
+// through this one primitive. A degenerate region (empty/inverted/non-finite) or a
+// non-positive pane yields identity — no NaN escapes (D-fit_bounds-3).
+arbc::Affine fit_region(const arbc::Rect& region, double pane_w, double pane_h);
 
 // --- Provisional cell placement (editor.cells.model; D3/D8/A16) ---------------
 
