@@ -88,6 +88,19 @@ public:
   bool can_delete() const override;
   std::size_t delete_selected() override;
 
+  // --- Frame Selection (editor.cameras.frame_selection / D23) ------------------
+  // The ten-line join L1 structurally cannot host (`commands` may not include `interact`,
+  // `interact` may not include `commands`), performed INSIDE `run_edit` on the writer thread
+  // against the LIVE document (D-frame_selection-5): `interact::pick_targets` ->
+  // `interact::selected_extent` -> `interact::shot_from_extent` ->
+  // `commands::add_camera_command` -> `dispatch`. Resolving the geometry inside the closure is
+  // D-cells_remove-3's rule strengthened — here the EXTENTS, not just the ids, must come from
+  // the generation the transaction lands on. `can_frame_selection` is the cheap gate both the
+  // rail and (later) the inspector poll every frame; `frame_selection` returns whether a camera
+  // was actually minted, so an all-unbounded selection is an honest, mutation-free `false`.
+  bool can_frame_selection() const override;
+  bool frame_selection() override;
+
   // Install the source of the provisional placement's framing — the shell binds it to
   // the live canvas's transient viewport camera + pane size, read by value per insert
   // (Constraint 7). Default: none, so a headless gateway (no canvas) frames the root

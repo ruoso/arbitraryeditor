@@ -186,6 +186,23 @@ public:
   // impl overrides both.
   virtual bool can_delete() const { return false; }
   virtual std::size_t delete_selected() { return 0; }
+
+  // Frame Selection (editor.cameras.frame_selection / D19/D23): mint a camera fit to the
+  // project-level selection's placed extent — the eighth verb that acts on THIS process's one
+  // owned session, and the editor's FIRST camera-creation affordance. A rail ACTION, never a
+  // fifth modal `ToolId`: D20 rules on this verb by name ("ad-hoc crop = frame a camera (D14),
+  // not a mode"). `can_frame_selection()` gates the rail item — disabled, not hidden, when it
+  // is false (Constraint 13) — and is deliberately the cheap "is anything selected?" question,
+  // so an all-unbounded selection is an enabled item whose click mutates nothing and returns
+  // false (D-frame_selection-7).
+  //
+  // Two `bool`s carry everything the rail and the e2e need, so like `can_delete`/
+  // `delete_selected` this seam needs not even a dock-local POD: `dock` may include neither
+  // `ace/scene` nor `ace/commands` (A12/A13). Non-pure with inert defaults, so the gateway
+  // fakes of unrelated suites need no churn — an unwired gateway simply has nothing to frame.
+  // The shipped L4 impl overrides both; `editor.panels.inspector` reuses this same pair.
+  virtual bool can_frame_selection() const { return false; }
+  virtual bool frame_selection() { return false; }
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by

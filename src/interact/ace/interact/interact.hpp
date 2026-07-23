@@ -108,6 +108,38 @@ struct ShotFraming {
 // `editor.cameras.export`'s, deliberately out of scope here.
 ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_h);
 
+// --- Frame selection (editor.cameras.frame_selection; D23) --------------------
+
+// The largest side a MINTED camera may be given. A composition-scale selection must not mint
+// a terapixel camera whose export (D14) would allocate terabytes; the longer side is clamped
+// to this with the aspect preserved, and the inspector's W x H fields are the documented
+// escape hatch for anything the clamp changed (D9).
+inline constexpr int k_max_mint_resolution = 8192;
+
+// The (frame, resolution) a "frame selection" mints from the composition-space region
+// `extent` — the SECOND producer of `ShotFraming`, sharing D23's one derivation rule with
+// `new_shot_from_view` rather than inventing a second shape.
+//
+// The resolution is the region at 1 COMPOSITION UNIT = 1 PIXEL, rounded to whole pixels,
+// clamped so the longer side never exceeds `k_max_mint_resolution` (aspect preserved) and so
+// each side is at least 1 (D-frame_selection-2). That is the zoom-1:1 specialization of the
+// rule `new_shot_from_view` already ships, which is what lets D23 state ONE rule for both: an
+// unscaled cell framed exactly reproduces its own native pixel count (D8 read back through a
+// camera), and the derivation is pure — no pane, no zoom, no `ViewFraming`.
+//
+// The frame is `extent` EXPANDED ABOUT ITS CENTER — never cropped — to the ROUNDED
+// resolution's aspect, so pixels stay square (`a == d`, D9's aspect-lock) and nothing that
+// was selected falls outside the minted frame (Constraint 3). Orientation is the SAME
+// device -> composition convention every shipped consumer reads (`interact.hpp:143-145`): it
+// places `[0,width]x[0,height]` onto the framed region, so `viewport_camera_for_shot` renders
+// exactly that crop. The frame is axis-aligned — the minted camera has no dutch rotation (D9
+// makes dutch modifier-gated and gizmo-driven), which is why an AABB is what "fit to the
+// selection" means (D-frame_selection-4).
+//
+// A degenerate `extent` (empty, inverted, or non-finite) yields `{identity, 0, 0}` — the
+// caller's "nothing to frame" sentinel, refused rather than guessed at (D-fit_bounds-3).
+ShotFraming shot_from_extent(const arbc::Rect& extent);
+
 // --- Look through a shot (editor.cameras.look_through; D2/D9/D18) --------------
 
 // The inverse of `new_shot_from_view` (D-look_through-4): given a shot's FRAME

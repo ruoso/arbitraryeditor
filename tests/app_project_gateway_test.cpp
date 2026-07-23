@@ -5,13 +5,23 @@
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
 #include <ace/project/project.hpp>
+#include <ace/scene/camera.hpp>
+#include <ace/scene/cell.hpp>
 
+#include <arbc/base/expected.hpp>
+#include <arbc/base/geometry.hpp>
+#include <arbc/base/ids.hpp>
+#include <arbc/base/transform.hpp>
+#include <arbc/model/journal.hpp>
 #include <arbc/runtime/document.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -419,4 +429,130 @@ TEST_CASE("AppProjectGateway::pick_folder forwards and survives teardown mid-pic
   }
   dialog.deliver();
   REQUIRE(delivered);
+}
+
+// --- Frame Selection (editor.cameras.frame_selection / D23) -------------------------------
+// The L4 join over the headless direct-invoke edit runner (no shell, no canvas): the branch
+// that proves the two new virtuals are honest without any ImGui.
+
+TEST_CASE("AppProjectGateway::frame_selection mints one camera fit to the selection",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  session.document().add_composition(256.0, 256.0);
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+  // Deliberately no set_edit_runner: the direct-invoke default (Constraint 8's headless arm).
+
+  // Two 32x32 rasters, placed apart: the framed region is the union of BOTH placed extents.
+  const arbc::expected<arbc::ObjectId, std::string> left =
+      ace::scene::add_cell(session.document(), session.registry(), "org.arbc.raster", "32x32",
+                           arbc::Affine::translation(10.0, 10.0));
+  const arbc::expected<arbc::ObjectId, std::string> right =
+      ace::scene::add_cell(session.document(), session.registry(), "org.arbc.raster", "32x32",
+                           arbc::Affine::translation(90.0, 42.0));
+  REQUIRE(left.has_value());
+  REQUIRE(right.has_value());
+
+  CHECK_FALSE(gateway.can_frame_selection());
+  session.selection().select(*left);
+  session.selection().add(*right);
+  CHECK(gateway.can_frame_selection());
+
+  REQUIRE(gateway.frame_selection());
+  const std::vector<ace::scene::Camera> minted = ace::scene::cameras(session.document());
+  REQUIRE(minted.size() == 1);
+  CHECK(minted[0].name == "Camera 1");
+  // The union spans [10,122]x[10,74] — 112 x 64 composition units at 1 unit per pixel.
+  CHECK(minted[0].resolution.width == 112);
+  CHECK(minted[0].resolution.height == 64);
+  const arbc::Rect covered = minted[0].frame.map_rect(arbc::Rect{0.0, 0.0, 112.0, 64.0});
+  CHECK(covered.x0 <= 10.0);
+  CHECK(covered.y0 <= 10.0);
+  CHECK(covered.x1 >= 122.0);
+  CHECK(covered.y1 >= 74.0);
+
+  // The mint touches NEITHER the selection nor any look-through state (D-frame_selection-10).
+  CHECK(session.selection().size() == 2);
+  CHECK(session.selection().contains(*left));
+  CHECK(session.selection().contains(*right));
+
+  // A second click on the SAME selection advances the auto-name and repeats the geometry.
+  REQUIRE(gateway.frame_selection());
+  const std::vector<ace::scene::Camera> again = ace::scene::cameras(session.document());
+  REQUIRE(again.size() == 2);
+  CHECK(again[1].name == "Camera 2");
+  CHECK(again[1].frame == minted[0].frame);
+  CHECK(again[1].resolution == minted[0].resolution);
+}
+
+TEST_CASE("AppProjectGateway::frame_selection refuses an empty or all-unbounded selection",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  session.document().add_composition(64.0, 64.0);
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // A factory-built `org.arbc.solid` is UNBOUNDED (D-cells_model-3): no region to frame.
+  const arbc::expected<arbc::ObjectId, std::string> fill =
+      ace::scene::add_cell(session.document(), session.registry(), "org.arbc.solid", "0.6,0,0,1",
+                           arbc::Affine::identity());
+  REQUIRE(fill.has_value());
+
+  const std::size_t depth_before = session.document().journal().depth();
+  const std::uint64_t revision_before = session.document().pin()->revision();
+
+  // (i) Nothing selected: the gate is false and the verb mutates nothing.
+  CHECK_FALSE(gateway.can_frame_selection());
+  CHECK_FALSE(gateway.frame_selection());
+
+  // (ii) Only unbounded content selected: the COARSE gate is true (D-frame_selection-7) but
+  // the verb still refuses — as a value, with the document untouched (Constraint 5).
+  session.selection().select(*fill);
+  CHECK(gateway.can_frame_selection());
+  CHECK_FALSE(gateway.frame_selection());
+
+  CHECK(ace::scene::cameras(session.document()).empty());
+  CHECK(session.document().journal().depth() == depth_before);
+  CHECK(session.document().pin()->revision() == revision_before);
+  CHECK(session.selection().size() == 1); // a refusal does not clear the selection either
+}
+
+TEST_CASE("AppProjectGateway::frame_selection runs its mutation inside the edit runner",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  session.document().add_composition(64.0, 64.0);
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  const arbc::expected<arbc::ObjectId, std::string> cell = ace::scene::add_cell(
+      session.document(), session.registry(), "org.arbc.raster", "16x16", arbc::Affine::identity());
+  REQUIRE(cell.has_value());
+  session.selection().select(*cell);
+
+  // Every UI-driven mint runs inside `CanvasView::apply_edit` (Constraint 8): the whole join —
+  // the pick_targets READ as well as the add_camera WRITE — happens inside the closure.
+  int runs = 0;
+  bool camera_inside = false;
+  gateway.set_edit_runner([&](const std::function<void()>& edit) {
+    ++runs;
+    edit();
+    camera_inside = !ace::scene::cameras(session.document()).empty();
+  });
+
+  REQUIRE(gateway.frame_selection());
+  CHECK(runs == 1);
+  CHECK(camera_inside);
+  CHECK(ace::scene::cameras(session.document()).size() == 1);
 }

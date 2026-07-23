@@ -201,6 +201,44 @@ std::vector<arbc::ObjectId> all_ids(std::span<const PickTarget> targets) {
   return ids;
 }
 
+std::optional<arbc::Rect> selected_extent(std::span<const PickTarget> targets,
+                                          std::span<const arbc::ObjectId> ids) {
+  std::optional<arbc::Rect> united;
+  for (const PickTarget& target : targets) {
+    bool wanted = false;
+    for (const arbc::ObjectId id : ids) {
+      if (id == target.id) {
+        wanted = true;
+        break;
+      }
+    }
+    if (!wanted) {
+      continue;
+    }
+    // The same admission test `placed_quad` applies, so the two agree target-for-target:
+    // unbounded content has no region, and a collapsed placement is not a shape.
+    if (!target.extent || target.extent->empty() || !finite(*target.extent)) {
+      continue;
+    }
+    if (!target.placement.inverse()) {
+      continue;
+    }
+    const arbc::Rect placed = target.placement.map_rect(*target.extent);
+    if (placed.empty() || !finite(placed)) {
+      continue; // a degenerate/non-finite contribution is skipped, never propagated as a NaN
+    }
+    if (!united) {
+      united = placed;
+      continue;
+    }
+    united->x0 = std::min(united->x0, placed.x0);
+    united->y0 = std::min(united->y0, placed.y0);
+    united->x1 = std::max(united->x1, placed.x1);
+    united->y1 = std::max(united->y1, placed.y1);
+  }
+  return united;
+}
+
 SelectionChange click_selection(std::span<const PickTarget> targets, arbc::Vec2 point,
                                 double edge_tol, double corner_tol, PickModifiers mods,
                                 arbc::ObjectId selected) {

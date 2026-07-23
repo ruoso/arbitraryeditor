@@ -306,8 +306,15 @@ task editor "Editor — host GUI over libarbc" {
     task frame_selection "Mint a camera fit to the current selection's placed extent" {
       effort 1d
       allocate team
+      complete 100
       depends editor.cells.selection, !model
-      note "Implement docs/00-design.md:262-263 'frame selection' command: compute the union of the selected targets' placed extents (arbc::Affine::map_rect over interact::PickTarget, a pure L1 helper beside pick), derive a frame + resolution from it, and dispatch scene::add_camera as one commands::Command, with a rail/inspector affordance and an e2e. Source-of-debt: tasks/refinements/editor.cells/selection.md. Design: docs/00-design.md:262-263 §6."
+      note "Implement docs/00-design.md:262-263 'frame selection' command: compute the union of the selected targets' placed extents (arbc::Affine::map_rect over interact::PickTarget, a pure L1 helper beside pick), derive a frame + resolution from it, and dispatch scene::add_camera as one commands::Command, with a rail/inspector affordance and an e2e. Source-of-debt: tasks/refinements/editor.cells/selection.md. Design: docs/00-design.md:262-263 §6. Refinement: tasks/refinements/cameras/frame_selection.md"
+    }
+    task new_shot_from_view "Rail action: promote the viewport's current framing into a saved shot" {
+      effort 0.5d
+      allocate team
+      depends !frame_selection
+      note "Add a second Edit-section rail item 'New Shot From View###new_shot_from_view' plus a ProjectGateway virtual pair; L4 impl reads ViewFraming (src/app/ace/app/view_framing.hpp, bound at src/app/shell.cpp:288), calls the already-shipped interact::new_shot_from_view (src/interact/ace/interact/interact.hpp:109), and dispatches commands::add_camera_command (shipped by editor.cameras.frame_selection) — plus an e2e. Closes the camera_inspector.cpp:41 'No cameras — create a shot from the view.' lie. Source-of-debt: tasks/refinements/cameras/frame_selection.md. Design: docs/00-design.md D23, :64-66."
     }
     task export "Export via cameras (render_offline); PNG; batch; contact sheet" {
       effort 3d

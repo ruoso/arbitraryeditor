@@ -1,10 +1,13 @@
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/cameras.hpp>
 #include <ace/commands/cells.hpp>
 #include <ace/commands/exec_new.hpp>
 #include <ace/interact/interact.hpp>
+#include <ace/interact/pick.hpp>
 #include <ace/project/project.hpp>
+#include <ace/scene/camera.hpp>
 #include <ace/scene/cell.hpp>
 
 #include <arbc/base/expected.hpp>
@@ -257,6 +260,41 @@ std::size_t AppProjectGateway::delete_selected() {
   std::size_t removed = 0;
   run_edit([this, &removed] { removed = ace::commands::delete_selection(app_state_).removed; });
   return removed;
+}
+
+bool AppProjectGateway::can_frame_selection() const {
+  return ace::commands::can_frame_selection(app_state_);
+}
+
+bool AppProjectGateway::frame_selection() {
+  // The whole join runs INSIDE the edit closure, on the writer thread, against the live
+  // document (D-frame_selection-5 / Constraint 7): `add_camera` opens transactions, and the
+  // geometry the transaction is derived from must come from the same generation it lands on —
+  // never from a UI-thread pick-target cache taken frames earlier.
+  bool minted = false;
+  run_edit([this, &minted] {
+    const std::vector<ace::interact::PickTarget> targets =
+        ace::interact::pick_targets(app_state_.document(), app_state_.registry());
+    const std::optional<arbc::Rect> extent =
+        ace::interact::selected_extent(targets, app_state_.selection().items());
+    if (!extent.has_value()) {
+      return; // nothing bounded to frame: mutate nothing, refuse as a value (Constraint 5)
+    }
+    const ace::interact::ShotFraming shot = ace::interact::shot_from_extent(*extent);
+    if (shot.width <= 0 || shot.height <= 0) {
+      return; // the degenerate-extent sentinel; still a mutation-free refusal
+    }
+    ace::commands::AddCameraOutcome outcome;
+    const ace::commands::Command command = ace::commands::add_camera_command(
+        app_state_.registry(), ace::commands::next_camera_name(app_state_.document()),
+        ace::scene::Resolution{shot.width, shot.height}, shot.frame, outcome);
+    ace::commands::dispatch(app_state_, command);
+    // The mint touches NEITHER the selection NOR any canvas's look-through camera
+    // (D-frame_selection-10): framing then re-framing the same set must not need a re-select,
+    // and which camera a canvas looks through is transient session state, not scene data.
+    minted = outcome.camera.valid();
+  });
+  return minted;
 }
 
 } // namespace ace::app

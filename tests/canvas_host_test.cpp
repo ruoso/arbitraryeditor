@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -1109,4 +1110,66 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
   // A stable final target count: the probe's own untokened solid + every insert + the camera.
   CHECK(last_targets == static_cast<std::size_t>(k_inserts) + 2);
   CHECK(ace::interact::pick_targets(*probe.document, registry).size() == last_targets);
+}
+
+TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a camera WRITE in one "
+          "apply_edit — runs clean against the live render walk") {
+  // editor.cameras.frame_selection Acceptance (Threading): a genuinely NEW threading surface.
+  // Every prior edit performed only a WRITE inside `apply_edit`; the mint performs a full
+  // document READ WALK there too — `interact::pick_targets` resolves every Content and calls
+  // the `bounds()` virtual — and then, in the SAME closure, `scene::add_camera` binds a Content
+  // vtable and attaches a layer (two transactions). Resolving the geometry inside the edit is
+  // D-cells_remove-3's rule strengthened (Constraint 7): the extents, not just the ids, must
+  // come from the generation the transaction lands on. Driven on the REAL interactive pool
+  // (the D-edit_render_sync-3 anchor) while the render thread walks the same document over the
+  // lock-free `pin()` seam. No new lock, no new thread, no new suppression.
+  ProbeDocument probe = build_probe_document();
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  constexpr int k_mints = 16;
+  std::size_t minted = 0;
+  for (int i = 0; i < k_mints; ++i) {
+    // A bounded cell to frame, so the union is never empty and the walk keeps growing.
+    host.apply_edit([&] {
+      const auto added = ace::scene::add_cell(
+          *probe.document, registry, "org.arbc.raster", "24x24",
+          arbc::Affine::translation(static_cast<double>(i) * 3.0, static_cast<double>(i) * 3.0));
+      REQUIRE(added.has_value());
+    });
+    // The SHIPPED mint, whole, inside ONE apply_edit: read the stack, union the placed
+    // extents, derive the framing, write the camera.
+    host.apply_edit([&] {
+      const std::vector<ace::interact::PickTarget> targets =
+          ace::interact::pick_targets(*probe.document, registry);
+      const std::vector<arbc::ObjectId> ids = ace::interact::all_ids(targets);
+      const std::optional<arbc::Rect> extent = ace::interact::selected_extent(targets, ids);
+      REQUIRE(extent.has_value()); // the inserted rasters are bounded
+      const ace::interact::ShotFraming shot = ace::interact::shot_from_extent(*extent);
+      REQUIRE(shot.width > 0);
+      if (ace::scene::add_camera(*probe.document, registry, "Camera " + std::to_string(i + 1),
+                                 ace::scene::Resolution{shot.width, shot.height}, shot.frame)
+              .valid()) {
+        ++minted;
+      }
+    });
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  host.stop();
+  handle->join();
+
+  // Every mint landed exactly once, and the cameras are all still there (a camera renders zero
+  // pixels, so the render walk saw them without ever compositing one).
+  CHECK(minted == static_cast<std::size_t>(k_mints));
+  CHECK(ace::scene::cameras(*probe.document).size() == static_cast<std::size_t>(k_mints));
 }

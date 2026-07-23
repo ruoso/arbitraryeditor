@@ -111,6 +111,46 @@ ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_
   return shot;
 }
 
+ShotFraming shot_from_extent(const arbc::Rect& extent) {
+  const double region_w = extent.width();
+  const double region_h = extent.height();
+  if (extent.empty() || !std::isfinite(region_w) || !std::isfinite(region_h) ||
+      !std::isfinite(extent.x0) || !std::isfinite(extent.y0)) {
+    return ShotFraming{}; // {identity, 0, 0}: the caller's "nothing to frame" sentinel
+  }
+  // 1 composition unit = 1 pixel (D23), scaled down uniformly when the longer side would
+  // exceed the mint clamp — so the aspect survives the clamp instead of being letterboxed.
+  const double longest = std::max(region_w, region_h);
+  const double k_max = static_cast<double>(k_max_mint_resolution);
+  const double clamp_scale = longest > k_max ? k_max / longest : 1.0;
+  ShotFraming shot;
+  shot.width =
+      std::clamp(static_cast<int>(std::lround(region_w * clamp_scale)), 1, k_max_mint_resolution);
+  shot.height =
+      std::clamp(static_cast<int>(std::lround(region_h * clamp_scale)), 1, k_max_mint_resolution);
+
+  // Rounding to whole pixels perturbs the aspect by up to one pixel, so re-fit the covered
+  // region to the ROUNDED aspect: EXPAND the short axis about the center (never crop, so
+  // nothing the user selected falls outside) and pixels come out exactly square (D9).
+  const double res_w = static_cast<double>(shot.width);
+  const double res_h = static_cast<double>(shot.height);
+  double covered_w = region_w;
+  double covered_h = region_h;
+  if (region_w * res_h >= region_h * res_w) {
+    covered_h = region_w * res_h / res_w; // the region is wider than the aspect: grow height
+  } else {
+    covered_w = region_h * res_w / res_h; // taller than the aspect: grow width
+  }
+  const double center_x = (extent.x0 + extent.x1) * 0.5;
+  const double center_y = (extent.y0 + extent.y1) * 0.5;
+  // device -> composition, exactly as `new_shot_from_view` orients it: [0,W]x[0,H] onto the
+  // covered region. Square pixels means the two scales agree: covered_w/W == covered_h/H.
+  shot.frame = arbc::Affine{
+      covered_w / res_w,         0.0, 0.0, covered_h / res_h, center_x - covered_w * 0.5,
+      center_y - covered_h * 0.5};
+  return shot;
+}
+
 arbc::Affine viewport_camera_for_shot(const arbc::Affine& frame, int native_w, int native_h,
                                       int out_w, int out_h) {
   if (native_w <= 0 || native_h <= 0 || out_w <= 0 || out_h <= 0) {

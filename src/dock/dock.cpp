@@ -191,12 +191,13 @@ void draw_insert_cell_modal(Dockspace& dockspace, ProjectGateway& gateway) {
 }
 
 // The rail's Edit section: the one-shot "put a cell in the composition" entry point
-// (D3) and its inverse, "take the selection back out" (editor.cells.remove). A
-// confirmed one-shot op is what the two existing modals are for, so Insert is a modal
-// rather than a ninth view type (D-cells_model-5); Delete is an immediate rail ACTION
-// with no confirm — it is a journaled, undoable transaction, and the confirm modal
-// exists for Clean up precisely because GC is NOT undoable (D15 / D-cells_remove-4).
-// Both are actions, never a fifth modal `ToolId` (D20 / D-cells_remove-6).
+// (D3), its inverse, "take the selection back out" (editor.cells.remove), and "mint a
+// camera fit to the selection" (editor.cameras.frame_selection). A confirmed one-shot
+// op is what the two existing modals are for, so Insert is a modal rather than a ninth
+// view type (D-cells_model-5); Delete and Frame Selection are immediate rail ACTIONS
+// with no confirm — both are journaled, undoable transactions, and the confirm modal
+// exists for Clean up precisely because GC is NOT undoable (D15 / D-cells_remove-4 /
+// D-frame_selection-8). All three are actions, never a fifth modal `ToolId` (D20).
 void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
   ImGui::Separator();
   ImGui::TextUnformatted("Edit");
@@ -209,6 +210,15 @@ void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
   ImGui::BeginDisabled(!can_delete);
   if (ImGui::Selectable("Delete Selected###delete_selected") && can_delete) {
     gateway.delete_selected();
+  }
+  ImGui::EndDisabled();
+  // Same disabled-not-hidden rule (Constraint 13). No confirm and no chord: framing has
+  // no conventional binding and the input map is still open (§11), so minting one here
+  // would pre-empt the leaf that writes it (D-frame_selection-8).
+  const bool can_frame = gateway.can_frame_selection();
+  ImGui::BeginDisabled(!can_frame);
+  if (ImGui::Selectable("Frame Selection###frame_selection") && can_frame) {
+    gateway.frame_selection();
   }
   ImGui::EndDisabled();
   draw_insert_cell_modal(dockspace, gateway);

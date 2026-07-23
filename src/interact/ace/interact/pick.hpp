@@ -116,6 +116,26 @@ std::vector<arbc::ObjectId> marquee(std::span<const PickTarget> targets, const a
 // AND cameras AND unbounded content, because D7/D20 make them one shape under one select tool.
 std::vector<arbc::ObjectId> all_ids(std::span<const PickTarget> targets);
 
+// The axis-aligned composition-space union of the placed extents of the targets whose `id` is
+// in `ids` — "the region the selection occupies" (editor.cameras.frame_selection, D23). Each
+// contribution is `target.placement.map_rect(*target.extent)` (`transform.hpp:38`), and that
+// loses NO tightness: the AABB of a union of point sets IS the coordinate-wise min/max of the
+// per-set AABBs, so unioning bounded quads is byte-identical to bounding the unioned
+// `placed_quad` corners (D-frame_selection-4). Order-independent, and `ids` may name targets
+// that are not present (they contribute nothing).
+//
+// KIND-AGNOSTIC (D-frame_selection-3): a selected CAMERA contributes its own output rectangle
+// exactly like a cell contributes its bounds, because `pick_targets` already fills both with
+// the same `{placement, extent}` pair — so framing a camera reproduces its crop.
+//
+// UNBOUNDED members (`extent == nullopt`) are SKIPPED, the same asymmetry `marquee` ships
+// (D-selection-5): an unbounded fill has no region, so including it would frame the infinite
+// plane. So are degenerate contributions — an empty/non-finite extent, a non-invertible
+// placement, a non-finite mapped rect (the D-fit_bounds-3 fallback discipline). `nullopt` when
+// nothing bounded remains, which the caller reads as "there is nothing to frame" and refuses.
+std::optional<arbc::Rect> selected_extent(std::span<const PickTarget> targets,
+                                          std::span<const arbc::ObjectId> ids);
+
 // --- The modifier policy, returned as a VALUE (D-selection-2) -----------------------------
 
 // The intended mutation of the project-level selection. `interact` cannot see `commands`
