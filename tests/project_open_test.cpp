@@ -7,8 +7,12 @@
 #include <ace/platform/filesystem.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/render.hpp>
+#include <ace/scene/cell.hpp>
 
 #include <arbc/base/transform.hpp>
+#include <arbc/builtin_kinds.hpp>
+#include <arbc/contract/content.hpp>
+#include <arbc/contract/registry.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/model/model.hpp>
 #include <arbc/runtime/document.hpp>
@@ -16,6 +20,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -123,6 +128,46 @@ void write_probe_canonical(const ace::platform::FileSystem& fs, const ProjectLay
   REQUIRE(!fs.write_file(layout.canonical, *bytes));
 }
 
+// Scaffold a project whose CHECKPOINTED workspace holds one placed built-in content, then
+// release it so the workspace file stays on disk with the content durable in it. The
+// fixture the map-then-inspect guard is judged on (A19): `create_project` writes no
+// `project.arbc`, so a caller decides separately whether a canonical floor exists
+// (`write_probe_canonical`). Uses a built-in kind on purpose — the map path's inability to
+// bind content is kind-agnostic, not a custom-kind quirk (D-slab_adopt-7).
+void author_content_bearing_workspace(const ace::platform::FileSystem& fs,
+                                      const std::filesystem::path& root,
+                                      const arbc::Registry& registry) {
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  arbc::Document& doc = *created.value().document;
+  doc.add_composition(static_cast<double>(ace::project::k_probe_width),
+                      static_cast<double>(ace::project::k_probe_height));
+  // Authored through the real insert path so the `ContentRecord`'s kind token is the
+  // registry-seeded one (A16) — a hand-minted token of 0 is not what a project carries.
+  REQUIRE(ace::scene::add_cell(doc, registry, "org.arbc.solid", "0,0.5,0,1",
+                               arbc::Affine::translation(3.0, 4.0))
+              .has_value());
+  REQUIRE(doc.checkpoint().has_value());
+} // released here: workspace unmapped, HousekeepingThread joined
+
+// The built-in registry a document's cells are authored and read back through.
+arbc::Registry builtin_registry() {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  return registry;
+}
+
+// How many of `document`'s layer-bound contents the binding table actually serves.
+std::size_t bound_content_count(const arbc::Document& document) {
+  std::size_t bound = 0;
+  document.pin()->for_each_layer([&](const arbc::LayerRecord& layer) {
+    if (layer.content.valid() && document.resolve(layer.content) != nullptr) {
+      ++bound;
+    }
+  });
+  return bound;
+}
+
 } // namespace
 
 TEST_CASE("create_project scaffolds the bundle and mints a workspace-backed document") {
@@ -167,12 +212,175 @@ TEST_CASE("open_project maps the crash-durable workspace on reopen") {
   const auto opened = ace::project::open_project(fs, root);
   REQUIRE(opened.has_value());
   CHECK_FALSE(opened.value().rebuilt_from_canonical); // mapped the workspace, not rebuilt
+  // Nothing was lost to the map: this workspace holds no content record at all, so the
+  // guard's inspection finds nothing unbindable and the fast path survives (A19).
+  CHECK(opened.value().unbindable_content_records == 0);
 
   // The checkpointed mutation (the composition) survived the reopen — proof the
   // crash-durable workspace, not an empty fresh document, was recovered.
   arbc::ObjectId composition{};
   const arbc::CompositionRecord* record = nullptr;
   CHECK(opened.value().document->pin()->find_first_composition(composition, record));
+}
+
+// --- editor.cameras.reopen_slab_adopt: what the workspace map actually recovers, and
+// the map-then-inspect guard built on it (A19) ----------------------------------------
+
+TEST_CASE("a workspace-mapped reopen restores the record graph but binds NO content") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "unbound";
+  const ProjectLayout layout = ace::project::project_layout(root);
+
+  const arbc::Registry registry = builtin_registry();
+  arbc::ObjectId content{};
+  arbc::ObjectId layer{};
+  const arbc::Affine placement = arbc::Affine::translation(3.0, 4.0);
+  {
+    auto created = ace::project::create_project(fs, root);
+    REQUIRE(created.has_value());
+    arbc::Document& doc = *created.value().document;
+    doc.add_composition(static_cast<double>(ace::project::k_probe_width),
+                        static_cast<double>(ace::project::k_probe_height));
+    REQUIRE(
+        ace::scene::add_cell(doc, registry, "org.arbc.solid", "0,0.5,0,1", placement).has_value());
+    const std::vector<ace::scene::Cell> live = ace::scene::cells(doc, registry);
+    REQUIRE(live.size() == 1);
+    content = live[0].id;
+    layer = live[0].layer;
+    REQUIRE(doc.resolve(content) != nullptr); // bound while the document is live
+    REQUIRE(doc.checkpoint().has_value());
+  } // released: workspace unmapped, HousekeepingThread joined
+
+  // Straight through `arbc::Document::open`, deliberately BYPASSING `open_project`'s
+  // guard: this case pins the LIBRARY behaviour A19 rests on, not the editor policy that
+  // reacts to it. `org.arbc.solid` is a BUILT-IN, non-editable kind with an inert
+  // `StateHandle` — so what follows is not a custom-kind or an editable-kind quirk
+  // (D-slab_adopt-7; tests/camera_model_test.cpp asserts the same for `org.arbc.camera`).
+  auto mapped = arbc::Document::open(layout.workspace_file.string());
+  REQUIRE(mapped.has_value());
+  const arbc::Document& doc = **mapped;
+  const arbc::DocStatePtr pinned = doc.pin();
+  REQUIRE(pinned != nullptr);
+
+  // The record graph survives intact...
+  arbc::ObjectId composition{};
+  const arbc::CompositionRecord* comp = nullptr;
+  CHECK(pinned->find_first_composition(composition, comp));
+  const arbc::LayerRecord* record = pinned->find_layer(layer);
+  REQUIRE(record != nullptr);
+  CHECK(record->content == content);
+  CHECK(record->transform.a == placement.a);
+  CHECK(record->transform.b == placement.b);
+  CHECK(record->transform.c == placement.c);
+  CHECK(record->transform.d == placement.d);
+  CHECK(record->transform.tx == placement.tx);
+  CHECK(record->transform.ty == placement.ty);
+
+  // ...and NOTHING is bound. `Document::open(path, housekeeping)` takes no `Registry`
+  // and runs no factory (arbc `runtime/document.hpp:76-85`), so the id→`Content`
+  // side-map starts empty and stays empty.
+  CHECK(doc.resolve(content) == nullptr);
+  std::size_t visited = 0;
+  doc.for_each_content([&visited](arbc::Content*) { ++visited; });
+  CHECK(visited == 0);
+
+  // The consequence at the editor's read seam, and it differs by accessor — worth pinning
+  // exactly, because "the map is unusable" is the claim A19 rests on. `scene::cells`
+  // deliberately survives an unresolvable/unbound content (D-cells_model-8: "an
+  // unknown-passthrough cell is still a cell"), so it still REPORTS the layer, off the
+  // record graph, with the kind token intact — but with nothing behind it: no live
+  // `Content`, hence no extent and nothing to render, edit, or hit-test.
+  // `scene::cameras` has no such fallback (it needs a `dynamic_cast` on `resolve`) and
+  // drops the camera outright — asserted in tests/camera_model_test.cpp.
+  const std::vector<ace::scene::Cell> mapped_cells = ace::scene::cells(doc, registry);
+  REQUIRE(mapped_cells.size() == 1);
+  CHECK(mapped_cells[0].kind_id == "org.arbc.solid"); // the record's kind token survived
+  CHECK(mapped_cells[0].id == content);
+  CHECK(doc.resolve(mapped_cells[0].id) == nullptr); // ...and that is all that survived
+  CHECK_FALSE(mapped_cells[0].content_bounds.has_value());
+}
+
+TEST_CASE("open_project rebuilds a content-bearing workspace even with no extra-kinds callback") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "unbindable";
+  const arbc::Registry registry = builtin_registry();
+  author_content_bearing_workspace(fs, root, registry);
+  write_probe_canonical(fs, ace::project::project_layout(root));
+
+  // NO extra-kinds callback, so the OLD guard's only condition was absent and this reopen
+  // took the map fast path — handing back a document whose every `resolve()` was null.
+  // That was the latent bug on the shared open path (D-slab_adopt-4): the caller has no
+  // editor kinds, but the map binds no BUILT-IN content either. Map-then-inspect rejects
+  // it and falls through to the canonical rebuild, which is the only route to live content.
+  const auto opened = ace::project::open_project(fs, root);
+  REQUIRE(opened.has_value());
+  CHECK(opened.value().rebuilt_from_canonical);
+  CHECK(opened.value().unbindable_content_records == 0); // nothing lost: it rebuilt
+
+  // Asserted as LIVE CONTENT, not merely as the flag, so this case cannot regress into
+  // pinning an empty document the way its predecessor did — a mapped reopen would report
+  // this same cell off the record graph with a null `resolve()` behind it.
+  const std::vector<ace::scene::Cell> cells = ace::scene::cells(*opened.value().document, registry);
+  REQUIRE(cells.size() == 1);
+  CHECK(cells[0].kind_id == "org.arbc.solid");
+  CHECK(opened.value().document->resolve(cells[0].id) != nullptr);
+  CHECK(bound_content_count(*opened.value().document) == 1);
+}
+
+TEST_CASE("open_project keeps the map fast path for a content-free workspace") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "contentfree";
+  const ProjectLayout layout = ace::project::project_layout(root);
+  {
+    auto created = ace::project::create_project(fs, root);
+    REQUIRE(created.has_value());
+    arbc::Document& doc = *created.value().document;
+    // A composition and no content: there is nothing the map could fail to bind, so
+    // there is nothing to gain by rebuilding.
+    doc.add_composition(static_cast<double>(ace::project::k_probe_width),
+                        static_cast<double>(ace::project::k_probe_height));
+    REQUIRE(doc.checkpoint().has_value());
+  }
+  write_probe_canonical(fs, layout);
+
+  // A canonical floor EXISTS, so the guard could rebuild — and does not. The guard is
+  // content-driven, not a blanket disable: A13's crash-recovery of unpublished
+  // RECORD-level edits survives exactly where it is harmless.
+  const auto opened = ace::project::open_project(fs, root);
+  REQUIRE(opened.has_value());
+  CHECK_FALSE(opened.value().rebuilt_from_canonical);
+  CHECK(opened.value().unbindable_content_records == 0);
+}
+
+TEST_CASE("a never-saved content-bearing project keeps the map and REPORTS the loss") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "nocanon_content";
+  const arbc::Registry registry = builtin_registry();
+  author_content_bearing_workspace(fs, root, registry);
+  const ProjectLayout layout = ace::project::project_layout(root);
+  REQUIRE(fs.exists(layout.workspace_file));
+  REQUIRE_FALSE(fs.exists(layout.canonical)); // create_project publishes nothing
+
+  // No canonical to rebuild from: the mapped document is all the project has, and
+  // `NoProject` would be strictly worse, so it is KEPT. What changes is that the loss
+  // stops being silent — the count is a VALUE on a successful open, not an error
+  // (D-slab_adopt-5). Without it a user reads this reopen as "my work was never saved."
+  const auto opened = ace::project::open_project(fs, root);
+  REQUIRE(opened.has_value());
+  CHECK_FALSE(opened.value().rebuilt_from_canonical);
+  CHECK(opened.value().unbindable_content_records == 1);
+  CHECK(bound_content_count(*opened.value().document) == 0);
+
+  // The count is exactly what the user lost: the cell is still listed off the record graph
+  // (D-cells_model-8's unknown-passthrough fallback) but nothing is bound behind it, so it
+  // renders nothing, hit-tests to nothing, and cannot be edited.
+  const std::vector<ace::scene::Cell> cells = ace::scene::cells(*opened.value().document, registry);
+  REQUIRE(cells.size() == 1);
+  CHECK(opened.value().document->resolve(cells[0].id) == nullptr);
 }
 
 TEST_CASE("open_project rebuilds from the canonical project.arbc when the workspace is absent") {

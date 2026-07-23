@@ -1,5 +1,5 @@
 // editor.canvas.arbc_v030 — the libarbc pin guard, headless + GL-free
-// (docs/01-architecture.md §9). Two jobs, one file:
+// (docs/01-architecture.md §9). Three jobs, one file:
 //
 //  1. PIN EFFECTIVENESS (D-arbc_v030-2). `ARBC_GIT_TAG` is a `CACHE` variable set WITHOUT
 //     `FORCE` (CMakeLists.txt:25) and `scripts/gate` reconfigures in place without wiping
@@ -20,22 +20,44 @@
 //     (arbc#15), which is what lets `src/dock/dock.cpp:337,343` keep calling `can_undo()` /
 //     `can_redo()` per frame once the UI thread stops being the writer.
 //
-// This leaf consumes NONE of the new surface in `src/` (D-arbc_v030-1) — these cases are
-// the only place it is named. The spawned-thread cases run in the ASan and TSan lanes.
+//  3. THE arbc#5 RECOVERED-STATE SURFACE, AND WHAT IT ACTUALLY DELIVERED
+//     (`editor.cameras.reopen_slab_adopt`, A19). That leaf's `.tji` prescribed "register
+//     a `KindStateWalker`, call `replay_recovered_content_state` on the `Document::open`
+//     map path, retire A15". The trio is named at the bottom of this file as a
+//     compile-time witness that it is PRESENT at the pin — the plan was rejected on
+//     REACHABILITY, not on absence — and the one real gain is asserted as behaviour: a
+//     checkpointed NON-INERT `StateHandle` now reopens through `arbc::Document::open`
+//     without the v0.1.0 abort. That case runs in the ASan lane specifically, because
+//     the v0.1.0 release-build failure mode was silent handle corruption, not a crash.
+//
+// `editor.canvas.arbc_v030` consumes NONE of the writer-identity surface in `src/`
+// (D-arbc_v030-1) — cases 1-2 are the only place it is named. The spawned-thread cases
+// run in the ASan and TSan lanes.
 
 #include <ace/platform/threads.hpp>
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
+#include <arbc/builtin_kinds.hpp>
+#include <arbc/contract/content.hpp>
+#include <arbc/contract/registry.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/model/journal.hpp>
+#include <arbc/model/model.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/recovered_state_replay.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -75,6 +97,23 @@ JournalReads foreign_sample(const arbc::Journal& journal) {
   on_a_foreign_thread([&] { reads = sample(journal); });
   return reads;
 }
+
+// A temp dir wiped on entry and exit (the platform_test pattern), named distinctly from
+// every other suite's so the two never collide in one binary. The workspace-backed pin
+// cases need a real file: `Document::create`/`open` are the only route to a
+// checkpointable document, and a checkpoint is what makes a `StateHandle` persisted.
+struct ScratchDir {
+  std::filesystem::path root;
+  ScratchDir() : root(std::filesystem::temp_directory_path() / "ace_arbc_pin_test") {
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root, ec);
+  }
+  ~ScratchDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+  }
+};
 
 // One placed solid over a root composition — the cheapest document that journals several
 // entries. Returns the layer, so a caller can keep editing it.
@@ -200,4 +239,92 @@ TEST_CASE("arbc pin: journal enable state is readable from a non-writer thread")
 
   REQUIRE(journal.redo());
   CHECK(foreign_sample(journal) == after_edits);
+}
+
+// --- editor.cameras.reopen_slab_adopt: the arbc#5 recovered-state surface (A19) -------
+
+// Compile-time witnesses that the whole arbc#5 trio is PRESENT at the pin. Naming them
+// here is the record that the `.tji`'s "register a walker, call the replay" plan was
+// checked against a tree that has the API and rejected on REACHABILITY, not on absence:
+// `replay_recovered_content_state` consumes `Model::recovered_content_state()`, and
+// `arbc::Document` publishes no accessor for its `Model` — that grant is the
+// attorney-client `HostViewportDocumentAccess`, declared in the library-PRIVATE header
+// `src/runtime/document_access.hpp` ("it is not a public header, so no host can reach
+// it"), and `document.hpp:398-410` says the omission is deliberate. Unevaluated operands
+// only: these pin the signatures without odr-using a symbol.
+static_assert(std::is_same_v<decltype(arbc::KindStateWalker::reach),
+                             void (*)(void*, arbc::ObjectId, arbc::StateHandle)>);
+static_assert(
+    std::is_same_v<decltype(std::declval<const arbc::Registry&>().state_walker(std::string_view{})),
+                   const arbc::KindStateWalker*>);
+static_assert(std::is_same_v<decltype(std::declval<const arbc::Model&>().recovered_content_state()),
+                             const std::vector<arbc::Model::RecoveredContentState>&>);
+static_assert(
+    std::is_same_v<decltype(arbc::replay_recovered_content_state(
+                       std::declval<const std::vector<arbc::Model::RecoveredContentState>&>(),
+                       std::declval<const arbc::Registry&>(),
+                       std::declval<const arbc::RecoveredStateHooks&>())),
+                   arbc::RecoveredStateReplayStats>);
+
+TEST_CASE("arbc pin: a checkpointed NON-INERT StateHandle reopens through Document::open") {
+  ScratchDir scratch;
+  const std::filesystem::path file = scratch.root / "state.arbcws";
+
+  // `org.arbc.raster` is the one built-in `arbc::Editable`, so `Document::add_content`
+  // captures its live state onto the fresh `ContentRecord` — a NON-INERT `StateHandle`,
+  // structurally identical to the handle `scene::CameraContent`'s constructor mints
+  // (`src/scene/camera.cpp:165-172`). Minted through the registry factory, never by
+  // naming the concrete arbc type, so this stays a Registry-seam observation.
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  const arbc::ContentFactory* raster = registry.factory("org.arbc.raster");
+  REQUIRE(raster != nullptr);
+
+  arbc::ObjectId content{};
+  arbc::ObjectId layer{};
+  arbc::StateHandle persisted{};
+  {
+    auto created = arbc::Document::create(file.string());
+    REQUIRE(created.has_value());
+    arbc::Document& doc = **created;
+    const arbc::ObjectId composition = doc.add_composition(64.0, 64.0);
+    REQUIRE(composition.valid());
+    auto made = (*raster)("8x8");
+    REQUIRE(made.has_value());
+    content = doc.add_content(std::shared_ptr<arbc::Content>(std::move(*made)));
+    layer = doc.add_layer(content, arbc::Affine::translation(5.0, 7.0));
+    doc.attach_layer(composition, layer);
+
+    persisted = doc.pin()->content_state(content);
+    REQUIRE(persisted.has_state()); // non-inert: the case v0.1.0 could not recover
+    REQUIRE(doc.checkpoint().has_value());
+  } // released: workspace unmapped, HousekeepingThread joined
+
+  // THE assertion. At v0.1.0 this call aborted (debug) / silently corrupted the handle
+  // (release): `Model::rebuild_counts` asserted every recovered `ContentRecord` carried
+  // an INERT handle (`model.cpp:771`), which is the premise A15 was written on. At the
+  // pin the call RETURNS and the handle comes back slot-for-slot. This is the single
+  // thing arbc#5 delivered to the editor, and it is what stops the next reader of
+  // `src/project/project_open.cpp` from re-deriving — or re-asserting — a dead premise.
+  auto reopened = arbc::Document::open(file.string());
+  REQUIRE(reopened.has_value());
+  const arbc::Document& mapped = **reopened;
+  const arbc::DocStatePtr pinned = mapped.pin();
+  REQUIRE(pinned != nullptr);
+  CHECK(pinned->content_state(content) == persisted);
+  CHECK(pinned->find_content(content) != nullptr);
+
+  // ...and the record graph survives verbatim while NO `Content` is bound (A19) — which
+  // is why the walker/replay pair witnessed above cannot restore the fast path even
+  // though both exist. The limitation is one level deeper than the state slab:
+  // `Document::open` takes no `Registry` and runs no factory.
+  const arbc::LayerRecord* record = pinned->find_layer(layer);
+  REQUIRE(record != nullptr);
+  CHECK(record->content == content);
+  CHECK(record->transform.tx == 5.0);
+  CHECK(record->transform.ty == 7.0);
+  CHECK(mapped.resolve(content) == nullptr);
+  std::size_t bound = 0;
+  mapped.for_each_content([&bound](arbc::Content*) { ++bound; });
+  CHECK(bound == 0);
 }

@@ -8,6 +8,7 @@
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge
 
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -127,14 +128,26 @@ struct OpenedProject {
   // clone, another machine, or an unusable workspace) rather than mapping the
   // crash-durable workspace. Always false for `create_project`.
   bool rebuilt_from_canonical = false;
+  // How much of a KEPT workspace-mapped document is unusable (A19): the number of
+  // layer-bound content records the mapped document could not bind, counted by
+  // walking every recovered layer and testing `Document::resolve` on its content.
+  // `Document::open` runs no factory, so a mapped reopen restores the record graph
+  // but binds NO `Content` for any kind — its cells and cameras are gone. This is a
+  // VALUE, not an error (the document did open); it is non-zero only on the
+  // canonical-absent fallback, where there is nothing to rebuild from and the loss
+  // is unavoidable, so a caller can say so instead of presenting an empty project as
+  // if nothing happened (D-slab_adopt-5). Zero on every rebuild-from-canonical open,
+  // on a content-free map, and for `create_project`.
+  std::size_t unbindable_content_records = 0;
 };
 
 // Open a project directory into a live `Document` — the LOAD direction only
-// (D-open-3). Maps the crash-durable `workspace/` if usable; on a missing or
-// unusable workspace file, rebuilds from the canonical `project.arbc`
-// (create a fresh workspace, `load_document` the canonical bytes, checkpoint).
-// Directory enumeration and reading `project.arbc` go through `fs`; the workspace
-// file and the document go through libarbc (D-platform_services-4).
+// (D-open-3). Maps the crash-durable `workspace/` when the map is USABLE; otherwise
+// (a missing or unusable workspace file, or a mapped document holding content the
+// map could not bind, A19) rebuilds from the canonical `project.arbc` — create a
+// fresh workspace, `load_document` the canonical bytes, checkpoint. Directory
+// enumeration and reading `project.arbc` go through `fs`; the workspace file and the
+// document go through libarbc (D-platform_services-4).
 //
 // `register_extra_kinds` is the extra-kinds registration hook (D-reopen-1,
 // editor.cameras.reopen_codec): an optional callback applied to the TRANSIENT
@@ -144,9 +157,14 @@ struct OpenedProject {
 // `arbc::PlaceholderContent`. It is typed ONLY on `arbc::Registry` — `project` stays
 // ignorant of WHICH kind it registers (no `project->scene` edge, Constraint 1); the
 // concrete registrar is named by the caller at a level that already sees `scene`
-// (`commands`). Absent by default (an empty `std::function`, skipped when unset), so
-// current callers and the workspace-map fast path — which runs no codec — are
-// unaffected (Constraint 3/6).
+// (`commands`). Absent by default (an empty `std::function`, skipped when unset).
+//
+// The callback also short-circuits the map: an editor-kind session with a canonical
+// present will always reject a content-bearing map, so `open_project` skips opening
+// the workspace file at all rather than mapping a potentially large arena just to
+// discard it (D-slab_adopt-4). It is ONLY an optimization now — a caller that passes
+// nothing is protected by the same map-then-inspect rule, because the map's inability
+// to bind content is kind-agnostic (A19), not specific to editor-authored kinds.
 platform::Result<OpenedProject>
 open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
              const std::function<void(arbc::Registry&)>& register_extra_kinds = {});

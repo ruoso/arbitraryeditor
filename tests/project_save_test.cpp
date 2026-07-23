@@ -12,6 +12,7 @@
 #include <ace/project/project.hpp>
 #include <ace/project/save.hpp>
 #include <ace/render/render.hpp>
+#include <ace/scene/cell.hpp>
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
@@ -288,6 +289,41 @@ TEST_CASE("a session rebuilt from project.arbc is clean at construction") {
 
   AppState state(std::move(*reopened));
   CHECK_FALSE(state.is_dirty()); // the workspace was just built from project.arbc
+}
+
+TEST_CASE("a content-bearing reopen with the workspace PRESENT is clean (it rebuilt)") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "rebuilt_content";
+
+  {
+    auto created = ace::project::create_project(fs, root);
+    REQUIRE(created.has_value());
+    AppState seed(std::move(*created));
+    dispatch(seed, Command{"add_composition",
+                           [](arbc::Document& doc) { doc.add_composition(64.0, 64.0); }});
+    // The real insert path (A16), so the record's kind token is the registry-seeded one
+    // the save-side bridge resolves — a hand-minted token would not serialize.
+    REQUIRE(ace::scene::add_cell(seed.document(), seed.registry(), "org.arbc.solid", "0,0.5,0,1",
+                                 arbc::Affine::identity())
+                .has_value());
+    REQUIRE(ace::commands::save_project(seed, fs).has_value());
+    REQUIRE(seed.document().checkpoint().has_value());
+  } // released: the workspace stays on disk, content-bearing and durable
+
+  // The dirty-baseline knock-on of `editor.cameras.reopen_slab_adopt` (A19). The workspace
+  // is PRESENT and unshed and there is no extra-kinds callback, so before that leaf this
+  // reopen mapped the workspace and the session started DIRTY over a document with no live
+  // content at all. Map-then-inspect rejects the map, the reopen rebuilds from
+  // `project.arbc`, and a rebuilt session's baseline IS the published snapshot — so more
+  // reopens now take A13's clean branch (`src/commands/app_state.cpp:70-76`). That is a
+  // correctness improvement, but it is a behaviour change on a shipped path, asserted here
+  // rather than discovered.
+  auto reopened = ace::project::open_project(fs, root);
+  REQUIRE(reopened.has_value());
+  REQUIRE(reopened.value().rebuilt_from_canonical);
+  AppState state(std::move(*reopened));
+  CHECK_FALSE(state.is_dirty());
 }
 
 TEST_CASE("save_project's dump reloads and renders byte-exact against the probe golden") {

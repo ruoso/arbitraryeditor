@@ -178,3 +178,88 @@ unresolved. No WBS task was registered; fix this when the call is made.
 **Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — tech debt note.
 
 Under the inline degenerate `WriterThread` (headless fixtures) a deferred-external nested child composites correctly (byte-exact). Under the real interactive `WorkerPool`, a deferred-external nested child composites blank even pre-settled — a pre-existing behaviour not introduced by this change. The root cause is in libarbc's worker-pool dispatch path for nested child arrivals, not in the editor. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the library fix exists.
+
+---
+
+## arbc workspace-map reopen binds no Content — the seam that would restore the fast path
+
+**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (cameras.reopen_slab_adopt, 2026-07-23) — Open questions (1).
+
+`arbc::Document::open(path, housekeeping)` takes **no `Registry`** and runs **no factory**
+(`arbc/runtime/document.hpp:76-85`), so a workspace-mapped reopen restores the record graph
+only: `resolve()` is null for every recovered record and `for_each_content()` visits none,
+for **every** kind (verified at the v0.3.0 pin for `org.arbc.solid` and `org.arbc.raster`
+alike, and pinned by `tests/arbc_pin_test.cpp` / `tests/project_open_test.cpp`). That is why
+A19's rebuild-from-canonical policy is permanent, not a stopgap, and why arbc#5's
+`KindStateWalker` could not retire it. Restoring D-open-3's durable-by-default fast path
+needs one of two library changes: a **registry-aware open**
+(`Document::open(path, registry, bridge)` reconstructing each recovered `ContentRecord`
+through `registry.factory(kind_id)` plus a state codec), or a **public rebind seam**
+(`Document::rebind_content(ObjectId, std::shared_ptr<Content>)`) — which the library today
+deliberately does not offer (`arbc/pool/slot_store.hpp:119`: *"it never rebinds and there is
+no rebind API"*). A smaller secondary ask: expose `recovered_content_state()` on `Document`,
+since `replay_recovered_content_state` is currently unreachable by any host that opens
+through `Document` rather than `Model`. Upstream-issue candidates for
+`ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
+
+---
+
+## Should the workspace-map fast path stay in open_project at all?
+
+**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (cameras.reopen_slab_adopt, 2026-07-23) — Open questions (2).
+
+After the map-then-inspect guard, the fast path survives only for **content-free**
+workspaces and for the never-saved fallback — a narrow slice. Deleting it would simplify
+`open_project` and remove a branch that has never delivered its advertised benefit for a
+real project; keeping it preserves A13's crash-recovery of unpublished **record-level** edits
+(layer transforms, z-order, composition size) where that is harmless, keeps
+`rebuilt_from_canonical` a live signal rather than a constant, and leaves the seam ready
+should the library item above land. How much dead-ish machinery to carry against a possible
+upstream fix is a human judgment call, not implementable work. No WBS task was created.
+
+---
+
+## A never-saved project still loses its cameras and cells — autosave vs. warn vs. accept
+
+**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (cameras.reopen_slab_adopt, 2026-07-23) — Open questions (3); D-slab-3's residual.
+
+`OpenedProject::unbindable_content_records` closes the **silence** (the reopen now reports
+how many objects the map could not bind) but not the **loss**: with no `project.arbc` there
+is nothing to rebuild from, and no in-repo change fixes that. Publishing a canonical floor at
+`create_project` does not work — content is added *after* create, so an empty floor loses it
+just as thoroughly, and making it work means re-dumping on every mutation, i.e. autosave,
+which contradicts D16's explicit "Save = re-dump `project.arbc`" model. Whether the product
+should autosave, or should warn at camera/cell-creation time in a never-saved project, or
+should simply accept the loss now that it is announced, is a product decision. No WBS task
+was created; the UI half of the *announcement* is the scheduled leaf
+`editor.project.reopen_degradation_notice`.
+
+---
+
+## A magnified raster cell never lets the canvas go idle
+
+**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (fixer, 2026-07-23) — surfaced while
+diagnosing a `ci-gcc-release` hang; NOT caused by that refinement (reproduced 6/6 on clean
+`ac321f0`).
+
+After `editor.canvas.nav_aids`' Shift+F frames a 32×32 `org.arbc.raster` cell into the pane
+(a ~10× magnification: the scale bar goes 50 → 5 composition units), the render loop **never
+settles**. Every `HostViewport::step()` composites a frame and reports
+`schedule_follow_up == true` — arbc's `InteractiveRenderer::render_frame` computes it as
+`!arrival_device.empty()`, so a refinement arrives, maps to a non-empty device region, and
+owes another frame, indefinitely — with `external_loads_ready == 0` and an empty in-flight
+tile queue. `frames_issued` then advances at the frame rate forever and the render thread
+burns a core for as long as the framing holds. The same fixture is quiet at 1× (one frame,
+then idle), and the nested all-`SolidContent` fixture in the same file settles in ~80 ms at
+any zoom, so the trigger is magnification of a raster leaf, not the nav aid itself.
+
+This violates `02-architecture#idle-viewport-issues-no-frames` and is a real
+battery/CPU defect, but the loop is inside the pinned library: the editor's host merely obeys
+the `schedule_follow_up` it is handed. Diagnosing whether the culprit is the tile-cache probe
+key at high magnification or the bounded per-frame budget (D-multi_canvas-3) starving the
+frame needs library-side instrumentation. Upstream-issue candidate for
+`ruoso/arbitrarycomposer`; no editor-side WBS task until the library fix exists. The
+editor-side mitigation already landed: `tests/canvas_nav_e2e_test.cpp`'s `settle()` helper is
+wall-clock bounded, so a non-idling canvas can no longer hang a lane (unbounded, it tripped
+the ImGui Test Engine's 60 s `ConfigWatchdogKillTest` and turned a 16 s `ace_shell_test` into
+a 566 s failure).

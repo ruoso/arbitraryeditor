@@ -121,9 +121,25 @@ template <class Ready> bool pump_until(ImGuiTestContext* ctx, Ready ready) {
 // (editor.canvas.blank_first_frame), so this quiet window soundly detects a settled, non-blank
 // scene — it can no longer go "quiet" on a blank first frame that the driver never published,
 // which is exactly what made a frame-count settle unsound before this leaf.
+//
+// BOUNDED by the same wall clock `pump_until` uses, because a quiet window is a HOPE, not a
+// guarantee: a canvas is only obliged to idle when the library stops owing it a follow-up
+// frame, and a deep magnification of a raster cell does not reach that state — arbc's
+// `InteractiveRenderer::render_frame` keeps reporting `schedule_follow_up` (arrival damage that
+// still maps to a non-empty device region), so the host re-drives forever and `frames_issued`
+// advances at the frame rate indefinitely. Unbounded, this helper then never returns: the
+// ImGui Test Engine's 60s `ConfigWatchdogKillTest` fires, the test is recorded as failed
+// (count_success == 0), and the binary burns minutes of CI wall clock doing it. The deadline
+// makes the wait an optimisation — every assertion downstream of it reads UI-thread state
+// (`scale_bar_units` is recomputed from `Presenter::camera` on the drawing thread each frame)
+// or a strict frame-count advance, so a settle that times out costs attribution sharpness, not
+// soundness. See `tasks/parking-lot.md` — "A magnified raster cell never lets the canvas go
+// idle" — for the library-side defect this bounds.
+constexpr auto k_settle_budget = std::chrono::seconds(10);
 void settle(ImGuiTestContext* ctx, CanvasView& canvas) {
+  const auto deadline = std::chrono::steady_clock::now() + k_settle_budget;
   std::uint64_t last = canvas.frames_issued("canvas#1");
-  for (int quiet = 0; quiet < 40;) {
+  for (int quiet = 0; quiet < 40 && std::chrono::steady_clock::now() < deadline;) {
     ctx->Yield();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     const std::uint64_t now = canvas.frames_issued("canvas#1");

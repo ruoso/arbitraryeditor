@@ -3,10 +3,12 @@
 
 #include <arbc/builtin_kinds.hpp>
 #include <arbc/contract/registry.hpp>
+#include <arbc/model/model.hpp>
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp>
 #include <arbc/runtime/filesystem_asset_source.hpp>
 
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -115,6 +117,35 @@ rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_b
   return document;
 }
 
+// How many of `document`'s recovered content records the binding table could not
+// serve (A19). `arbc::Document::open` takes no `Registry` and runs no factory, so a
+// workspace-mapped document's id→`Content` side-map starts EMPTY: the record graph
+// comes back verbatim — composition, layers, transforms, persisted `StateHandle`
+// slots — while `resolve()` answers null for every recovered record, for EVERY kind.
+// Walking `DocRoot::for_each_layer` (the global, ascending-object-id walk, so a
+// content placed inside a nested composition is counted too) and testing each layer's
+// bound content against `resolve` is therefore the direct measurement of "how much of
+// this mapped document is unusable". Zero means the map is serviceable: the record
+// graph was all there was to recover. The editor attaches each placed content by
+// exactly one layer (`scene::add_cell` / `scene::add_camera`), so the tally is the
+// count of unrecoverable placed objects.
+//
+// A lock-free pinned read (A4) on the opening thread, before the document is handed
+// to any renderer; `resolve` is documented safe from any thread regardless.
+std::size_t count_unbindable_content(const arbc::Document& document) {
+  const arbc::DocStatePtr pinned = document.pin();
+  if (pinned == nullptr) {
+    return 0;
+  }
+  std::size_t unbindable = 0;
+  pinned->for_each_layer([&](const arbc::LayerRecord& layer) {
+    if (layer.content.valid() && document.resolve(layer.content) == nullptr) {
+      ++unbindable;
+    }
+  });
+  return unbindable;
+}
+
 } // namespace
 
 std::error_code make_error_code(OpenError error) noexcept {
@@ -144,37 +175,66 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
     return make_error_code(OpenError::NotADirectory);
   }
 
-  // Fast, durable-by-default path (D-open-3): map the crash-durable workspace when
-  // the file is present and this build can map it — UNLESS this session may hold an
-  // editor-defined *editable* kind and a canonical baseline exists to rebuild from
-  // (A15). libarbc v0.1.0's map path (`Document::open` -> `Model::rebuild_counts`)
-  // asserts on a recovered non-inert `StateHandle` (`model.cpp:771`) and exposes no
-  // per-kind state-slab walk hook, so a checkpointed camera aborts (debug) / corrupts
-  // the handle (release) there. A non-empty `register_extra_kinds` is the only
-  // crash-safe signal a custom editable Content MAY be in the map — an *unpublished*
-  // camera can sit in the map with the canonical still camera-free, so canonical-content
-  // detection would fail open and abort. So we fail safe: force rebuild-from-canonical
-  // for an editor-kind session with a canonical floor (D-slab-1/2), accepting the
-  // conservative false-positive that a camera-free editor session rebuilds too. The
-  // fast path stays verbatim for callers that register no editor kinds (tools/tests,
-  // Constraint 3) and for the never-saved case with no canonical to rebuild from
-  // (Constraint 4 / D-slab-3 — a rebuild would only return `NoProject`).
-  const bool force_rebuild_for_editor_kinds = register_extra_kinds && fs.exists(layout.canonical);
-  if (fs.exists(layout.workspace_file) && !force_rebuild_for_editor_kinds) {
+  // Fast, durable-by-default path (D-open-3): map the crash-durable workspace when the
+  // file is present — then KEEP the mapped document only when it is actually usable.
+  //
+  // What the map path really does (A19, pinned by tests/arbc_pin_test.cpp and
+  // tests/project_open_test.cpp): `arbc::Document::open(path, housekeeping)` takes no
+  // `Registry` and runs no factory (arbc `runtime/document.hpp:76-85`), so it restores
+  // the RECORD GRAPH ONLY. The composition, the layers, their transforms and the
+  // persisted `StateHandle` slots all come back; the id→`Content` side-map starts empty,
+  // so `resolve()` answers null for every recovered record and `for_each_content()`
+  // visits none. That is KIND-AGNOSTIC — verified for a non-editable built-in
+  // (`org.arbc.solid`) and an editable kind alike — so a mapped reopen of a
+  // content-bearing project yields zero cells AND zero cameras, both of which read
+  // through `Document::resolve`. The canonical rebuild (`load_document` over the
+  // `Registry` codec table) is the ONLY route that produces live content.
+  //
+  // NOTE for the next reader, because the previous version of this comment said
+  // otherwise: this guard is NOT about libarbc aborting. It was first written that way
+  // — v0.1.0's `Model::rebuild_counts` asserted every recovered `ContentRecord` carried
+  // an INERT `StateHandle` (A15) — and at the v0.3.0 pin that assert is GONE
+  // (`model.cpp:768-783` collects the handle instead; the arbc#5 `KindStateWalker` /
+  // `replay_recovered_content_state` trio exists but its input is unreachable from
+  // `arbc::Document`). Mapping a checkpointed camera is safe today. It is simply useless
+  // for content — which is why the guard outlives its own dead premise, for a larger
+  // reason than A15 states. Deleting it would silently empty every reopened project.
+  //
+  // So: map, then INSPECT. `register_extra_kinds` survives only as a cheap
+  // SHORT-CIRCUIT — an editor-kind session with a canonical present will always reject a
+  // content-bearing map, so we do not open a potentially large workspace arena just to
+  // discard it, and today's I/O profile on the common editor reopen is unchanged
+  // (D-slab_adopt-4). Every other caller maps and is judged on what came back.
+  const bool canonical_exists = fs.exists(layout.canonical);
+  const bool skip_map_for_editor_kinds = register_extra_kinds && canonical_exists;
+  if (fs.exists(layout.workspace_file) && !skip_map_for_editor_kinds) {
     auto mapped = arbc::Document::open(layout.workspace_file.string());
     if (mapped.has_value()) {
-      OpenedProject opened;
-      opened.document = std::move(*mapped);
-      opened.layout = layout;
-      opened.rebuilt_from_canonical = false;
-      return opened;
+      const std::size_t unbindable = count_unbindable_content(**mapped);
+      // Keep the map when it bound everything (the fast path survives where it is
+      // harmless, preserving A13's recovery of unpublished RECORD-level edits — layer
+      // transforms, z-order, composition size), and keep it when there is no canonical
+      // to rebuild from: the mapped document is then all the project has, and returning
+      // `NoProject` instead would be strictly worse. In that second case the loss is
+      // REPORTED rather than silently swallowed (D-slab_adopt-5 / D-slab-3's residual).
+      if (unbindable == 0 || !canonical_exists) {
+        OpenedProject opened;
+        opened.document = std::move(*mapped);
+        opened.layout = layout;
+        opened.rebuilt_from_canonical = false;
+        opened.unbindable_content_records = unbindable;
+        return opened;
+      }
+      // Unbindable content plus a canonical floor: fall through. `mapped` dies at the
+      // end of this block, unmapping the workspace file before `rebuild_from_canonical`
+      // truncates and re-mints it.
     }
     // A returned WorkspaceFileError (truncated / another machine / stale) is not an
     // error — it falls through to rebuild-from-canonical below.
   }
 
   // Rebuild from the canonical core. If it too is absent, this is not a project.
-  if (!fs.exists(layout.canonical)) {
+  if (!canonical_exists) {
     return make_error_code(OpenError::NoProject);
   }
   const platform::Result<std::string> bytes = fs.read_file(layout.canonical);
