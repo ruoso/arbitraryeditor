@@ -37,8 +37,9 @@ struct CanvasRenderer::Impl {
         router(damage_router), budget(frame_budget), registry(reg) {
     // Seed the per-renderer KindBridge ONCE from the app's persistent Registry (not per
     // rebuild()), so it resolves every registered kind's token the same way the save/load
-    // bridges do (A14). Render-thread-confined: owned here, mutated only by step()'s settle.
-    // A null registry leaves the bridge unseeded and the binding empty (Constraint 3).
+    // bridges do (A14). NOT render-thread-confined at the v0.3.0 pin — see the member's
+    // comment below (D-arbc_v030-4). A null registry leaves the bridge unseeded and the
+    // binding empty (Constraint 3).
     if (registry != nullptr) {
       project::seed_kind_bridge(bridge, *registry);
     }
@@ -138,8 +139,18 @@ struct CanvasRenderer::Impl {
 
   // The app's process-persistent kind Registry (borrowed, may be null) + the per-renderer
   // KindBridge seeded from it once (editor.canvas.nested_composition_binding). The bridge is
-  // the pointer the DocumentBinding hands settle_external_loads; render-thread-confined,
-  // mutated only by this renderer's step() (D-nested_composition_binding-1/2).
+  // the pointer the DocumentBinding hands settle_external_loads (D-nested_composition_binding-1/2).
+  //
+  // NOT render-thread-confined since the v0.3.0 pin (D-arbc_v030-4, A4.1a as amended): the
+  // HostViewport ctor also installs that same settle hook on the DOCUMENT
+  // (Document::set_external_load_settler, released in ~HostViewport), and the document runs it
+  // on the WRITER thread at the top of every begin() — so a UI-thread transact() can reach this
+  // bridge too. Two mutators, only one of which is step(). It is harmless today solely because
+  // the path is unreachable: Document::external_loads_ready() is always 0 in this editor (nested
+  // cells are in-document ObjectId children, never a serialized params.ref, and the only load
+  // path passes a FilesystemAssetSource, which resolves inline), so the settler always early-outs
+  // — pinned by tests/arbc_pin_test.cpp. Making the bridge document-scoped and writer-owned is
+  // D-writer_thread-9; do not re-assert confinement here before it lands.
   const arbc::Registry* registry = nullptr;
   arbc::KindBridge bridge;
 

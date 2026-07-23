@@ -108,6 +108,22 @@ for a human to weigh; no WBS task was created.
 
 ---
 
+## arbc::Journal entry_at()/byte_cost() — upstream any-thread publication
+
+**Source:** `tasks/refinements/canvas/arbc_v030.md` (arbc_v030, 2026-07-23) — Open questions.
+
+`arbc::Journal::entry_at()` and `byte_cost()` remain writer-thread-only at v0.3.0 by
+explicit upstream decision (arbc#15 covered `can_undo`/`can_redo`/`depth`/`cursor` and
+excluded these two). The editor's fix is a host-side published snapshot in
+`commands::AppState` (`editor.canvas.history_published_reads`), which is correct and
+sufficient — but the *general* shape (a host UI that wants to browse history off the
+writer thread) is the same class of problem arbc#15 solved for the enable state. Whether
+libarbc should publish an entry-name view is a **library** design judgment for the
+`arbitrarycomposer` maintainer, not editor work. Upstream-issue candidate for
+`ruoso/arbitrarycomposer`; no editor-side WBS task.
+
+---
+
 ## Suppress the focused-canvas indicator on a single-canvas dock?
 
 **Source:** `tasks/refinements/canvas/focused_canvas_indicator.md`

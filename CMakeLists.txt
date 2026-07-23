@@ -22,7 +22,7 @@ include(FetchContent)
 # (overrides the git fetch) or point ARBC_GIT_TAG at a branch.
 set(ARBC_GIT_REPOSITORY "https://github.com/ruoso/arbitrarycomposer.git"
     CACHE STRING "libarbc git remote")
-set(ARBC_GIT_TAG "v0.2.0" CACHE STRING "libarbc git ref")
+set(ARBC_GIT_TAG "v0.3.0" CACHE STRING "libarbc git ref")
 set(ARBC_SOURCE_DIR "" CACHE STRING "Local libarbc checkout (overrides the git fetch)")
 set(_editor_build_testing "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -234,7 +234,8 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/selection_test.cpp
                          tests/cells_remove_test.cpp
                          tests/frame_selection_test.cpp
-                         tests/new_shot_from_view_test.cpp)
+                         tests/new_shot_from_view_test.cpp
+                         tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene arbc::arbc
                                         Catch2::Catch2WithMain)

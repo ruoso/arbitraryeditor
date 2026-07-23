@@ -1,7 +1,7 @@
 # Arbitrary Composer — Editor (GUI) Design
 
 > Working title: **Arbitrary Composer Editor**. A desktop GUI that uses
-> `libarbc` (the resolution-independent 2D composition library, v0.1.0) as an
+> `libarbc` (the resolution-independent 2D composition library, v0.3.0) as an
 > **image editor** where you place *cells* — units of artwork — into a
 > composition at arbitrary resolutions and arbitrary affine placements.
 >
