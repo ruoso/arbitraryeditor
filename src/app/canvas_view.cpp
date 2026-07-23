@@ -1,3 +1,4 @@
+#include <ace/app/accent.hpp>
 #include <ace/app/canvas_view.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/gl/gl.hpp>
@@ -30,16 +31,14 @@ namespace {
 constexpr double k_zoom_base = 1.2;
 
 // The focused-canvas marker (editor.canvas.focused_canvas_indicator; D-focused_canvas_indicator-4):
-// the same (120, 200, 255) accent this file already gives the active camera frame, the marquee
-// and the selection outline, so the marker joins an existing visual language rather than
-// introducing a colour — but OPAQUE, deliberately: an unblended stroke lands identically over
-// whatever the pane happens to be showing, which is what lets the e2e probe it under software GL
-// without a content-dependent expectation. A hairline (1 px, no rounding) reads as chrome rather
-// than as a drawn object, and is thinner than the 2 px selection outline that shares the hue.
-// NOT consolidated with the four shipped literals: their alphas differ (200/40/220/255) and one
-// is a different hue entirely, so that is a real decomposed-helper refactor with its own golden
-// obligations (`editor.canvas.accent_palette`), not a rename — D-focused_canvas_indicator-7.
-constexpr ImU32 k_focus_marker_color = IM_COL32(120, 200, 255, 255);
+// the same accent this file already gives the active camera frame, the marquee and the selection
+// outline, so the marker joins an existing visual language rather than introducing a colour — but
+// OPAQUE, deliberately: an unblended stroke lands identically over whatever the pane happens to be
+// showing, which is what lets the e2e probe it under software GL without a content-dependent
+// expectation. A hairline (1 px, no rounding) reads as chrome rather than as a drawn object, and is
+// thinner than the 2 px selection outline that shares the hue. The colour itself lives in
+// `ace/app/accent.hpp` as `k_focus_marker_color`; the thickness is a draw-call parameter with one
+// call site, not a palette entry (D-accent_palette-4).
 constexpr float k_focus_marker_thickness = 1.0F;
 
 // The four-arm switch that turns L1's `SelectionChange` VALUE into a mutation of the ONE
@@ -349,8 +348,8 @@ void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,
   const double edge_tol = scale > 0.0 ? 6.0 / scale : 0.0;
   const double corner_tol = scale > 0.0 ? 9.0 / scale : 0.0;
 
-  const ImU32 col_frame = IM_COL32(255, 210, 80, 200);
-  const ImU32 col_active = IM_COL32(120, 200, 255, 255);
+  const ImU32 col_frame = camera_frame(200);
+  const ImU32 col_active = accent(255);
 
   // Draw one camera's covered-composition rectangle + corner handles, screen-mapped.
   auto draw_frame = [&](const arbc::Affine& frame, int rw, int rh, bool active) {
@@ -523,8 +522,8 @@ void CanvasView::draw_selection(std::string_view view_id, Presenter& p,
       const ImVec2 b = to_screen(arbc::Vec2{rect.x1, rect.y0});
       const ImVec2 c = to_screen(arbc::Vec2{rect.x1, rect.y1});
       const ImVec2 d = to_screen(arbc::Vec2{rect.x0, rect.y1});
-      draw_list->AddQuadFilled(a, b, c, d, IM_COL32(120, 200, 255, 40));
-      draw_list->AddQuad(a, b, c, d, IM_COL32(120, 200, 255, 220), 1.0F);
+      draw_list->AddQuadFilled(a, b, c, d, accent(40));
+      draw_list->AddQuad(a, b, c, d, accent(220), 1.0F);
     }
   }
 
@@ -551,7 +550,7 @@ void CanvasView::draw_selection(std::string_view view_id, Presenter& p,
       continue;
     }
     draw_list->AddQuad(to_screen((*quad)[0]), to_screen((*quad)[1]), to_screen((*quad)[2]),
-                       to_screen((*quad)[3]), IM_COL32(120, 200, 255, 255), 2.0F);
+                       to_screen((*quad)[3]), accent(255), 2.0F);
   }
 }
 

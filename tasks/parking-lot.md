@@ -159,6 +159,20 @@ D-writer_thread-8 posts the `HostViewport` constructor and destructor to the wri
 
 ---
 
+## CanvasHost pending_removes drop window (D-canvas_host-pending_removes-drop)
+
+**Source:** fixer fix during `editor.canvas.accent_palette` (2026-07-23).
+
+`CanvasHost::drive_once` step 3 consumes `pending_resizes`/`pending_cameras` per-id
+(erasing only those applied to a live entry), but `pending_removes` still uses a bulk
+`clear()`. A `remove` arriving after the iteration's `pending_adds.swap` but before the
+entry-map lock is released is cleared, and the later `add` then resurrects the entry without
+honouring the removal. Whether a remove should pre-empt a still-queued add (the entry never
+surfaces) or whether such a race is a caller error is a design call the fixer correctly left
+unresolved. No WBS task was registered; fix this when the call is made.
+
+---
+
 ## Deferred-external nested child composites blank under real WorkerPool
 
 **Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — tech debt note.

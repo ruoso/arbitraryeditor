@@ -328,7 +328,17 @@ bool CanvasHost::drive_once() {
     }
     impl_->pending_removes.clear();
 
-    // 3. Snapshot the live set + apply any pending resize/camera (dropping unknown ids).
+    // 3. Snapshot the live set + CONSUME each live entry's pending resize/camera. Only the
+    //    requests actually applied are erased: a request for an id that is not live YET stays
+    //    QUEUED. `add` and `request_resize` are two separate UI-thread calls, so an iteration can
+    //    land between them — swapping the pending adds above, then arriving here with the entry
+    //    still absent. Clearing the whole map there dropped that resize permanently, and an entry
+    //    that never receives its size stays zero-area: it builds no viewport, issues no frame and
+    //    publishes no sequence, i.e. a silent and PERMANENT stall (the intermittent gcc-tsan hang
+    //    in the edit_render_sync anchor). No extra wakeup is owed — the add that creates the entry
+    //    sets `dirty` itself, so the deferred request applies on the iteration that services it.
+    //    A request for a REMOVED id is erased by step 2 above; one for an id never added is inert
+    //    and bounded (both maps are keyed by id, so a repeat overwrites rather than accumulates).
     items.reserve(impl_->entries.size());
     for (auto& [id, entry] : impl_->entries) {
       auto rit = impl_->pending_resizes.find(id);
@@ -338,9 +348,13 @@ bool CanvasHost::drive_once() {
       items.push_back(DriveItem{entry.get(), do_resize, do_resize ? rit->second.first : 0,
                                 do_resize ? rit->second.second : 0, do_camera,
                                 do_camera ? cit->second : arbc::Affine::identity()});
+      if (do_resize) {
+        impl_->pending_resizes.erase(rit);
+      }
+      if (do_camera) {
+        impl_->pending_cameras.erase(cit);
+      }
     }
-    impl_->pending_resizes.clear();
-    impl_->pending_cameras.clear();
   }
 
   impl_->iterations.fetch_add(1, std::memory_order_relaxed);

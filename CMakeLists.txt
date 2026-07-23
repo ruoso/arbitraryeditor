@@ -275,7 +275,8 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/new_shot_from_view_e2e_test.cpp
                               tests/focused_framing_test.cpp
                               tests/multi_canvas_mint_e2e_test.cpp
-                              tests/focused_canvas_indicator_e2e_test.cpp)
+                              tests/focused_canvas_indicator_e2e_test.cpp
+                              tests/accent_palette_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

@@ -667,6 +667,30 @@ TEST_CASE("canvas_host: request_camera is per-entry — one canvas's camera leav
   CHECK(f1.pixels != f2.pixels);
 }
 
+TEST_CASE("canvas_host: a resize/camera for a not-yet-live entry is DEFERRED not dropped") {
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  // `add` and `request_resize` are two separate UI-thread calls, so a drive iteration can land
+  // BETWEEN them: it swaps the pending adds, then reaches the pending-request snapshot with this
+  // id not yet in `entries`. A request for a not-yet-live id must SURVIVE that iteration —
+  // discarding it strands the entry at zero area, where it builds no viewport, issues no frame
+  // and publishes no sequence, i.e. a silent and PERMANENT stall (the intermittent gcc-tsan hang
+  // in the edit_render_sync anchor was canvas#2's resize lost through exactly this window).
+  host.request_resize("canvas#1", k_w, k_h);
+  host.request_camera("canvas#1", k_nav_camera);
+  settle(host); // an iteration with NO live entry at all: both requests must stay queued
+
+  host.add("canvas#1", *doc);
+  settle(host);
+
+  std::uint64_t s = 0;
+  Srgb8Image f;
+  REQUIRE(host.consume("canvas#1", s, f));
+  CHECK(f.width == k_w);
+  CHECK(f.height == k_h);
+  CHECK(f.pixels == ace::render::render_document_srgb8(*doc, k_w, k_h, k_nav_camera).pixels);
+}
+
 TEST_CASE("canvas_host: anchor_depth surfaces deep-zoom rebasing — non-zero in, back to 0 out") {
   auto doc = build_nested_doc(/*levels=*/1);
   CanvasHost host = make_inline_host();

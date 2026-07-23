@@ -261,8 +261,9 @@ task editor "Editor — host GUI over libarbc" {
     task accent_palette "Hoist the canvas accent colour into a shared alpha-parameterized constant" {
       effort 0.5d
       allocate team
+      complete 100
       depends !focused_canvas_indicator
-      note "IM_COL32(120, 200, 255, α) now appears at five sites in src/app/canvas_view.cpp with no shared definition and three distinct alphas (40, 220, 255; the amber at :296 is a different hue). A blanket rename cannot consolidate them — the alphas differ — so this needs a decomposed constexpr RGB triplet plus an accent(uint8_t alpha) helper applied at every site, with the existing goldens and e2e pixel probes proving byte-identical output. Prerequisite for any future theming. Source-of-debt: tasks/refinements/canvas/focused_canvas_indicator.md. Design: docs/00-design.md D18."
+      note "IM_COL32(120, 200, 255, α) now appears at five sites in src/app/canvas_view.cpp with no shared definition and three distinct alphas (40, 220, 255; the amber at :296 is a different hue). A blanket rename cannot consolidate them — the alphas differ — so this needs a decomposed constexpr RGB triplet plus an accent(uint8_t alpha) helper applied at every site, with the existing goldens and e2e pixel probes proving byte-identical output. Prerequisite for any future theming. Source-of-debt: tasks/refinements/canvas/focused_canvas_indicator.md. Design: docs/00-design.md D18. Refinement: tasks/refinements/canvas/accent_palette.md"
     }
     task view_id_natural_order "Order canvas view ids numerically, not lexicographically, in the framing fallback" {
       effort 0.5d
