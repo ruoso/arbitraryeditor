@@ -59,6 +59,25 @@ struct ParsedViewId {
 // leading-zero index on a multi type, and a bare multi-instance slug.
 std::optional<ParsedViewId> parse_view_id(std::string_view id);
 
+// THE canonical order over view ids — the one answer to "which id is lower", the
+// third projection of the grammar `mint_id` writes and `parse_view_id` reads
+// (D-view_id_natural_order-1). Orders by (view type in CATALOG order, then instance
+// index ASCENDING), so "canvas#2" precedes "canvas#10" — the numeric reading D23
+// makes normative, and NOT the byte-lexicographic one a `std::map<std::string>`
+// yields once a session has minted ten canvases (D-view_id_natural_order-3).
+//
+// TOTAL over `std::string_view`, with no precondition a caller could violate
+// (Constraint 9): a string that is not a well-formed view id sorts AFTER every one
+// that is, and after all such strings among themselves by bytes. A well-formed id
+// names a view the shell can reason about, so a "first live pane" rule biased toward
+// well-formed ids degrades gracefully against a hand-edited workspace file.
+//
+// A strict weak ordering BY CONSTRUCTION: it is a lexicographic comparison of a key
+// tuple, so its SWO-ness is `std::tuple`'s rather than a property of a hand-reviewed
+// branch cascade — a non-SWO `Compare` is undefined behaviour inside `std::sort`,
+// which would be strictly worse than the ordering bug it exists to fix (Constraint 5).
+bool view_id_less(std::string_view a, std::string_view b);
+
 // The view registry: the static catalog plus the *only* per-instance state — a
 // monotonic, non-recycling counter per multi-instance type (D-view-registry-4).
 // The set of open views IS DockLayout::view_ids(); open/close/reopen are thin

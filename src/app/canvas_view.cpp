@@ -1,6 +1,7 @@
 #include <ace/app/accent.hpp>
 #include <ace/app/canvas_view.hpp>
 #include <ace/commands/app_state.hpp>
+#include <ace/dockmodel/view_registry.hpp>
 #include <ace/gl/gl.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/interact/pick.hpp>
@@ -634,16 +635,26 @@ double CanvasView::scale_bar_units(std::string_view view_id) const {
 }
 
 std::vector<PaneFraming> CanvasView::pane_rows() const {
-  // `presenters_` is id-ordered, so the projection hands the rule its panes in view-id order
-  // and "canvas#1" wins the fallback over "canvas#2". The `string_view` keys borrow the map's
-  // own storage, which outlives the returned vector — which is why `indicated_view_id()` may
-  // hand a `string_view` back out of a scope this vector does not survive.
+  // `presenters_` is key-ordered but its keys are ordered by BYTES (`std::less<>`), which puts
+  // "canvas#10" ahead of "canvas#2" — so the projection is re-ordered HERE, through dockmodel's
+  // canonical `view_id_less`, before the rule ever sees it. That is the whole ordering
+  // obligation and it lives on this side of the seam on purpose: `focus_target` consumes the
+  // caller's span verbatim and stays id-format-agnostic, so there is exactly ONE authority on
+  // "which id is lower" (D-view_id_natural_order-4, inherited D-focused_canvas_indicator-1).
+  // With this order in hand "canvas#2" wins the fallback over "canvas#10", which is what D23's
+  // numerically-lowest-id rule says. The `string_view` keys borrow the map's own storage, which
+  // outlives the returned vector — the sort permutes the rows, never the keys they point into —
+  // which is why `indicated_view_id()` may hand a `string_view` back out of a scope this vector
+  // does not survive.
   std::vector<PaneFraming> panes;
   panes.reserve(presenters_.size());
   for (const auto& [id, presenter] : presenters_) {
     panes.push_back(PaneFraming{id, ViewFraming{presenter.framing_camera, presenter.requested_width,
                                                 presenter.requested_height}});
   }
+  std::sort(panes.begin(), panes.end(), [](const PaneFraming& a, const PaneFraming& b) {
+    return dockmodel::view_id_less(a.view_id, b.view_id);
+  });
   return panes;
 }
 

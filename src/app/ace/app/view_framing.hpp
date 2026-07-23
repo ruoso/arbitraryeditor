@@ -36,8 +36,15 @@ struct PaneFraming {
 // winner-selection half of `framing_for_focus`, hoisted so a caller can ask *which pane* the
 // verbs will act on rather than only *what framing* they will get. Returns the focused pane's
 // id when that pane is present and sized, else the first sized pane's id in `panes_by_id`
-// order (the lowest-id live pane), else an EMPTY `string_view` — the name-side spelling of the
-// zero `ViewFraming` sentinel below.
+// order, else an EMPTY `string_view` — the name-side spelling of the zero `ViewFraming`
+// sentinel below.
+//
+// The span order is the CALLER's, taken verbatim: this rule never re-orders and knows nothing
+// about the shape of a view id (Constraint 1 / D-view_id_natural_order-5). "The lowest-id live
+// pane" is therefore a property of what the caller hands in — every shipped caller reaches this
+// through `CanvasView::pane_rows()`, which sorts by `dockmodel::view_id_less`, D23's NUMERIC
+// order in which "canvas#2" precedes "canvas#10". Ordering here as well would install a second
+// authority on "which id is lower", which is the divergence class this file exists to foreclose.
 //
 // `framing_for_focus` is implemented ON TOP of this, so the chrome that NAMES the target pane
 // (the focused-canvas marker) and the verb that CONSUMES its framing cannot drift apart: one
@@ -52,17 +59,18 @@ std::string_view focus_target(std::span<const PaneFraming> panes_by_id,
 
 // WHICH pane's framing the framing-derived verbs act on (D23's "which viewport, when more
 // than one canvas is open", D-mint_from_focused_canvas-3): the FOCUSED pane's framing when
-// that pane is present and sized, else the FIRST sized pane in `panes_by_id` order (the
-// caller passes them view-id ordered, so that is the lowest-id live pane), else the zero
-// `ViewFraming` — the "no live canvas" sentinel documented above, which
+// that pane is present and sized, else the FIRST sized pane in `panes_by_id` order (the caller
+// passes them in `dockmodel::view_id_less` order, so that is the numerically lowest-id live
+// pane), else the zero `ViewFraming` — the "no live canvas" sentinel documented above, which
 // `AppProjectGateway::live_view_framing()` keys off to refuse a mint.
 //
 // The rule is TOTAL: a focused id naming no pane (a closed canvas, or one never focused) and
 // a focused pane that exists but has never been sized both DEGRADE to the fallback, never to
 // the sentinel — refusing a mint the user can plainly perform would be a regression wearing a
 // fix's clothes (D-mint_from_focused_canvas-2). An empty `focused_view_id` therefore
-// reproduces the historical lowest-id rule exactly, which is what keeps
-// `CanvasView::primary_framing()` bit-identical.
+// reproduces the lowest-id rule exactly — the caller's ordering included, so the answer is the
+// numerically lowest sized pane — which is what keeps `CanvasView::primary_framing()`
+// bit-identical to `focused_framing()`'s unhinted projection.
 //
 // Pure: no ImGui, no GL, no `CanvasView` — the whole branch matrix is headless-testable
 // (docs/01-architecture.md §8's "logic belongs where Catch2 can see it").

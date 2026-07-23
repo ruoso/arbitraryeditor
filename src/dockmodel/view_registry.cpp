@@ -2,8 +2,10 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace ace::dockmodel {
@@ -83,6 +85,37 @@ std::optional<ParsedViewId> parse_view_id(std::string_view id) {
     return std::nullopt;
   }
   return ParsedViewId{*type, index};
+}
+
+namespace {
+
+// `view_id_less`'s sort key: (0, type, index, "") for a well-formed id, (1, 0, 0, id) for
+// anything else. The leading discriminator is what puts every unparseable string after every
+// parseable one; the trailing `string_view` is what orders the unparseable tail by bytes and
+// is deliberately EMPTY for a parseable id, so two ids never differ on a field that is not
+// part of the order (D-view_id_natural_order-3).
+//
+// The index is the whole point: it is compared as an INT, so 2 < 10. The type comes from the
+// enumerator, whose order IS the catalog order (view_registry.hpp) — the shell's one canonical
+// view ordering, rather than a second, alphabetical notion of "view order" with no consumer.
+//
+// Built on `parse_view_id` rather than on a generic trailing-digit-run scan so there is exactly
+// one answer to "is this a view id, and what index is it": a `strverscmp`-style sort would read
+// "canvas#01" as 1 and tie it with "canvas#1", which the grammar deliberately rejects.
+std::tuple<int, int, int, std::string_view> view_id_key(std::string_view id) {
+  const std::optional<ParsedViewId> parsed = parse_view_id(id);
+  if (!parsed) {
+    return {1, 0, 0, id};
+  }
+  return {0, static_cast<int>(parsed->type), parsed->index, std::string_view{}};
+}
+
+} // namespace
+
+bool view_id_less(std::string_view a, std::string_view b) {
+  // One expression on purpose: the strict weak ordering is `std::tuple`'s, inherited rather
+  // than argued for (Constraint 5).
+  return view_id_key(a) < view_id_key(b);
 }
 
 std::string ViewRegistry::mint_id(ViewType type) {

@@ -312,3 +312,36 @@ TEST_CASE("focus_target: the matrix itself is non-vacuous") {
   CHECK(saw_empty_target);
   CHECK(saw_deep_non_first_winner);
 }
+
+// --- editor.canvas.view_id_natural_order -------------------------------------------------
+
+TEST_CASE("focus_target: consumes the caller's span order verbatim and never re-orders it") {
+  // THIS CASE ASSERTS THE "WRONG" PANE ON PURPOSE — it is not a stale expectation
+  // (D-view_id_natural_order-5). `canvas#10` wins here because the CALLER handed it first, and
+  // supplying the order is the caller's job: the numeric order that makes `canvas#2` the real
+  // fallback lives in `dockmodel::view_id_less` and is applied by `CanvasView::pane_rows()`
+  // BEFORE the span reaches this rule (Constraint 1, inherited D-focused_canvas_indicator-1).
+  //
+  // So an implementer who "fixes the ordering bug again" inside `focus_target` — installing a
+  // second authority on which id is lower, the exact divergence class this file exists to
+  // foreclose — turns this case red. That is what it is for.
+  const std::vector<PaneFraming> panes{
+      {"canvas#10", ViewFraming{cam(10.0), 640, 480}},
+      {"canvas#2", ViewFraming{cam(2.0), 320, 240}},
+  };
+
+  CHECK(focus_target(panes, "") == "canvas#10");
+  const ViewFraming framing = framing_for_focus(panes, "");
+  CHECK(framing.pane_w == 640);
+  CHECK(framing.pane_h == 480);
+  CHECK(same(framing.camera, cam(10.0))); // the framing projection moves with the name
+
+  // Anti-vacuity: the SAME two rows in the order `pane_rows()` actually supplies resolve to
+  // canvas#2, so this pair also pins that the rule is order-SENSITIVE rather than inert.
+  const std::vector<PaneFraming> ordered{
+      {"canvas#2", ViewFraming{cam(2.0), 320, 240}},
+      {"canvas#10", ViewFraming{cam(10.0), 640, 480}},
+  };
+  CHECK(focus_target(ordered, "") == "canvas#2");
+  CHECK(framing_for_focus(ordered, "").pane_w == 320);
+}

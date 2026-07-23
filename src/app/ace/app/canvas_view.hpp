@@ -164,7 +164,9 @@ public:
   // WHICH canvas pane the framing-derived verbs will actually act on — the sticky hint run
   // through the SAME `focus_target` rule `focused_framing()` consumes, so it names the
   // lowest-id FALLBACK pane whenever the hint is empty, stale, or names an unsized pane, and
-  // is empty only when no live canvas is sized (D-focused_canvas_indicator-1/-5). This is what
+  // is empty only when no live canvas is sized (D-focused_canvas_indicator-1/-5). "Lowest id"
+  // is `dockmodel::view_id_less`'s NUMERIC order, applied by `pane_rows()` (D23,
+  // D-view_id_natural_order-2): "canvas#2", not "canvas#10". This is what
   // `draw_content` marks with the focused-canvas border, and what the e2e asserts so the RULE
   // is pinned separately from the pixels.
   //
@@ -254,13 +256,16 @@ private:
                       const std::vector<interact::PickTarget>& targets,
                       const views::CanvasInput& in, float origin_x, float origin_y);
 
-  // Project `presenters_` (already view-id ordered) into the pure rule's input rows. The rows'
-  // `view_id`s BORROW the map's keys (view_framing.hpp's non-owning contract), so a
+  // Project `presenters_` into the pure rule's input rows, SORTED by `dockmodel::view_id_less`
+  // — the map's own byte order is not the view-id order (it puts "canvas#10" before "canvas#2"),
+  // and supplying the order is this projection's job, not the rule's (D-view_id_natural_order-4).
+  // The rows' `view_id`s BORROW the map's keys (view_framing.hpp's non-owning contract), so a
   // `string_view` the rule returns outlives the returned vector but not the next `reconcile()`.
   std::vector<PaneFraming> pane_rows() const;
 
-  // Project `presenters_` (already view-id ordered) into `framing_for_focus`'s pure input and
-  // apply it with `focused` as the hint. Both public framing accessors are one call to this,
+  // Project `presenters_` (through `pane_rows()`, so in `view_id_less` order) into
+  // `framing_for_focus`'s pure input and apply it with `focused` as the hint. Both public
+  // framing accessors are one call to this,
   // which is what makes their single-canvas bit-identity structural rather than a claim about
   // two hand-written loops (D-mint_from_focused_canvas-3).
   ViewFraming framing_for(std::string_view focused) const;

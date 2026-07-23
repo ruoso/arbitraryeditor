@@ -268,8 +268,9 @@ task editor "Editor — host GUI over libarbc" {
     task view_id_natural_order "Order canvas view ids numerically, not lexicographically, in the framing fallback" {
       effort 0.5d
       allocate team
+      complete 100
       depends !focused_canvas_indicator
-      note "framing_for_focus/focus_target's 'lowest-id sized pane' fallback consumes panes_by_id in the order std::map<std::string, Presenter, std::less<>> yields (lexicographic), so with ten or more canvases open 'canvas#10' sorts before 'canvas#2' and the fallback picks the wrong pane. Fix by ordering the projection in CanvasView::framing_for (src/app/canvas_view.cpp:555-567) with a natural/numeric-suffix comparator, keeping focus_target itself order-agnostic and pure; Catch2 cases covering canvas#2 vs canvas#10 ordering, plus an e2e that opens ten panes. Source-of-debt: tasks/refinements/canvas/focused_canvas_indicator.md. Design: docs/00-design.md D23, D18."
+      note "framing_for_focus/focus_target's 'lowest-id sized pane' fallback consumes panes_by_id in the order std::map<std::string, Presenter, std::less<>> yields (lexicographic), so with ten or more canvases open 'canvas#10' sorts before 'canvas#2' and the fallback picks the wrong pane. Fix by ordering the projection in CanvasView::framing_for (src/app/canvas_view.cpp:555-567) with a natural/numeric-suffix comparator, keeping focus_target itself order-agnostic and pure; Catch2 cases covering canvas#2 vs canvas#10 ordering, plus an e2e that opens ten panes. Source-of-debt: tasks/refinements/canvas/focused_canvas_indicator.md. Design: docs/00-design.md D23, D18. Refinement: tasks/refinements/canvas/view_id_natural_order.md"
     }
     task arbc_v030 "Bump libarbc pin to v0.3.0" {
       effort 0.5d

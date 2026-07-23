@@ -14,6 +14,7 @@
 using ace::dockmodel::DockLayout;
 using ace::dockmodel::parse_view_id;
 using ace::dockmodel::ParsedViewId;
+using ace::dockmodel::view_id_less;
 using ace::dockmodel::ViewRegistry;
 using ace::dockmodel::ViewType;
 namespace dm = ace::dockmodel;
@@ -21,6 +22,14 @@ namespace dm = ace::dockmodel;
 namespace {
 bool contains(const std::vector<std::string>& v, const std::string& id) {
   return std::find(v.begin(), v.end(), id) != v.end();
+}
+
+// Sort a copy through the comparator under test — the whole-set form of every ordering
+// assertion below, so a case pins the ORDER rather than one lucky pair.
+std::vector<std::string> sorted(std::vector<std::string> ids) {
+  std::sort(ids.begin(), ids.end(),
+            [](const std::string& a, const std::string& b) { return view_id_less(a, b); });
+  return ids;
 }
 } // namespace
 
@@ -212,4 +221,148 @@ TEST_CASE("view_registry: close-everything then reopen round-trips to a valid la
   CHECK(layout.contains("layers"));
   CHECK(layout.contains("overview"));
   CHECK(layout.view_ids().size() == 3);
+}
+
+// --- editor.canvas.view_id_natural_order -------------------------------------------------
+// `view_id_less`, the canonical total order over view ids (D-view_id_natural_order-1/-3). It
+// is the third projection of the grammar `mint_id` writes and `parse_view_id` reads, so it is
+// tested beside them — headless, no shell, no ImGui.
+
+TEST_CASE(
+    "view_registry: view_id_less orders instance indices numerically, not lexicographically") {
+  // THE headline. Every pair here sorts the other way under `std::string`'s byte order, which
+  // is exactly what `std::map<std::string, …>` hands `CanvasView::pane_rows()`.
+  CHECK(view_id_less("canvas#2", "canvas#10"));
+  CHECK_FALSE(view_id_less("canvas#10", "canvas#2"));
+  CHECK(view_id_less("canvas#9", "canvas#10"));
+  CHECK_FALSE(view_id_less("canvas#10", "canvas#9"));
+  CHECK(view_id_less("canvas#1", "canvas#2"));
+  CHECK_FALSE(view_id_less("canvas#2", "canvas#1"));
+  CHECK(view_id_less("canvas#99", "canvas#100"));
+  CHECK_FALSE(view_id_less("canvas#100", "canvas#99"));
+  // Irreflexive on the ids that matter most.
+  CHECK_FALSE(view_id_less("canvas#10", "canvas#10"));
+
+  // The whole-set form: a comparator that only special-cases one pair cannot satisfy this.
+  const std::vector<std::string> want{"canvas#1",  "canvas#2",  "canvas#3",
+                                      "canvas#10", "canvas#11", "canvas#21"};
+  CHECK(sorted({"canvas#10", "canvas#3", "canvas#1", "canvas#21", "canvas#2", "canvas#11"}) ==
+        want);
+}
+
+TEST_CASE("view_registry: view_id_less groups by view type in catalog order") {
+  // Pinned against `view_catalog()` itself rather than a hand-copied list, so a future catalog
+  // reordering moves the expectation with the code it describes. One id per type: `slug#1` for
+  // the multi-instance type (a bare "canvas" is not a view id at all — see the next case),
+  // the bare slug for each singleton.
+  std::vector<std::string> catalog_order;
+  for (const dm::ViewDescriptor& d : dm::view_catalog()) {
+    catalog_order.push_back(d.multi_instance ? std::string(d.slug) + "#1" : std::string(d.slug));
+  }
+  REQUIRE(catalog_order.size() == 8);
+
+  std::vector<std::string> shuffled = catalog_order;
+  std::reverse(shuffled.begin(), shuffled.end());
+  CHECK(sorted(shuffled) != shuffled);      // anti-vacuity: the input was NOT already sorted
+  CHECK(sorted(shuffled) == catalog_order); // …and sorting recovers the catalog sequence
+  CHECK(sorted(catalog_order) == catalog_order);
+
+  // Canvas is catalog entry 0, so EVERY canvas#N precedes every singleton — including one whose
+  // slug sorts before "canvas" by bytes ("assets"), which is what makes this a catalog-order
+  // assertion rather than an alphabetical one.
+  for (const std::string& id :
+       {std::string("canvas#1"), std::string("canvas#10"), std::string("canvas#100")}) {
+    for (const dm::ViewDescriptor& d : dm::view_catalog()) {
+      if (d.multi_instance) {
+        continue;
+      }
+      INFO(id << " vs " << d.slug);
+      CHECK(view_id_less(id, d.slug));
+      CHECK_FALSE(view_id_less(d.slug, id));
+    }
+  }
+  CHECK(view_id_less("canvas#1", "assets"));
+}
+
+TEST_CASE("view_registry: view_id_less puts unparseable ids after every parseable one, "
+          "ordered by bytes") {
+  // The four rejection classes `parse_view_id` already defines: a bare multi-instance slug, a
+  // `#` suffix on a singleton, a bad index (zero / leading zero / non-numeric), and an unknown
+  // slug (the empty string included). A `Compare` handed to `std::sort` may not have a
+  // precondition its caller could violate, and `pane_rows()`'s keys come from a dock layout
+  // that can be restored from a file on disk (Constraint 9).
+  const std::vector<std::string> bad{"canvas",   "layers#2", "canvas#0", "canvas#01",
+                                     "canvas#x", "bogus#1",  ""};
+  for (const std::string& u : bad) {
+    INFO(u);
+    REQUIRE_FALSE(parse_view_id(u).has_value()); // the premise: these really are unparseable
+    // "export" is the LAST catalog slug, so beating it means beating every parseable id.
+    CHECK(view_id_less("export", u));
+    CHECK_FALSE(view_id_less(u, "export"));
+    CHECK(view_id_less("canvas#1", u));
+    CHECK_FALSE(view_id_less(u, "canvas#1"));
+  }
+
+  // Among themselves: plain byte order (`std::string_view::operator<`).
+  const std::vector<std::string> want{"",          "bogus#1",  "canvas",  "canvas#0",
+                                      "canvas#01", "canvas#x", "layers#2"};
+  CHECK(sorted(bad) == want);
+  CHECK(view_id_less("canvas#0", "canvas#01")); // NOT the numeric reading: 0 and 01 are not ids
+  CHECK(view_id_less("canvas#01", "canvas#x"));
+}
+
+TEST_CASE("view_registry: view_id_less is a strict weak ordering") {
+  // Constraint 5 made mechanical. A non-SWO `Compare` is undefined behaviour inside
+  // `std::sort`, i.e. a worse failure than the ordering bug this comparator fixes — so the
+  // property is checked exhaustively over a corpus spanning both parseable and unparseable
+  // ids (plus a duplicate) rather than argued from the implementation.
+  const std::vector<std::string> corpus{
+      "canvas#1",   "canvas#2",  "canvas#3", "canvas#9",  "canvas#10", "canvas#11", "canvas#21",
+      "canvas#100", "canvas#2", // deliberate duplicate
+      "layers",     "inspector", "overview", "color",     "history",   "assets",    "export",
+      "canvas",     "layers#2",  "canvas#0", "canvas#01", "canvas#x",  "bogus#1",   ""};
+
+  for (const std::string& a : corpus) {
+    INFO(a);
+    CHECK_FALSE(view_id_less(a, a)); // irreflexivity
+  }
+  for (const std::string& a : corpus) {
+    for (const std::string& b : corpus) {
+      INFO(a << " / " << b);
+      if (view_id_less(a, b)) {
+        CHECK_FALSE(view_id_less(b, a)); // asymmetry
+      }
+    }
+  }
+  auto incomparable = [](const std::string& a, const std::string& b) {
+    return !view_id_less(a, b) && !view_id_less(b, a);
+  };
+  for (const std::string& a : corpus) {
+    for (const std::string& b : corpus) {
+      for (const std::string& c : corpus) {
+        INFO(a << " / " << b << " / " << c);
+        if (view_id_less(a, b) && view_id_less(b, c)) {
+          CHECK(view_id_less(a, c)); // transitivity of <
+        }
+        if (incomparable(a, b) && incomparable(b, c)) {
+          CHECK(incomparable(a, c)); // transitivity of incomparability
+        }
+      }
+    }
+  }
+
+  // Determinism: two different permutations of the same multiset sort to the identical
+  // sequence — the property `std::sort` may not deliver at all under a broken comparator.
+  std::vector<std::string> reversed = corpus;
+  std::reverse(reversed.begin(), reversed.end());
+  CHECK(reversed != corpus); // the two inputs really do differ
+  CHECK(sorted(corpus) == sorted(reversed));
+  // …and the sorted sequence is itself ordered: no adjacent pair is out of order.
+  const std::vector<std::string> out = sorted(corpus);
+  for (std::size_t i = 1; i < out.size(); ++i) {
+    INFO(out[i - 1] << " then " << out[i]);
+    CHECK_FALSE(view_id_less(out[i], out[i - 1]));
+  }
+  CHECK(out.front() == "canvas#1");
+  CHECK(out.back() == "layers#2");
 }
