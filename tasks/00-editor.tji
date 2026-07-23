@@ -313,8 +313,15 @@ task editor "Editor — host GUI over libarbc" {
     task new_shot_from_view "Rail action: promote the viewport's current framing into a saved shot" {
       effort 0.5d
       allocate team
+      complete 100
       depends !frame_selection
-      note "Add a second Edit-section rail item 'New Shot From View###new_shot_from_view' plus a ProjectGateway virtual pair; L4 impl reads ViewFraming (src/app/ace/app/view_framing.hpp, bound at src/app/shell.cpp:288), calls the already-shipped interact::new_shot_from_view (src/interact/ace/interact/interact.hpp:109), and dispatches commands::add_camera_command (shipped by editor.cameras.frame_selection) — plus an e2e. Closes the camera_inspector.cpp:41 'No cameras — create a shot from the view.' lie. Source-of-debt: tasks/refinements/cameras/frame_selection.md. Design: docs/00-design.md D23, :64-66."
+      note "Add a second Edit-section rail item 'New Shot From View###new_shot_from_view' plus a ProjectGateway virtual pair; L4 impl reads ViewFraming (src/app/ace/app/view_framing.hpp, bound at src/app/shell.cpp:288), calls the already-shipped interact::new_shot_from_view (src/interact/ace/interact/interact.hpp:109), and dispatches commands::add_camera_command (shipped by editor.cameras.frame_selection) — plus an e2e. Closes the camera_inspector.cpp:41 'No cameras — create a shot from the view.' lie. Source-of-debt: tasks/refinements/cameras/frame_selection.md. Design: docs/00-design.md D23, :64-66. Refinement: tasks/refinements/cameras/new_shot_from_view.md"
+    }
+    task mint_from_focused_canvas "Promote the focused canvas's framing, not canvas#1's" {
+      effort 0.5d
+      allocate team
+      depends !new_shot_from_view
+      note "CanvasView::primary_framing() (src/app/canvas_view.cpp:523-534) always returns the lowest-id sized presenter, so with two canvases open 'New Shot From View' promotes canvas#1 even when the user works in canvas#2. Add focused-canvas view id to CanvasView (set from ImGui::IsWindowFocused at draw time, fallback to lowest-id), expose focused_framing(), bind the gateway's framing provider to it, move insert_cell's provisional placement to the same source, and add a multi_canvas e2e. Source-of-debt: tasks/refinements/cameras/new_shot_from_view.md. Design: docs/00-design.md D23, D18."
     }
     task export "Export via cameras (render_offline); PNG; batch; contact sheet" {
       effort 3d

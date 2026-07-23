@@ -38,7 +38,12 @@ void CameraInspector::draw(std::string_view /*view_id*/) {
   ImGui::TextUnformatted("Cameras");
   ImGui::Separator();
   if (cameras.empty()) {
-    ImGui::TextDisabled("No cameras — create a shot from the view.");
+    // Names the affordance that now exists (editor.cameras.new_shot_from_view): before that
+    // leaf this sentence told the user to do something the product had no verb for. The
+    // empty-state BUTTON is `editor.panels.inspector`'s (D-new_shot_from_view-8) — the
+    // inspector holds a CanvasView&, not a ProjectGateway&, so wiring one here would either
+    // ripple through three e2e constructors or duplicate the L4 join.
+    ImGui::TextDisabled("No cameras — use New Shot From View in the rail.");
     return;
   }
 

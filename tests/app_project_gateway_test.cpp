@@ -556,3 +556,150 @@ TEST_CASE("AppProjectGateway::frame_selection runs its mutation inside the edit 
   CHECK(camera_inside);
   CHECK(ace::scene::cameras(session.document()).size() == 1);
 }
+
+// --- New Shot From View (editor.cameras.new_shot_from_view / D23) --------------------------
+// The sibling join, whose source region is L4 SESSION state (the installed ViewFraming
+// provider) rather than the document — so these are the cases no L1 suite can host.
+
+TEST_CASE("AppProjectGateway::new_shot_from_view promotes the live framing into a shot",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  session.document().add_composition(256.0, 256.0);
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // A nav-produced viewport camera (uniform scale + translation) over an 800x600 pane.
+  const arbc::Affine viewport{2.0, 0.0, 0.0, 2.0, 30.0, -40.0};
+  const int pane_w = 800;
+  const int pane_h = 600;
+  gateway.set_view_framing([&] { return ace::app::ViewFraming{viewport, pane_w, pane_h}; });
+
+  CHECK(gateway.can_new_shot_from_view());
+  REQUIRE(gateway.new_shot_from_view());
+
+  const std::vector<ace::scene::Camera> minted = ace::scene::cameras(session.document());
+  REQUIRE(minted.size() == 1);
+  CHECK(minted[0].name == "Camera 1");
+  // Resolution is the pane in DEVICE PIXELS, verbatim (amended D23 / D-new_shot_from_view-1).
+  CHECK(minted[0].resolution.width == pane_w);
+  CHECK(minted[0].resolution.height == pane_h);
+  // …and the frame is the viewport camera inverted, so the shot rendered at its own
+  // resolution reproduces the view.
+  const std::optional<arbc::Affine> inverse = viewport.inverse();
+  REQUIRE(inverse.has_value());
+  CHECK(minted[0].frame == *inverse);
+
+  // The mint touches neither the selection nor the naming of the OTHER verb: one shared
+  // `Camera <n>` sequence (D-new_shot_from_view-7).
+  CHECK(session.selection().empty());
+  REQUIRE(gateway.new_shot_from_view());
+  const std::vector<ace::scene::Camera> again = ace::scene::cameras(session.document());
+  REQUIRE(again.size() == 2);
+  CHECK(again[1].name == "Camera 2");
+}
+
+TEST_CASE("AppProjectGateway::new_shot_from_view refuses when no canvas pane is live",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  session.document().add_composition(64.0, 64.0);
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  const std::size_t depth_before = session.document().journal().depth();
+
+  // (i) NO provider installed at all (the headless arm, and the state a session reaches once
+  // every canvas is closed — D18 has no keep-a-canvas guardrail).
+  CHECK_FALSE(gateway.can_new_shot_from_view());
+  CHECK_FALSE(gateway.new_shot_from_view());
+
+  // (ii) A provider reporting a ZERO pane — "no live canvas" (view_framing.hpp:15).
+  gateway.set_view_framing([] { return ace::app::ViewFraming{arbc::Affine::identity(), 0, 0}; });
+  CHECK_FALSE(gateway.can_new_shot_from_view());
+  CHECK_FALSE(gateway.new_shot_from_view());
+
+  // The root-composition fallback is NOT substituted (Constraint 4 / D-new_shot_from_view-2):
+  // with no pane there is nothing the user could be promoting, so the mint refuses as a value
+  // with the document untouched.
+  CHECK(ace::scene::cameras(session.document()).empty());
+  CHECK(session.document().journal().depth() == depth_before);
+
+  // …but `insert_cell`'s provisional placement still HAS that fallback in the very same state,
+  // which is what the `view_framing()` split preserves: the refactor must not regress the one
+  // consumer the fallback exists for.
+  const std::string error = gateway.insert_cell("org.arbc.raster", {{"size", "16x16"}});
+  CHECK(error.empty());
+  CHECK(session.document().journal().depth() > depth_before);
+}
+
+TEST_CASE("AppProjectGateway::new_shot_from_view runs its mutation inside the edit runner",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  session.document().add_composition(64.0, 64.0);
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+  gateway.set_view_framing(
+      [] { return ace::app::ViewFraming{arbc::Affine::identity(), 320, 240}; });
+
+  // Constraint 5: the ViewFraming READ as well as the add_camera WRITE happen inside the
+  // closure, so the pane size the transaction records is the one live when it lands.
+  int runs = 0;
+  bool empty_before_run = false;
+  bool camera_inside = false;
+  gateway.set_edit_runner([&](const std::function<void()>& edit) {
+    ++runs;
+    empty_before_run = ace::scene::cameras(session.document()).empty();
+    edit();
+    camera_inside = !ace::scene::cameras(session.document()).empty();
+  });
+
+  REQUIRE(gateway.new_shot_from_view());
+  CHECK(runs == 1);
+  CHECK(empty_before_run);
+  CHECK(camera_inside);
+  CHECK(ace::scene::cameras(session.document()).size() == 1);
+}
+
+TEST_CASE("AppProjectGateway::new_shot_from_view mints undo one-for-one", "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  session.document().add_composition(64.0, 64.0);
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+  gateway.set_view_framing([] { return ace::app::ViewFraming{arbc::Affine::identity(), 128, 96}; });
+
+  const std::size_t depth_before = session.document().journal().depth();
+  REQUIRE(gateway.new_shot_from_view());
+  REQUIRE(gateway.new_shot_from_view());
+  REQUIRE(ace::scene::cameras(session.document()).size() == 2);
+  // `scene::add_camera`'s documented shape (model.md:391): TWO journal entries per create —
+  // `add_content` self-commits, the binding layer is a second transaction — so two mints cost
+  // exactly four entries.
+  CHECK(session.document().journal().depth() == depth_before + 4);
+
+  // …of which only the BINDING entry is observable through `scene::cameras`, which keys off
+  // composition membership: the press that pops a mint's attach removes that camera, and the
+  // press that pops its add_content changes nothing visible. Undoing back to zero cameras
+  // therefore takes three presses, not two — the accounting `frame_selection`'s e2e sees as
+  // "one Ctrl+Z removes the camera I just minted".
+  CHECK(gateway.undo());
+  CHECK(ace::scene::cameras(session.document()).size() == 1);
+  CHECK(gateway.undo());
+  CHECK(ace::scene::cameras(session.document()).size() == 1);
+  CHECK(gateway.undo());
+  CHECK(ace::scene::cameras(session.document()).empty());
+}

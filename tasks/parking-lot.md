@@ -122,3 +122,11 @@ record here for human review when profiling data is available.
 **Source:** `tasks/refinements/editor.cells/remove.md` (cells.remove, 2026-07-23) — Open questions #2.
 
 `remove_content` deliberately retains the content's binding row and live `Content*` while the journal holds the removal; teardown happens only at document close (or "once `runtime.removed_content_reclaim` lands, the moment the removal leaves history", `document.hpp:123-130`). A long session that repeatedly inserts and deletes large rasters therefore grows monotonically in memory even after history trims. The named library follow-up already exists upstream; the editor cannot fix it host-side. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task.
+
+---
+
+## "New Shot From View" — focused canvas vs explicit designation
+
+**Source:** `tasks/refinements/cameras/new_shot_from_view.md` (cameras.new_shot_from_view, 2026-07-23) — Open questions.
+
+`editor.cameras.mint_from_focused_canvas` implements the "follow focus with lowest-id fallback" approach: the gateway reads `CanvasView::focused_framing()` and the mint always promotes the canvas the user was most recently working in. The alternative — an explicit "promote this canvas" affordance in the canvas camera picker — would let the user designate a specific canvas regardless of focus. These two shapes have different discoverability tradeoffs: focus tracking is invisible until it matters (multi-canvas layout); explicit designation adds picker chrome that is meaningless in single-canvas use. Whether the right end state is the focus-tracking rail item alone, the explicit picker, or both is a D23/D18 design call for a human once multi-canvas layouts are in real use. The WBS task ships the focus-tracking path; if explicit designation is the preferred answer, `mint_from_focused_canvas` may need to be reconsidered or extended.

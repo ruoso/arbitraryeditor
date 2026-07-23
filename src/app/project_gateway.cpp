@@ -169,16 +169,25 @@ void AppProjectGateway::set_view_framing(std::function<ViewFraming()> framing) {
   view_framing_ = std::move(framing);
 }
 
-ViewFraming AppProjectGateway::view_framing() const {
+std::optional<ViewFraming> AppProjectGateway::live_view_framing() const {
   if (view_framing_) {
     const ViewFraming live = view_framing_();
     if (live.pane_w > 0 && live.pane_h > 0) {
       return live;
     }
   }
+  return std::nullopt; // no provider, or no canvas pane with area yet
+}
+
+ViewFraming AppProjectGateway::view_framing() const {
+  if (const std::optional<ViewFraming> live = live_view_framing()) {
+    return *live;
+  }
   // No live canvas (a headless gateway test, or a session whose Canvas pane has not
   // been sized yet): frame the root composition itself at identity, so the
   // provisional placement is still centred in something real rather than degenerate.
+  // This fallback is `insert_cell`'s ALONE — `new_shot_from_view` reads the optional
+  // above directly and refuses instead (D-new_shot_from_view-2).
   ViewFraming fallback;
   if (const std::optional<ace::project::CompositionSize> size =
           ace::project::root_composition_size(app_state_.document())) {
@@ -292,6 +301,49 @@ bool AppProjectGateway::frame_selection() {
     // The mint touches NEITHER the selection NOR any canvas's look-through camera
     // (D-frame_selection-10): framing then re-framing the same set must not need a re-select,
     // and which camera a canvas looks through is transient session state, not scene data.
+    minted = outcome.camera.valid();
+  });
+  return minted;
+}
+
+bool AppProjectGateway::can_new_shot_from_view() const {
+  // NOT a `commands::` predicate: the question is "does a canvas pane exist and have a
+  // size?", which lives in CanvasView/Presenter — L4/L2 session state `commands` (-> {base,
+  // project, scene}) structurally cannot see (D-new_shot_from_view-6).
+  return live_view_framing().has_value();
+}
+
+bool AppProjectGateway::new_shot_from_view() {
+  // D23's second mint verb, joined at L4 for the same forced reason as `frame_selection`
+  // above (`commands` may not include `interact`, `interact` may not include `commands`) and
+  // run entirely INSIDE the edit closure: `add_camera` is writer-thread only, and the pane
+  // size the transaction records must be the one live when the transaction lands, not one
+  // sampled frames earlier (D-new_shot_from_view-4).
+  bool minted = false;
+  run_edit([this, &minted] {
+    const std::optional<ViewFraming> framing = live_view_framing();
+    if (!framing.has_value()) {
+      return; // no live, sized pane: refuse as a value, never the composition fallback
+    }
+    // The derivation ships unchanged (D-new_shot_from_view-1): resolution = the pane in
+    // DEVICE PIXELS and frame = the viewport camera inverted, with D23's rounding, clamp and
+    // aspect-expansion deliberately not applied — a pane is already a whole number of square
+    // pixels bounded by the display, so all three steps are no-ops or guard a hazard that
+    // cannot arise here. That is what makes the shot, rendered at its own resolution,
+    // reproduce what was on screen.
+    const ace::interact::ShotFraming shot =
+        ace::interact::new_shot_from_view(framing->camera, framing->pane_w, framing->pane_h);
+    if (shot.width <= 0 || shot.height <= 0) {
+      return; // the degenerate-pane sentinel; still a mutation-free refusal
+    }
+    ace::commands::AddCameraOutcome outcome;
+    const ace::commands::Command command = ace::commands::add_camera_command(
+        app_state_.registry(), ace::commands::next_camera_name(app_state_.document()),
+        ace::scene::Resolution{shot.width, shot.height}, shot.frame, outcome);
+    ace::commands::dispatch(app_state_, command);
+    // One `Camera <n>` sequence shared with `frame_selection`, and the mint touches neither
+    // the selection nor any canvas's look-through camera (D-new_shot_from_view-7): promoting
+    // the view must not CHANGE the view, or the user cannot promote twice from one place.
     minted = outcome.camera.valid();
   });
   return minted;

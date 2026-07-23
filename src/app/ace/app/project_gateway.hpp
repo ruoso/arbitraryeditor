@@ -101,6 +101,23 @@ public:
   bool can_frame_selection() const override;
   bool frame_selection() override;
 
+  // --- New Shot From View (editor.cameras.new_shot_from_view / D23) -------------
+  // D23's SECOND mint verb, the same L4 join over a different source region: read the LIVE
+  // `ViewFraming` -> `interact::new_shot_from_view` -> `commands::add_camera_command` ->
+  // `dispatch`, the whole sequence inside `run_edit` on the writer thread
+  // (D-new_shot_from_view-4). Reading the framing inside the closure is the freshness rule
+  // D-cells_remove-3 states for ids, applied to the pane: the size the transaction records
+  // must be the one live when it lands.
+  //
+  // `can_new_shot_from_view` is `live_view_framing().has_value()` — "is a canvas pane live
+  // and sized?", an L4 SESSION question no `commands::` predicate could answer
+  // (D-new_shot_from_view-6). The root-composition fallback belongs to `insert_cell`'s
+  // provisional placement and is deliberately NOT extended here: with every canvas closed
+  // (D18 has no keep-a-canvas guardrail) the mint refuses rather than promoting a framing
+  // the user never made (D-new_shot_from_view-2).
+  bool can_new_shot_from_view() const override;
+  bool new_shot_from_view() override;
+
   // Install the source of the provisional placement's framing — the shell binds it to
   // the live canvas's transient viewport camera + pane size, read by value per insert
   // (Constraint 7). Default: none, so a headless gateway (no canvas) frames the root
@@ -109,6 +126,11 @@ public:
 
 private:
   bool spawn(const std::filesystem::path& dir);
+  // The LIVE canvas framing, and only that: the installed provider's value when it reports a
+  // positive pane, else `nullopt`. "No live, sized canvas pane" is a reachable product state
+  // (D18 closes every canvas), and `new_shot_from_view` must see it as a refusal rather than
+  // as a substituted framing (D-new_shot_from_view-2).
+  std::optional<ViewFraming> live_view_framing() const;
   // The framing the provisional placement is computed in: the live canvas's when one
   // is wired and sized, else the root composition's own extent at identity.
   ViewFraming view_framing() const;

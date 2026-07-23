@@ -203,6 +203,28 @@ public:
   // The shipped L4 impl overrides both; `editor.panels.inspector` reuses this same pair.
   virtual bool can_frame_selection() const { return false; }
   virtual bool frame_selection() { return false; }
+
+  // New Shot From View (editor.cameras.new_shot_from_view / D23): mint a camera that
+  // promotes the viewport's CURRENT framing into a saved shot — D23's second mint verb, the
+  // sibling of `frame_selection` above and, like it, a rail ACTION rather than a fifth modal
+  // `ToolId` (D20). Where `frame_selection` derives its region from the document (the
+  // selection's placed extent), this one derives it from SESSION state: the live canvas
+  // pane's transient viewport camera and its device size, so the shot rendered at its own
+  // resolution reproduces what was on screen (D23's per-verb clause).
+  //
+  // `can_new_shot_from_view()` answers "is there a live, SIZED canvas pane?" — the honest
+  // precondition, because D18 has no keep-a-canvas guardrail and every canvas can be closed
+  // (D-new_shot_from_view-2). Disabled, not hidden, when it is false (§10's fixed rail
+  // geometry). `new_shot_from_view()` returns whether a camera was actually minted, so a
+  // call with no live pane is a mutation-free `false`.
+  //
+  // Two `bool`s again — `dock` may include neither `ace/scene` nor `ace/commands` (A12/A16),
+  // and the rail has no use for the minted id, so this seam needs not even a dock-local POD
+  // (D-new_shot_from_view-3). Non-pure with inert defaults, so the gateway fakes of unrelated
+  // suites need no churn. The shipped L4 impl overrides both; `editor.panels.inspector`
+  // reuses this same pair.
+  virtual bool can_new_shot_from_view() const { return false; }
+  virtual bool new_shot_from_view() { return false; }
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by

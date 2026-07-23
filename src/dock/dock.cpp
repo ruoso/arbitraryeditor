@@ -191,13 +191,15 @@ void draw_insert_cell_modal(Dockspace& dockspace, ProjectGateway& gateway) {
 }
 
 // The rail's Edit section: the one-shot "put a cell in the composition" entry point
-// (D3), its inverse, "take the selection back out" (editor.cells.remove), and "mint a
-// camera fit to the selection" (editor.cameras.frame_selection). A confirmed one-shot
-// op is what the two existing modals are for, so Insert is a modal rather than a ninth
-// view type (D-cells_model-5); Delete and Frame Selection are immediate rail ACTIONS
-// with no confirm — both are journaled, undoable transactions, and the confirm modal
-// exists for Clean up precisely because GC is NOT undoable (D15 / D-cells_remove-4 /
-// D-frame_selection-8). All three are actions, never a fifth modal `ToolId` (D20).
+// (D3), its inverse, "take the selection back out" (editor.cells.remove), and D23's TWO
+// mint verbs — "mint a camera fit to the selection" (editor.cameras.frame_selection) and
+// "promote the viewport's current framing into a saved shot"
+// (editor.cameras.new_shot_from_view). A confirmed one-shot op is what the two existing
+// modals are for, so Insert is a modal rather than a ninth view type (D-cells_model-5);
+// Delete and the two mints are immediate rail ACTIONS with no confirm — all journaled,
+// undoable transactions, and the confirm modal exists for Clean up precisely because GC is
+// NOT undoable (D15 / D-cells_remove-4 / D-frame_selection-8). All four are actions, never
+// a fifth modal `ToolId` (D20).
 void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
   ImGui::Separator();
   ImGui::TextUnformatted("Edit");
@@ -219,6 +221,16 @@ void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
   ImGui::BeginDisabled(!can_frame);
   if (ImGui::Selectable("Frame Selection###frame_selection") && can_frame) {
     gateway.frame_selection();
+  }
+  ImGui::EndDisabled();
+  // D23's SECOND mint verb, adjacent to the first because the two are one story
+  // (D-new_shot_from_view-5) but INDEPENDENTLY gated: this one asks "is a canvas pane live
+  // and sized?" rather than "is anything selected?", so with nothing selected exactly one of
+  // the two is enabled. Same disabled-not-hidden rule, same no-confirm/no-chord reasoning.
+  const bool can_shot = gateway.can_new_shot_from_view();
+  ImGui::BeginDisabled(!can_shot);
+  if (ImGui::Selectable("New Shot From View###new_shot_from_view") && can_shot) {
+    gateway.new_shot_from_view();
   }
   ImGui::EndDisabled();
   draw_insert_cell_modal(dockspace, gateway);
