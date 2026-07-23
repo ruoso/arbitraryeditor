@@ -130,3 +130,22 @@ record here for human review when profiling data is available.
 **Source:** `tasks/refinements/cameras/new_shot_from_view.md` (cameras.new_shot_from_view, 2026-07-23) — Open questions.
 
 `editor.cameras.mint_from_focused_canvas` implements the "follow focus with lowest-id fallback" approach: the gateway reads `CanvasView::focused_framing()` and the mint always promotes the canvas the user was most recently working in. The alternative — an explicit "promote this canvas" affordance in the canvas camera picker — would let the user designate a specific canvas regardless of focus. These two shapes have different discoverability tradeoffs: focus tracking is invisible until it matters (multi-canvas layout); explicit designation adds picker chrome that is meaningless in single-canvas use. Whether the right end state is the focus-tracking rail item alone, the explicit picker, or both is a D23/D18 design call for a human once multi-canvas layouts are in real use. The WBS task ships the focus-tracking path; if explicit designation is the preferred answer, `mint_from_focused_canvas` may need to be reconsidered or extended.
+
+---
+
+## Suppress the focused-canvas indicator on a single-canvas dock?
+
+**Source:** `tasks/refinements/canvas/focused_canvas_indicator.md`
+(canvas.focused_canvas_indicator, 2026-07-23) — Open questions /
+D-focused_canvas_indicator-3.
+
+D-focused_canvas_indicator-3 chose to draw the hairline accent border
+unconditionally — even on a single-canvas dock where it conveys no
+disambiguating information — because suppressing it would trade a one-pixel
+constant for a conditional invariant ("bordered pane = where the verb lands"
+would stop being universally true) and suppress the affordance precisely when a
+new user first learns what it means. The rationale is on the record in the
+refinement. If, in practice, the always-on border reads as chrome noise when only
+one canvas is open, the fix is a one-condition check in the draw block plus one
+e2e phase; the Catch2 rule matrix is unaffected. This is a product-taste call
+that warrants real use before deciding.

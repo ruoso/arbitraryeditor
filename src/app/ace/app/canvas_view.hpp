@@ -132,6 +132,17 @@ public:
   // the e2e can pin the TRACKING separately from the selection rule.
   std::string_view focused_view_id() const;
 
+  // WHICH canvas pane the framing-derived verbs will actually act on — the sticky hint run
+  // through the SAME `focus_target` rule `focused_framing()` consumes, so it names the
+  // lowest-id FALLBACK pane whenever the hint is empty, stale, or names an unsized pane, and
+  // is empty only when no live canvas is sized (D-focused_canvas_indicator-1/-5). This is what
+  // `draw_content` marks with the focused-canvas border, and what the e2e asserts so the RULE
+  // is pinned separately from the pixels.
+  //
+  // Lifetime: the result borrows `presenters_`'s own key storage, exactly like
+  // `focused_view_id()`'s — valid until the next `reconcile()` drops that pane.
+  std::string_view indicated_view_id() const;
+
   // Stop + join the render thread and release every GL texture while the context is
   // still valid (before shutdown). Safe to call twice (the destructor also calls it).
   void destroy();
@@ -213,6 +224,11 @@ private:
   void draw_selection(std::string_view view_id, Presenter& p,
                       const std::vector<interact::PickTarget>& targets,
                       const views::CanvasInput& in, float origin_x, float origin_y);
+
+  // Project `presenters_` (already view-id ordered) into the pure rule's input rows. The rows'
+  // `view_id`s BORROW the map's keys (view_framing.hpp's non-owning contract), so a
+  // `string_view` the rule returns outlives the returned vector but not the next `reconcile()`.
+  std::vector<PaneFraming> pane_rows() const;
 
   // Project `presenters_` (already view-id ordered) into `framing_for_focus`'s pure input and
   // apply it with `focused` as the hint. Both public framing accessors are one call to this,

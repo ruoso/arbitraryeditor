@@ -28,6 +28,19 @@ namespace {
 // composition→device scale by this, so a wheel of `w` notches zooms by k_zoom_base^w.
 constexpr double k_zoom_base = 1.2;
 
+// The focused-canvas marker (editor.canvas.focused_canvas_indicator; D-focused_canvas_indicator-4):
+// the same (120, 200, 255) accent this file already gives the active camera frame, the marquee
+// and the selection outline, so the marker joins an existing visual language rather than
+// introducing a colour — but OPAQUE, deliberately: an unblended stroke lands identically over
+// whatever the pane happens to be showing, which is what lets the e2e probe it under software GL
+// without a content-dependent expectation. A hairline (1 px, no rounding) reads as chrome rather
+// than as a drawn object, and is thinner than the 2 px selection outline that shares the hue.
+// NOT consolidated with the four shipped literals: their alphas differ (200/40/220/255) and one
+// is a different hue entirely, so that is a real decomposed-helper refactor with its own golden
+// obligations (`editor.canvas.accent_palette`), not a rename — D-focused_canvas_indicator-7.
+constexpr ImU32 k_focus_marker_color = IM_COL32(120, 200, 255, 255);
+constexpr float k_focus_marker_thickness = 1.0F;
+
 // The four-arm switch that turns L1's `SelectionChange` VALUE into a mutation of the ONE
 // project-level selection (D-selection-2). `interact` may not see `commands` and does not: this
 // is the whole of the L4 side of the modifier policy, and every branch it dispatches to is a
@@ -240,6 +253,41 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
     if (!(want == p.submitted)) {
       p.submitted = want;
       host_.request_camera(view_id, want);
+    }
+  }
+
+  // The focused-canvas marker (editor.canvas.focused_canvas_indicator; D23's "that pane is
+  // shown, not inferred"): a hairline accent border just inside THIS pane's content rect, drawn
+  // exactly when the shared resolution rule resolves to this pane. Read through
+  // `indicated_view_id()` — i.e. the STICKY hint run through `focus_target`, never a live
+  // `ImGui::IsWindowFocused` poll, which reports the rail during exactly the interaction the
+  // marker exists to disambiguate, and never the raw hint, which names nothing on a fresh
+  // session while the verb happily targets canvas#1 (D-focused_canvas_indicator-1/-3).
+  //
+  // Drawn OUTSIDE the "a frame has landed" branch above, beside the camera picker, so a
+  // sized-but-cold pane — already a legitimate framing target — is marked from its first frame
+  // rather than blinking on when its first texture arrives (Constraint 5). Draw-list only: no
+  // item, no id, no hit-test, no cursor advance, so it perturbs neither `##canvas_nav`'s
+  // AllowOverlap arrangement nor any rect an existing item occupies (Constraint 6). It never
+  // reaches a libarbc render: this is ImGui chrome over the pane, not composition (Constraint 9).
+  if (indicated_view_id() == view_id) {
+    // Snap the rect to the pixel grid — the first/last row+column FULLY inside the content rect —
+    // and let `AddRect` apply its own half-pixel inset from there, which is what centres the
+    // hairline on those pixels' CENTRES. The snapping is load-bearing, not tidiness: a dock
+    // splitter can leave `pane_origin` on a fractional pixel, and a stroke centred on a pixel
+    // BOUNDARY is split by ImGui's anti-aliasing into two 50%-alpha columns blended against the
+    // canvas beneath — exactly the content-dependent, unprobeable stroke
+    // D-focused_canvas_indicator-4 rejects. Snapped, it is opaque and one pixel wide at any
+    // origin, entirely inside the window clip rect so nothing is shaved. The rect framed is the
+    // CONTENT rect: the canvas the verb acts on, not the tab.
+    const ImVec2 marker_min(std::ceil(pane_origin.x), std::ceil(pane_origin.y));
+    const ImVec2 marker_max(std::floor(pane_origin.x + static_cast<float>(pane_width)),
+                            std::floor(pane_origin.y + static_cast<float>(pane_height)));
+    if (marker_max.x > marker_min.x + 1.0F &&
+        marker_max.y > marker_min.y + 1.0F) { // sub-2px pane: nothing to frame
+      ImGui::GetWindowDrawList()->AddRect(marker_min, marker_max, k_focus_marker_color,
+                                          /*rounding=*/0.0F, ImDrawFlags_None,
+                                          k_focus_marker_thickness);
     }
   }
 
@@ -552,17 +600,23 @@ double CanvasView::scale_bar_units(std::string_view view_id) const {
   return it == presenters_.end() ? 0.0 : it->second.scale_bar_units;
 }
 
-ViewFraming CanvasView::framing_for(std::string_view focused) const {
+std::vector<PaneFraming> CanvasView::pane_rows() const {
   // `presenters_` is id-ordered, so the projection hands the rule its panes in view-id order
   // and "canvas#1" wins the fallback over "canvas#2". The `string_view` keys borrow the map's
-  // own storage, which outlives this expression. This runs only on a user action (a mint or
-  // an insert), never per frame.
+  // own storage, which outlives the returned vector — which is why `indicated_view_id()` may
+  // hand a `string_view` back out of a scope this vector does not survive.
   std::vector<PaneFraming> panes;
   panes.reserve(presenters_.size());
   for (const auto& [id, presenter] : presenters_) {
     panes.push_back(PaneFraming{id, ViewFraming{presenter.framing_camera, presenter.requested_width,
                                                 presenter.requested_height}});
   }
+  return panes;
+}
+
+ViewFraming CanvasView::framing_for(std::string_view focused) const {
+  // Runs only on a user action (a mint or an insert), never per frame.
+  const std::vector<PaneFraming> panes = pane_rows();
   return framing_for_focus(panes, focused);
 }
 
@@ -576,6 +630,15 @@ ViewFraming CanvasView::primary_framing() const {
 ViewFraming CanvasView::focused_framing() const { return framing_for(focused_view_id_); }
 
 std::string_view CanvasView::focused_view_id() const { return focused_view_id_; }
+
+std::string_view CanvasView::indicated_view_id() const {
+  // The SAME rule `focused_framing()` runs, projected onto the pane's NAME instead of its
+  // framing (D-focused_canvas_indicator-1): the marker therefore follows the fallback branch
+  // too, and cannot report a pane other than the one a verb would act on. The returned view
+  // borrows `presenters_`'s keys, not `panes`, so it outlives this frame's projection.
+  const std::vector<PaneFraming> panes = pane_rows();
+  return focus_target(panes, focused_view_id_);
+}
 
 void CanvasView::destroy() {
   // Deterministic teardown (Constraint 5): stop the loop, wake it, and join BEFORE

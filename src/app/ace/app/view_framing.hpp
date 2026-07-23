@@ -32,6 +32,24 @@ struct PaneFraming {
   ViewFraming framing;
 };
 
+// WHICH pane the framing-derived verbs act on, BY NAME (D-focused_canvas_indicator-1): the
+// winner-selection half of `framing_for_focus`, hoisted so a caller can ask *which pane* the
+// verbs will act on rather than only *what framing* they will get. Returns the focused pane's
+// id when that pane is present and sized, else the first sized pane's id in `panes_by_id`
+// order (the lowest-id live pane), else an EMPTY `string_view` — the name-side spelling of the
+// zero `ViewFraming` sentinel below.
+//
+// `framing_for_focus` is implemented ON TOP of this, so the chrome that NAMES the target pane
+// (the focused-canvas marker) and the verb that CONSUMES its framing cannot drift apart: one
+// rule, two projections of the same answer.
+//
+// The returned view borrows the winning row's `view_id`, i.e. the CALLER's key storage
+// (`PaneFraming`'s non-owning contract above) — never the row array, which may be a temporary.
+//
+// Pure: no ImGui, no GL, no `CanvasView`.
+std::string_view focus_target(std::span<const PaneFraming> panes_by_id,
+                              std::string_view focused_view_id);
+
 // WHICH pane's framing the framing-derived verbs act on (D23's "which viewport, when more
 // than one canvas is open", D-mint_from_focused_canvas-3): the FOCUSED pane's framing when
 // that pane is present and sized, else the FIRST sized pane in `panes_by_id` order (the

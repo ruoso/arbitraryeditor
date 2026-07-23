@@ -254,8 +254,21 @@ task editor "Editor — host GUI over libarbc" {
     task focused_canvas_indicator "Show which canvas the framing-derived verbs act on" {
       effort 0.5d
       allocate team
+      complete 100
       depends editor.cameras.mint_from_focused_canvas
-      note "editor.cameras.mint_from_focused_canvas makes window focus semantically load-bearing — the focused canvas decides what 'New Shot From View' promotes and where an inserted cell lands — but leaves it invisible: ImGui's own focus chrome is a title-bar tint that is easy to miss in a two-pane dock and is absent while the rail holds focus. Draw a passive marker on the pane CanvasView::focused_view_id() names (a one-pixel accent border inside the pane rect, or a small badge beside the existing camera-picker overlay at src/app/canvas_view.cpp:236-245), driven from the sticky hint rather than from live ImGui focus so it persists across the rail click — plus an e2e phase asserting the marker follows WindowFocus and survives a rail interaction. Nothing in dockmodel, nothing in dock (D18's 'no privileged editor area' is about layout, not about indicating where the pointer verb applies). Source-of-debt: tasks/refinements/cameras/mint_from_focused_canvas.md. Design: docs/00-design.md D23, D18."
+      note "editor.cameras.mint_from_focused_canvas makes window focus semantically load-bearing — the focused canvas decides what 'New Shot From View' promotes and where an inserted cell lands — but leaves it invisible: ImGui's own focus chrome is a title-bar tint that is easy to miss in a two-pane dock and is absent while the rail holds focus. Draw a passive marker on the pane CanvasView::focused_view_id() names (a one-pixel accent border inside the pane rect, or a small badge beside the existing camera-picker overlay at src/app/canvas_view.cpp:236-245), driven from the sticky hint rather than from live ImGui focus so it persists across the rail click — plus an e2e phase asserting the marker follows WindowFocus and survives a rail interaction. Nothing in dockmodel, nothing in dock (D18's 'no privileged editor area' is about layout, not about indicating where the pointer verb applies). Source-of-debt: tasks/refinements/cameras/mint_from_focused_canvas.md. Design: docs/00-design.md D23, D18. Refinement: tasks/refinements/canvas/focused_canvas_indicator.md"
+    }
+    task accent_palette "Hoist the canvas accent colour into a shared alpha-parameterized constant" {
+      effort 0.5d
+      allocate team
+      depends !focused_canvas_indicator
+      note "IM_COL32(120, 200, 255, α) now appears at five sites in src/app/canvas_view.cpp with no shared definition and three distinct alphas (40, 220, 255; the amber at :296 is a different hue). A blanket rename cannot consolidate them — the alphas differ — so this needs a decomposed constexpr RGB triplet plus an accent(uint8_t alpha) helper applied at every site, with the existing goldens and e2e pixel probes proving byte-identical output. Prerequisite for any future theming. Source-of-debt: tasks/refinements/canvas/focused_canvas_indicator.md. Design: docs/00-design.md D18."
+    }
+    task view_id_natural_order "Order canvas view ids numerically, not lexicographically, in the framing fallback" {
+      effort 0.5d
+      allocate team
+      depends !focused_canvas_indicator
+      note "framing_for_focus/focus_target's 'lowest-id sized pane' fallback consumes panes_by_id in the order std::map<std::string, Presenter, std::less<>> yields (lexicographic), so with ten or more canvases open 'canvas#10' sorts before 'canvas#2' and the fallback picks the wrong pane. Fix by ordering the projection in CanvasView::framing_for (src/app/canvas_view.cpp:555-567) with a natural/numeric-suffix comparator, keeping focus_target itself order-agnostic and pure; Catch2 cases covering canvas#2 vs canvas#10 ordering, plus an e2e that opens ten panes. Source-of-debt: tasks/refinements/canvas/focused_canvas_indicator.md. Design: docs/00-design.md D23, D18."
     }
   }
 

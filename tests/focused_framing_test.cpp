@@ -14,9 +14,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
+using ace::app::focus_target;
 using ace::app::framing_for_focus;
 using ace::app::PaneFraming;
 using ace::app::ViewFraming;
@@ -132,4 +134,181 @@ TEST_CASE("framing_for_focus: no live canvas yields the zero sentinel") {
   CHECK(framing_for_focus(unsized, "canvas#1").pane_w == 0);
   CHECK(framing_for_focus(unsized, "").pane_w == 0);
   CHECK(framing_for_focus(unsized, "").pane_h == 0);
+}
+
+// --- editor.canvas.focused_canvas_indicator ---------------------------------------------
+// The rule projected onto the pane's NAME (D-focused_canvas_indicator-1). The focused-canvas
+// marker draws on the pane `focus_target` names, so these cases are the headless half of "the
+// marker can never point at a pane other than the one the verb acts on"; the consistency
+// property below is the half that makes that structural rather than aspirational.
+
+namespace {
+
+// One row of the shared branch matrix: BOTH `focus_target` and `framing_for_focus` are driven
+// over every fixture, so a future change to the rule that moves one and not the other cannot
+// pass. `view_id`s are string literals (static storage), so the non-owning `PaneFraming`
+// contract holds for the whole test.
+struct Fixture {
+  std::string_view label;
+  std::vector<PaneFraming> panes;
+  std::string_view hint;
+  std::string_view want_target;
+};
+
+std::vector<Fixture> fixtures() {
+  return {
+      {"focused pane wins over view-id order",
+       {{"canvas#1", ViewFraming{cam(1.0), 100, 50}},
+        {"canvas#2", ViewFraming{cam(2.0), 300, 200}}},
+       "canvas#2",
+       "canvas#2"},
+      // Three panes with the focused one LAST: a stub returning `panes[0].view_id` fails here.
+      {"focused pane wins from the end of a three-pane dock",
+       {{"canvas#1", ViewFraming{cam(1.0), 100, 50}},
+        {"canvas#2", ViewFraming{cam(2.0), 300, 200}},
+        {"canvas#3", ViewFraming{cam(3.0), 640, 480}}},
+       "canvas#3",
+       "canvas#3"},
+      {"focused pane wins from the middle of a three-pane dock",
+       {{"canvas#1", ViewFraming{cam(1.0), 100, 50}},
+        {"canvas#2", ViewFraming{cam(2.0), 300, 200}},
+        {"canvas#3", ViewFraming{cam(3.0), 640, 480}}},
+       "canvas#2",
+       "canvas#2"},
+      // The marker must appear on the FALLBACK pane in each of the three degrade branches —
+      // exactly the states where the raw sticky hint names nothing or names the wrong pane.
+      {"a present-but-unsized focused pane degrades to the fallback",
+       {{"canvas#1", ViewFraming{cam(1.0), 800, 600}}, {"canvas#2", ViewFraming{cam(2.0), 0, 0}}},
+       "canvas#2",
+       "canvas#1"},
+      {"a half-sized focused pane is unsized too",
+       {{"canvas#1", ViewFraming{cam(1.0), 800, 600}}, {"canvas#2", ViewFraming{cam(2.0), 300, 0}}},
+       "canvas#2",
+       "canvas#1"},
+      {"a hint naming a CLOSED canvas degrades to the fallback",
+       {{"canvas#1", ViewFraming{cam(1.0), 128, 96}}, {"canvas#3", ViewFraming{cam(3.0), 64, 64}}},
+       "canvas#2",
+       "canvas#1"},
+      {"a hint naming nothing at all degrades to the fallback",
+       {{"canvas#1", ViewFraming{cam(1.0), 128, 96}}, {"canvas#3", ViewFraming{cam(3.0), 64, 64}}},
+       "not-a-canvas",
+       "canvas#1"},
+      // The never-focused session: the historical `primary_framing()` path, marker included.
+      {"an empty hint takes the lowest-id SIZED pane, not the first row",
+       {{"canvas#1", ViewFraming{cam(1.0), 0, 0}},
+        {"canvas#2", ViewFraming{cam(2.0), 640, 480}},
+        {"canvas#3", ViewFraming{cam(3.0), 320, 240}}},
+       "",
+       "canvas#2"},
+      {"an empty hint takes the first row when it is sized",
+       {{"canvas#1", ViewFraming{cam(1.0), 100, 50}},
+        {"canvas#2", ViewFraming{cam(2.0), 300, 200}}},
+       "",
+       "canvas#1"},
+      {"the focused pane wins even as the only sized one",
+       {{"canvas#1", ViewFraming{cam(1.0), 0, 0}},
+        {"canvas#2", ViewFraming{cam(2.0), 0, 0}},
+        {"canvas#3", ViewFraming{cam(3.0), 77, 33}}},
+       "canvas#3",
+       "canvas#3"},
+      // Nothing to mark: D18 lets every canvas be closed, and a pane with no area is not a
+      // framing target — the marker is absent, matching the mint's refusal.
+      {"panes exist but none is sized: nothing is marked",
+       {{"canvas#1", ViewFraming{cam(1.0), 0, 0}}, {"canvas#2", ViewFraming{cam(2.0), 0, 0}}},
+       "canvas#1",
+       ""},
+      {"panes exist but none is sized, with no hint either",
+       {{"canvas#1", ViewFraming{cam(1.0), 0, 0}}, {"canvas#2", ViewFraming{cam(2.0), 0, 0}}},
+       "",
+       ""},
+      {"no panes at all, with a stale hint", {}, "canvas#1", ""},
+      {"no panes at all, with no hint", {}, "", ""},
+  };
+}
+
+const PaneFraming* row_named(const std::vector<PaneFraming>& panes, std::string_view id) {
+  for (const PaneFraming& pane : panes) {
+    if (pane.view_id == id) {
+      return &pane;
+    }
+  }
+  return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("focus_target: names the pane the framing rule resolves to, across the whole matrix") {
+  for (const Fixture& f : fixtures()) {
+    INFO(f.label);
+    CHECK(focus_target(f.panes, f.hint) == f.want_target);
+  }
+}
+
+TEST_CASE("focus_target: the target's view_id borrows the CALLER's key storage") {
+  // The marker's accessor hands this `string_view` out of the scope that built the rows
+  // (`CanvasView::indicated_view_id()`), which is only sound because the view points into the
+  // caller's keys — `presenters_`'s, here the local strings — and never into the row array.
+  const std::string first = "canvas#1";
+  const std::string second = "canvas#2";
+  std::vector<PaneFraming> panes{{first, ViewFraming{cam(1.0), 100, 50}},
+                                 {second, ViewFraming{cam(2.0), 300, 200}}};
+  std::string_view target = focus_target(panes, "canvas#2");
+  panes.clear(); // the rows are gone; the key storage is not
+  CHECK(target == "canvas#2");
+  CHECK(target.data() == second.data());
+}
+
+TEST_CASE("focus_target: framing_for_focus is the SAME rule, projected onto the framing") {
+  // THE anti-divergence assertion (Constraint 1). Over every fixture above: the framing the
+  // verbs consume is field-for-field — camera included — the framing of the row the marker
+  // names, and is the zero sentinel exactly when nothing is marked. Splitting the rule into two
+  // parallel implementations breaks this, whichever half is changed.
+  for (const Fixture& f : fixtures()) {
+    INFO(f.label);
+    const std::string_view target = focus_target(f.panes, f.hint);
+    const ViewFraming framing = framing_for_focus(f.panes, f.hint);
+    if (target.empty()) {
+      CHECK(framing.pane_w == 0);
+      CHECK(framing.pane_h == 0);
+      CHECK(same(framing.camera, arbc::Affine::identity()));
+      continue;
+    }
+    const PaneFraming* row = row_named(f.panes, target);
+    REQUIRE(row != nullptr); // a named target always names a real row
+    CHECK(framing.pane_w == row->framing.pane_w);
+    CHECK(framing.pane_h == row->framing.pane_h);
+    CHECK(same(framing.camera, row->framing.camera));
+    // …and a marked pane is always one the verbs can actually act on.
+    CHECK(row->framing.pane_w > 0);
+    CHECK(row->framing.pane_h > 0);
+  }
+}
+
+TEST_CASE("focus_target: the matrix itself is non-vacuous") {
+  // Guards the two tests above from passing against a degenerate stub: the fixture set must
+  // contain a resolved target carrying a NON-IDENTITY camera at a non-zero size (so `return ""`
+  // fails), an unresolved one (so `return panes[0].view_id` fails on an all-unsized dock), and a
+  // three-pane case whose winner is not the first row (so "first row" fails the focused branch).
+  bool saw_non_trivial_target = false;
+  bool saw_empty_target = false;
+  bool saw_deep_non_first_winner = false;
+  for (const Fixture& f : fixtures()) {
+    const std::string_view target = focus_target(f.panes, f.hint);
+    if (target.empty()) {
+      saw_empty_target = true;
+      continue;
+    }
+    const PaneFraming* row = row_named(f.panes, target);
+    REQUIRE(row != nullptr);
+    if (row->framing.pane_w > 0 && row->framing.pane_h > 0 &&
+        !same(row->framing.camera, arbc::Affine::identity())) {
+      saw_non_trivial_target = true;
+    }
+    if (f.panes.size() >= 3 && target != f.panes.front().view_id && !f.hint.empty()) {
+      saw_deep_non_first_winner = true;
+    }
+  }
+  CHECK(saw_non_trivial_target);
+  CHECK(saw_empty_target);
+  CHECK(saw_deep_non_first_winner);
 }
