@@ -44,31 +44,6 @@ for a human to weigh; no WBS task was created.
 
 ---
 
-## Async submit-queue (off-UI-thread writer) for large-edit latency
-
-**Source:** `tasks/refinements/editor/frame_sync.md` (frame_sync, 2026-07-18), D-frame_sync-2 / Open questions.
-
-The render thread is off the UI thread and `commands::dispatch`/`undo`/`redo`
-remain synchronous on the UI thread (the single writer). This is correct per
-A4: `transact` is a cheap model mutation; the expensive work (rendering) is what
-moves off-thread. If future profiling ever shows that UI-thread `transact` /
-`dispatch` latency is stalling the event loop on large edits (e.g. a bulk
-import), moving the writer behind an async submit-queue (with a dedicated writer
-thread, a cross-thread command queue, serialized undo-cursor navigation, and a
-journal-read guard) may become warranted. That is a monitor-and-decide call
-gated on real telemetry, not implementable work today. No WBS task was created;
-record here for human review when profiling data is available.
-
----
-
-## arbc DamageAccumulator flush/drain race (companion to arbc#13)
-
-**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — fixer sub-agent attempt 2.
-
-`HostViewport::DamageAccumulator` assumes the writing thread (UI) and the draining thread (render) are the same, with no synchronization between `push_back` (UI `commit → DamageRouter::flush`) and `drain()` (render-thread swap). This is a distinct race from arbc#13 (`settle_external_loads` commit-sink publish). The editor-side writer-priority lease (`CanvasHost` apply_edit + run() hold) mitigates the symptom by serializing UI writes against the render step, but it does not close the contract violation in the library. An upstream issue should be filed as a companion to arbc#13 (which must also be re-triaged from "latent" to "live" — it fires deterministically once a document has deferred external children). No editor-side WBS task exists until the library exposes a clean handoff contract.
-
----
-
 ## arbc Registry per-kind insert-schema hook
 
 **Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-2.
