@@ -235,6 +235,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/cells_remove_test.cpp
                          tests/frame_selection_test.cpp
                          tests/new_shot_from_view_test.cpp
+                         tests/history_publish_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene arbc::arbc

@@ -77,6 +77,13 @@ public:
   // (undo/redo via the gateway runner) funnel through here, synchronously on the caller.
   void apply_edit(const std::function<void()>& edit);
 
+  // Install the writer-turn epilogue run at the end of every apply_edit (arch A18):
+  // forwards to CanvasHost::set_post_edit_hook. The shell binds it to
+  // `commands::publish_history`, so EVERY document mutation — including this class's own
+  // manipulator commits and the camera inspector's bare `scene::` transactions, neither of
+  // which passes through a `commands` verb — republishes the History panel's snapshot.
+  void set_post_edit_hook(std::function<void()> hook);
+
   // Wake the render thread to re-render EVERY live canvas after a UI-thread edit (the
   // fan-out poke seam the edit points drive; D-frame_sync-2 / Constraint 4). Thread-safe.
   // NOTE: a bare poke does NOT serialize the preceding mutation against the render read —

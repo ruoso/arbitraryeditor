@@ -117,6 +117,11 @@ struct CanvasHost::Impl {
 
   std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries;
 
+  // The writer-turn epilogue an L4 installs (A18): run at the end of every apply_edit,
+  // on the writer thread, inside the lease. UI-thread-only — set and read by the same
+  // thread that calls apply_edit, never touched by the render thread.
+  std::function<void()> post_edit_hook;
+
   // RAII holder for the lease above. `writer == true` registers the holder as a queued
   // writer BEFORE waiting, so the render thread's acquire (which additionally waits for a
   // zero writer count) cannot barge past it — the fairness the plain-mutex doc_mu lacked.
@@ -211,6 +216,13 @@ void CanvasHost::apply_edit(const std::function<void()>& edit) {
   {
     Impl::Lease lease(*impl_, /*writer=*/true);
     edit();
+    // The writer-turn epilogue (A18), still under the lease and still on the writer
+    // thread — so it may read writer-owned document structure the edit just changed
+    // (libarbc's `Journal::entry_at`, for one) and publish it for the UI thread. Opaque
+    // by construction: `render` cannot see `commands`.
+    if (impl_->post_edit_hook) {
+      impl_->post_edit_hook();
+    }
   }
   // Then wake the loop to re-render every live entry over the mutated document (one writer,
   // N observers — Constraint 4); the edit's damage already fanned out via the DamageRouter.
@@ -219,6 +231,13 @@ void CanvasHost::apply_edit(const std::function<void()>& edit) {
     impl_->dirty = true;
   }
   impl_->cv.notify_all();
+}
+
+void CanvasHost::set_post_edit_hook(std::function<void()> hook) {
+  // UI-thread-only state, like the pending-request maps' callers: it is read only by
+  // apply_edit, which the same thread drives. No lock, and the render thread never
+  // observes it.
+  impl_->post_edit_hook = std::move(hook);
 }
 
 void CanvasHost::poke() {

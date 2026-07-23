@@ -282,6 +282,14 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     // The gateway outlives the draw loop alongside `canvas`, so the capture is safe.
     app_gateway->set_edit_runner(
         [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
+    // The writer-turn epilogue (A18 / D-history_published_reads-3): republish the History
+    // panel's entry-name snapshot after EVERY edit that passes through apply_edit. The
+    // `commands` verbs already refresh themselves, but they are not the only writers — the
+    // camera inspector and the frame manipulator commit bare `scene::` transactions inside
+    // raw apply_edit closures that no verb ever observes, and without this hook the panel
+    // would go stale after each of them. Same lifetime argument as the edit runner above:
+    // the canvas is stopped and joined before `app_state` is destroyed.
+    canvas.set_post_edit_hook([&app_state] { ace::commands::publish_history(app_state); });
     // The ONE framing source both framing-derived verbs read (D-mint_from_focused_canvas-4):
     // `insert_cell`'s provisional placement (editor.cells.model, Constraint 7) and
     // `new_shot_from_view`'s mint (D23) both go through this provider, so binding it to the

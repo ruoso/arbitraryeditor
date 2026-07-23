@@ -4,15 +4,12 @@
 #include <ace/render/render.hpp>
 #include <ace/views/views.hpp>
 
-#include <arbc/model/journal.hpp>
-#include <arbc/model/journal_entry.hpp>
-#include <arbc/runtime/document.hpp>
-
 #include <imgui.h>
 
 #include <array>
 #include <cstddef>
 #include <cstdio>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -174,29 +171,43 @@ void draw_view(std::string_view view_id) {
 }
 
 void draw_history(commands::AppState& state, std::string_view /*view_id*/) {
-  // Read the journal fresh each frame — the model is the single source of truth,
-  // no shadow copy (D-history-6). Applied entries are [0, cursor); [cursor, depth)
-  // is the redoable/future tail.
-  arbc::Journal& journal = state.document().journal();
-  const std::size_t depth = journal.depth();
-  const std::size_t cursor = journal.cursor();
+  // Render from ONE published snapshot per frame (A18 / D-history_published_reads-1/2).
+  // The journal's entry vector is writer-owned and libarbc's entry-inspection accessor is
+  // writer-thread only — it hands out a reference INTO a vector a concurrent commit may
+  // reallocate — so this panel never touches it, and reads no journal internals at all.
+  // Instead the writer publishes an immutable `HistorySnapshot` at each writer-turn
+  // boundary and the panel loads it by pointer, from any thread, lock-free. This
+  // deliberately reverses D-history-6's "no shadow copy": the copy is not a cache the
+  // panel maintains but a publication the writer performs, which is the only shape libarbc
+  // doc 15 permits for cross-thread structure — and it is strictly cheaper, one vector
+  // build per EDIT rather than three journal reads plus a concatenation per row per FRAME.
+  //
+  // Names and cursor come from the SAME loaded pointer, never mixed with a live re-read
+  // of the journal's published cursor atomic: a cursor from a later generation can exceed
+  // this snapshot's name count and index out of range at the "Redo <name>" affordance
+  // (Constraint 2). Applied entries are [0, cursor); [cursor, depth) is the
+  // redoable/future tail.
+  const std::shared_ptr<const commands::HistorySnapshot> history = state.history().load();
+  const std::size_t depth = history->names.size();
+  const std::size_t cursor = history->cursor;
 
   // Affordance labels — the entries the Ctrl+Z / Ctrl+Shift+Z chord acts on next:
   // the head entry to undo, the tip entry to redo (D-history / Constraint 7).
   if (cursor > 0) {
-    ImGui::TextDisabled("Undo %s", journal.entry_at(cursor - 1).name.c_str());
+    ImGui::TextDisabled("Undo %s", history->names[cursor - 1].c_str());
   }
   if (cursor < depth) {
-    ImGui::TextDisabled("Redo %s", journal.entry_at(cursor).name.c_str());
+    ImGui::TextDisabled("Redo %s", history->names[cursor].c_str());
   }
   ImGui::Separator();
 
   // The ordered list: a synthetic base row (the pre-first-edit state, target cursor
   // 0) above one row per journal entry in chronological order (D-history-4). The row
   // at cursor-1 — or the base row when cursor == 0 — is the highlighted head; future
-  // entries [cursor, depth) are dimmed. A click records the row's target cursor; the
-  // navigation loop below reaches it. Stable ###ids keep the rows drivable by the
-  // e2e regardless of the (possibly duplicate) entry names.
+  // entries [cursor, depth) are dimmed. A click records the row's target cursor; the L1
+  // verb below reaches it. Stable ###ids keep the rows drivable by the e2e regardless of
+  // the (possibly duplicate) entry names, and they index the SNAPSHOT by position, which
+  // is what makes them unchanged by this leaf.
   std::optional<std::size_t> target;
 
   if (ImGui::Selectable("Base###base", cursor == 0)) {
@@ -208,7 +219,7 @@ void draw_history(commands::AppState& state, std::string_view /*view_id*/) {
     if (!applied) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     }
-    const std::string label = journal.entry_at(i).name + "###entry" + std::to_string(i);
+    const std::string label = history->names[i] + "###entry" + std::to_string(i);
     if (ImGui::Selectable(label.c_str(), is_head)) {
       target = i + 1;
     }
@@ -217,16 +228,14 @@ void draw_history(commands::AppState& state, std::string_view /*view_id*/) {
     }
   }
 
-  // Click-to-jump: a bounded single-step loop toward the target cursor, defensively
-  // end-stopped when a verb reports no move (D-history-5). Clicking the current head
-  // targets the current cursor and loops zero times. Navigation goes ONLY through
-  // the shipped commands::undo / commands::redo verbs — the panel never mutates the
-  // journal directly (Constraint 1); the library exposes single-step nav only.
+  // Click-to-jump: one L1 verb, not a loop here (D-history_published_reads-4). The
+  // bounded, end-stopped single-step walk moved into `commands::navigate_to` — its loop
+  // conditions re-read the live journal cursor, so keeping it here would keep a journal
+  // read in L3. Behaviour is unchanged: same clamping at the base and the tip, and
+  // clicking the current head targets the current cursor and walks zero steps. The panel
+  // still never mutates the journal directly (Constraint 1).
   if (target) {
-    while (journal.cursor() > *target && commands::undo(state).moved) {
-    }
-    while (journal.cursor() < *target && commands::redo(state).moved) {
-    }
+    commands::navigate_to(state, *target);
   }
 }
 

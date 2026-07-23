@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ace/commands/history.hpp>
 #include <ace/commands/selection.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
@@ -53,6 +54,14 @@ public:
   Selection& selection() { return selection_; }
   const Selection& selection() const { return selection_; }
 
+  // The published journal-shape snapshot the UI reads instead of walking the
+  // writer-owned entry vector (arch A18). `history().load()` is any-thread and never
+  // null — an empty snapshot is published at construction, so a panel drawn before the
+  // first edit still gets a valid pointer. `history().refresh(...)` is writer-thread
+  // only; call it through the free `publish_history` below rather than directly.
+  HistoryPublisher& history() { return *history_; }
+  const HistoryPublisher& history() const { return *history_; }
+
   // Whether `open_project` rebuilt this session from the canonical `project.arbc`
   // rather than mapping the crash-durable workspace (always false for a fresh
   // `create_project`).
@@ -98,6 +107,12 @@ private:
   // The next gesture-coalescing key (D-undo-2): monotonic, seeded at 1 so it never
   // hands out `k_no_coalesce` (0) and never repeats within a session.
   std::uint64_t next_gesture_key_ = 1;
+  // The History panel's published read seam (A18 / D-history_published_reads-6). Held
+  // through a `unique_ptr` — like `document_` above — because `HistoryPublisher` owns an
+  // `std::atomic<std::shared_ptr<...>>`, which is neither copyable nor movable and would
+  // otherwise delete the defaulted move above (and with it `open_or_create_app_state`'s
+  // return-by-value). Never null in a live `AppState`.
+  std::unique_ptr<HistoryPublisher> history_;
 };
 
 // A dispatchable editor action (refinement Decision D-app_state-5). This leaf
@@ -150,6 +165,40 @@ UndoOutcome undo(AppState& state);
 // (`journal().redo()`). Same writer-thread, forward-publish, dirty-baseline-inert
 // contract as `undo`.
 UndoOutcome redo(AppState& state);
+
+// The observable result of one multi-step jump (D-history_published_reads-4). `steps`
+// is how many single-step verbs actually moved — 0 when the target IS the current
+// cursor (clicking the current head is a no-op) — and the rest mirrors `UndoOutcome`'s
+// post-navigation readout.
+struct NavigateOutcome {
+  std::size_t steps = 0;      // single-step verbs that moved (0 = nothing to do)
+  std::size_t cursor = 0;     // the journal cursor after navigating
+  std::uint64_t revision = 0; // the document revision after navigating
+  bool can_undo = false;
+  bool can_redo = false;
+};
+
+// Navigate the journal cursor to `target_cursor`: clamp the target into `[0, depth()]`,
+// then walk toward it one entry at a time through the shipped `undo`/`redo` verbs —
+// libarbc exposes single-step navigation only (`arbc/model/journal.hpp:91-92`) — and
+// defensively end-stop the moment a verb reports no move. Writer-thread, synchronous
+// (A4). Like `undo`/`redo` this is journal NAVIGATION, not an edit: it adds no journal
+// entry and never touches the dirty baseline (each step is an ordinary forward publish,
+// so the revision advances).
+//
+// This is the History panel's click-to-jump, lifted out of L3 (D-history_published_reads-4):
+// it keeps the whole jump testable headless, and collapses N cross-thread verb calls
+// into ONE writer-thread unit of work that publishes ONE snapshot at the end rather
+// than one per step.
+NavigateOutcome navigate_to(AppState& state, std::size_t target_cursor);
+
+// WRITER THREAD: republish `state`'s history snapshot from the live journal (A18).
+// Idempotent and stamp-guarded, so it is cheap to call at every writer-turn exit — the
+// `commands` verbs above each call it, AND the L4 shell binds it as `CanvasHost`'s
+// post-edit hook, because camera-inspector and manipulator edits run bare `scene::`
+// transactions inside a raw `apply_edit` closure and never reach a verb at all
+// (D-history_published_reads-3).
+void publish_history(AppState& state);
 
 // Resolve a project directory into an `AppState` (refinement Decision
 // D-app_state-6): an existing path opens (`project::open_project`), a

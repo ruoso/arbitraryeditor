@@ -121,12 +121,17 @@ void draw_view(std::string_view view_id);
 // owned session's undo journal as an ordered list — a synthetic base row (the
 // pre-first-edit state) plus one row per journal entry in chronological order, the
 // head highlighted and future/redoable entries dimmed — and navigates it when a row
-// is clicked by looping the shipped commands::undo / commands::redo verbs toward the
-// row's target cursor (single-step only; D-history-4/5). A pure reader/navigator: it
-// reads depth()/cursor()/entry_at(i).name fresh each frame, never mutates the
-// journal directly, and keeps no shadow copy (Constraint 1/6). Draws into the
-// CURRENT window (the dockspace owns Begin/End). The L4 shell registers it capturing
-// the one AppState& and clears it on exit (D-history-3).
+// is clicked, through the L1 commands::navigate_to verb (D-history-4/5).
+//
+// A pure reader/navigator that touches NO journal internals (arch A18 /
+// D-history_published_reads-1/2): it renders from ONE `commands::HistorySnapshot`
+// loaded per frame off `AppState::history()` — the immutable value the writer thread
+// publishes at each writer-turn boundary — never from the writer-owned entry vector
+// libarbc's `entry_at` hands out. Names and cursor come from that same loaded pointer,
+// so a frame's list, highlight and dim-split are always one self-consistent generation.
+// It never mutates the journal directly (Constraint 1). Draws into the CURRENT window
+// (the dockspace owns Begin/End). The L4 shell registers it capturing the one AppState&
+// and clears it on exit (D-history-3).
 void draw_history(commands::AppState& state, std::string_view view_id);
 
 } // namespace ace::views

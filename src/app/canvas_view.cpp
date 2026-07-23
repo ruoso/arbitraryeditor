@@ -560,6 +560,10 @@ std::optional<arbc::ObjectId> CanvasView::look_through(std::string_view view_id)
 
 void CanvasView::apply_edit(const std::function<void()>& edit) { host_.apply_edit(edit); }
 
+void CanvasView::set_post_edit_hook(std::function<void()> hook) {
+  host_.set_post_edit_hook(std::move(hook));
+}
+
 void CanvasView::poke() { host_.poke(); }
 
 void CanvasView::reconcile(const std::vector<std::string>& live_view_ids) {

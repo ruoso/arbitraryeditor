@@ -103,6 +103,18 @@ public:
   // "mutate, then poke()".
   void apply_edit(const std::function<void()>& edit);
 
+  // UI thread: install the writer-turn EPILOGUE — a callback invoked at the end of every
+  // apply_edit, on the calling (writer) thread, still inside the document lease (arch
+  // A18). This is the seam an L4 uses to republish anything the UI thread reads off
+  // writer-owned document structure; `apply_edit` is the single point EVERY document
+  // mutation passes through, including the bare `scene::` transactions that never go
+  // near a `commands` verb, so hooking it here is structural rather than per-call-site
+  // discipline. Deliberately an opaque `std::function<void()>`: `render` may not depend
+  // on `commands` (§8), and this keeps the DAG intact. An empty function (the default)
+  // means no epilogue. Set once at wiring time from the same thread that calls
+  // apply_edit; the render thread never touches it.
+  void set_post_edit_hook(std::function<void()> hook);
+
   // UI thread: wake the render loop to re-render EVERY live entry after an edit (the
   // fan-out poke — one writer, N observers; Constraint 4). Safe only when the edit
   // itself does not race the render thread's document read — prefer apply_edit() for a
