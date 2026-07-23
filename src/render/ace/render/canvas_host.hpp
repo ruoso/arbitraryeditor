@@ -90,13 +90,17 @@ public:
 
   // UI thread: run a document-mutating edit on the calling (writer) thread, then wake the
   // loop to re-render every live entry (one writer, N observers — Constraint 4). The edit
-  // runs SYNCHRONOUSLY. No lock is taken against the render thread's per-frame read: as of
-  // arbc v0.2.0 the document's content bindings publish copy-on-write behind an atomic
-  // (ruoso/arbitrarycomposer#10/#11), so the render walk (bind_operators / for_each_content)
-  // reads a stable snapshot while this edit's add_content rebinds — no data race. Keeping
-  // every edit on the caller also holds arbc's single writer-*identity* contract (SlotStore
-  // binds the writer thread on first write; editor.canvas.single_writer). This is the
-  // edit-serializing seam the app's edit-runner binds to; it replaces "mutate, then poke()".
+  // runs SYNCHRONOUSLY, under the host's writer-priority document lease, so it is mutually
+  // exclusive with a driven render iteration. arbc v0.2.0's copy-on-write content bindings
+  // (ruoso/arbitrarycomposer#10/#11) cover the render walk's binding read, but a commit also
+  // flushes into the render thread's HostViewport::DamageAccumulator and races the commit
+  // sink that step()'s settle_external_loads republishes (arbc#13) — both TSan-reported, so
+  // the exclusion is required. It is WRITER-priority: run() yields to a queued edit before
+  // starting an iteration, so a streamed burst of edits is never starved by the re-armed
+  // render loop. Keeping every edit on the caller also holds arbc's single writer-*identity*
+  // contract (SlotStore binds the writer thread on first write; editor.canvas.single_writer).
+  // This is the edit-serializing seam the app's edit-runner binds to; it replaces
+  // "mutate, then poke()".
   void apply_edit(const std::function<void()>& edit);
 
   // UI thread: wake the render loop to re-render EVERY live entry after an edit (the

@@ -282,6 +282,10 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     // The gateway outlives the draw loop alongside `canvas`, so the capture is safe.
     app_gateway->set_edit_runner(
         [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
+    // The provisional-placement framing source (editor.cells.model, Constraint 7):
+    // an inserted cell is centred in the region the live canvas is looking at, read
+    // by value at insert time. Same lifetime argument as the edit runner above.
+    app_gateway->set_view_framing([&canvas] { return canvas.primary_framing(); });
     project_gateway = app_gateway.get();
   }
   dockspace.set_project_gateway(project_gateway);

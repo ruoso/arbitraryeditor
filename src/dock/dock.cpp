@@ -7,6 +7,9 @@
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder* (the WIP docking-builder API)
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <utility>
@@ -111,6 +114,92 @@ void draw_gc_modal(Dockspace& dockspace, ProjectGateway& gateway) {
     }
     ImGui::EndPopup();
   }
+}
+
+// The Insert Cell modal (editor.cells.model / A16): pick a KIND, fill in whatever
+// fields that kind's factory needs, confirm. The kind list is whatever the gateway
+// handed over — one entry per `arbc::Registry::ids()` entry — and this code neither
+// filters it nor inspects a `kind_id`, which is what makes "no kind allowlist"
+// structural rather than a convention: every field is drawn as free text from the
+// POD it was given, so there is nowhere for a per-kind branch to live.
+//
+// A refused insert (a kind whose factory always fails, a malformed config) leaves
+// the modal OPEN with the kind's own error rendered inline — errors are values, the
+// rail's established contract. Drawn every frame from the rail so BeginPopupModal
+// stays balanced; the kind list, the selection, and the field buffers live on the
+// Dockspace. Stable slash-free `###` widget ids for the e2e.
+void draw_insert_cell_modal(Dockspace& dockspace, ProjectGateway& gateway) {
+  const char* popup_id = "Insert Cell";
+  if (dockspace.insert_modal_open() && !ImGui::IsPopupOpen(popup_id)) {
+    ImGui::OpenPopup(popup_id);
+  }
+  const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  if (!ImGui::BeginPopupModal(popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    return;
+  }
+  const std::vector<InsertKindSpec>& kinds = dockspace.insert_kinds();
+  ImGui::TextUnformatted("Kind");
+  for (std::size_t i = 0; i < kinds.size(); ++i) {
+    std::string label = kinds[i].human_name;
+    label += "###insert_kind";
+    label += std::to_string(i);
+    if (ImGui::Selectable(label.c_str(), i == dockspace.insert_selected_kind())) {
+      dockspace.select_insert_kind(i);
+    }
+  }
+  ImGui::Separator();
+  const std::size_t selected = dockspace.insert_selected_kind();
+  if (selected < kinds.size()) {
+    const InsertKindSpec& kind = kinds[selected];
+    for (std::size_t f = 0; f < kind.fields.size(); ++f) {
+      std::string label = kind.fields[f].label;
+      label += "###insert_field";
+      label += std::to_string(f);
+      ImGui::InputText(label.c_str(), dockspace.insert_field_buffer(f),
+                       static_cast<std::size_t>(dockspace.insert_field_buffer_size()));
+    }
+    // Say out loud that the placement is provisional (Constraint 7): the
+    // overview-wireframe placement gesture is editor.panels.overview's, and the user
+    // should not read this insert as "I chose where it goes".
+    ImGui::TextUnformatted("Placement: provisional — centred in the current view.");
+    if (!dockspace.insert_error().empty()) {
+      ImGui::TextWrapped("%s", dockspace.insert_error().c_str());
+    }
+    if (ImGui::Button("Insert###insert_confirm")) {
+      InsertValues values;
+      values.reserve(kind.fields.size());
+      for (std::size_t f = 0; f < kind.fields.size(); ++f) {
+        values.emplace_back(kind.fields[f].id, dockspace.insert_field_value(f));
+      }
+      const std::string error = gateway.insert_cell(kind.kind_id, values);
+      if (error.empty()) {
+        dockspace.insert_error().clear();
+        dockspace.close_insert_modal();
+        ImGui::CloseCurrentPopup();
+      } else {
+        dockspace.insert_error() = error; // the kind's own message; the modal stays open
+      }
+    }
+    ImGui::SameLine();
+  }
+  if (ImGui::Button("Cancel###insert_cancel")) {
+    dockspace.close_insert_modal(); // a cancelled insert mutates nothing
+    ImGui::CloseCurrentPopup();
+  }
+  ImGui::EndPopup();
+}
+
+// The rail's Insert section: the one-shot "put a cell in the composition" entry
+// point (D3). A confirmed one-shot op is what the two existing modals are for, so
+// this is a modal rather than a ninth view type (D-cells_model-5).
+void draw_insert_section(Dockspace& dockspace, ProjectGateway& gateway) {
+  ImGui::Separator();
+  ImGui::TextUnformatted("Insert");
+  if (ImGui::Selectable("Insert Cell…###insert_cell")) {
+    dockspace.open_insert_modal(gateway.insert_kinds());
+  }
+  draw_insert_cell_modal(dockspace, gateway);
 }
 
 // The rail's Project section (D18 home base / D22): New / Open / Open Recent, each
@@ -265,6 +354,7 @@ void draw_tool_rail(Dockspace& dockspace) {
   // The project-entry affordances (D22 / A12): New / Open / Open Recent, present
   // only when the app wired a gateway (null in the bare-shell smoke).
   if (ProjectGateway* gateway = dockspace.project_gateway()) {
+    draw_insert_section(dockspace, *gateway);
     draw_project_section(dockspace, *gateway);
   }
 
@@ -296,6 +386,46 @@ void draw_tool_rail(Dockspace& dockspace) {
   if (ImGui::Button("Delete") && !name.empty()) {
     store->remove(name);
   }
+}
+
+void Dockspace::open_insert_modal(std::vector<InsertKindSpec> kinds) {
+  insert_kinds_ = std::move(kinds);
+  insert_error_.clear();
+  select_insert_kind(0);
+  insert_modal_open_ = true;
+}
+
+void Dockspace::select_insert_kind(std::size_t index) {
+  insert_selected_ = index;
+  insert_error_.clear();
+  insert_fields_.clear();
+  if (index >= insert_kinds_.size()) {
+    return;
+  }
+  // Re-seed one buffer per field from that kind's prefill, so a raster's resolution
+  // arrives filled in from the composition's own size (Constraint 8) rather than
+  // blank or silently applied. A prefill longer than the buffer is truncated.
+  for (const InsertFieldSpec& field : insert_kinds_[index].fields) {
+    std::array<char, k_insert_field_capacity> buffer{};
+    const std::size_t copied = std::min(field.initial.size(), buffer.size() - 1);
+    std::copy_n(field.initial.begin(), copied, buffer.begin());
+    insert_fields_.push_back(buffer);
+  }
+}
+
+char* Dockspace::insert_field_buffer(std::size_t field) {
+  if (field >= insert_fields_.size()) {
+    insert_scratch_.fill('\0');
+    return insert_scratch_.data();
+  }
+  return insert_fields_[field].data();
+}
+
+std::string Dockspace::insert_field_value(std::size_t field) const {
+  if (field >= insert_fields_.size()) {
+    return {};
+  }
+  return std::string(insert_fields_[field].data());
 }
 
 Dockspace::Dockspace(std::vector<ViewType> initial) {

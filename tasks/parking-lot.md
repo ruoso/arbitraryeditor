@@ -58,3 +58,35 @@ thread, a cross-thread command queue, serialized undo-cursor navigation, and a
 journal-read guard) may become warranted. That is a monitor-and-decide call
 gated on real telemetry, not implementable work today. No WBS task was created;
 record here for human review when profiling data is available.
+
+---
+
+## arbc DamageAccumulator flush/drain race (companion to arbc#13)
+
+**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — fixer sub-agent attempt 2.
+
+`HostViewport::DamageAccumulator` assumes the writing thread (UI) and the draining thread (render) are the same, with no synchronization between `push_back` (UI `commit → DamageRouter::flush`) and `drain()` (render-thread swap). This is a distinct race from arbc#13 (`settle_external_loads` commit-sink publish). The editor-side writer-priority lease (`CanvasHost` apply_edit + run() hold) mitigates the symptom by serializing UI writes against the render step, but it does not close the contract violation in the library. An upstream issue should be filed as a companion to arbc#13 (which must also be re-triaged from "latent" to "live" — it fires deterministically once a document has deferred external children). No editor-side WBS task exists until the library exposes a clean handoff contract.
+
+---
+
+## arbc Registry per-kind insert-schema hook
+
+**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-2.
+
+`arbc::Registry` advertises `factory`/`metadata`/`codec`/`binder`/`state_walker` but no per-kind field-descriptor for `ContentConfig` inputs (the config is `std::string_view`, opaque). The editor therefore carries a grammar-adapter table in `scene::build_config` that encodes the built-in grammars (raster `"<w>x<h>"`, solid `"r,g,b,a"`, nested decimal id). A future `KindInsertSchema` hook on `Registry` would let that table shrink to zero and allow plugins to advertise their own insert fields automatically. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
+
+---
+
+## org.arbc.solid factory grammar admits no bounds field
+
+**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-3.
+
+`org.arbc.solid`'s registered factory config grammar is `"r,g,b,a"` with no bounds (`builtin_kinds.cpp:90-104`), so a Registry-constructed solid cell is always unbounded — Constraint 11 forbids bypassing the factory to name the concrete `SolidContent` type directly. The consequence (solid placement affine is a no-op, solid fills everywhere) is accepted and documented; the bounded-solid use case would require the library to extend the grammar. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
+
+---
+
+## arbc Document lacks atomic create-content-and-attach
+
+**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-7. Also noted in `tasks/refinements/cameras/model.md`.
+
+`arbc::Document::add_content` self-commits (it is the only vtable-binding call), so every cell or camera create costs two journal entries: content first, then `transact` → `add_layer` → `attach_layer` → `commit`. The mirror verb `remove_content` (document.hpp:131) is atomic in one entry. A future `create_content_and_attach` on `Document` would collapse the two-entry create to one, making undo semantics uniform. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ace/app/view_framing.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/dock/dock.hpp>
 #include <ace/dockmodel/recent_projects.hpp>
@@ -63,8 +64,30 @@ public:
   // calling thread (behaviour-identical, still single-threaded).
   void set_edit_runner(std::function<void(const std::function<void()>&)> runner);
 
+  // --- Insert Cell (editor.cells.model / A16) --------------------------------
+  // Marshal L1 `scene::insert_schemas` — one entry per `registry.ids()` entry, no
+  // allowlist — into the dock-local POD the rail renders.
+  std::vector<ace::dock::InsertKindSpec> insert_kinds() const override;
+
+  // Assemble the kind's opaque config from `values` (`scene::build_config`), compute
+  // the provisional placement from the live canvas framing (`interact::place_in_view`
+  // over the extent the factory-built content would report), and dispatch the insert
+  // through `run_edit` so the mutation runs inside `CanvasView::apply_edit`
+  // (Constraint 5). Returns the kind's own error string, or empty on success.
+  std::string insert_cell(const std::string& kind_id,
+                          const ace::dock::InsertValues& values) override;
+
+  // Install the source of the provisional placement's framing — the shell binds it to
+  // the live canvas's transient viewport camera + pane size, read by value per insert
+  // (Constraint 7). Default: none, so a headless gateway (no canvas) frames the root
+  // composition's own extent instead.
+  void set_view_framing(std::function<ViewFraming()> framing);
+
 private:
   bool spawn(const std::filesystem::path& dir);
+  // The framing the provisional placement is computed in: the live canvas's when one
+  // is wired and sized, else the root composition's own extent at identity.
+  ViewFraming view_framing() const;
   // Run a Document-mutating edit through the installed runner (serialized against the
   // render read via CanvasHost::apply_edit), or directly when none is installed.
   void run_edit(const std::function<void()>& edit);
@@ -78,6 +101,9 @@ private:
   // Serializes a UI-thread edit against the off-thread render read (bound to
   // CanvasHost::apply_edit by the shell); null in headless tests -> run directly.
   std::function<void(const std::function<void()>&)> run_edit_;
+  // The live canvas framing source for a cell insert's provisional placement; null in
+  // headless tests -> fall back to the root composition's extent.
+  std::function<ViewFraming()> view_framing_;
 };
 
 } // namespace ace::app

@@ -5,12 +5,14 @@
 #include <ace/dockmodel/view_registry.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ace::dockmodel {
@@ -34,6 +36,32 @@ struct GcSummary {
   std::uint64_t reclaimed_bytes = 0; // their total size
   bool ran = false;                  // a sweep actually completed
 };
+
+// One input the Insert Cell modal must collect for a kind's opaque
+// `arbc::ContentConfig`, in the dock's OWN vocabulary (A16 / D-cells_model-5): the
+// L1 `scene::InsertField` crosses this seam as POD exactly as `GcSummary` mirrors
+// the GC report, because `dock` may include neither `ace/scene` nor `ace/commands`.
+//
+// There is deliberately NO field *type* here. The modal renders every field as free
+// text, so the L3 layer structurally cannot branch on a kind — the no-allowlist
+// property (Constraint 2) is enforced by what this struct omits.
+struct InsertFieldSpec {
+  std::string id;      // stable field id the confirm marshals values back by
+  std::string label;   // human label
+  std::string initial; // prefilled value (a raster's resolution, Constraint 8)
+};
+
+// One insertable kind. The gateway returns exactly one of these per
+// `arbc::Registry::ids()` entry, unconditionally and in registration order; the rail
+// never filters the list it is handed.
+struct InsertKindSpec {
+  std::string kind_id;    // the registry id, verbatim — opaque to `dock`
+  std::string human_name; // what the modal lists
+  std::vector<InsertFieldSpec> fields;
+};
+
+// The user's answers, keyed by `InsertFieldSpec::id`.
+using InsertValues = std::vector<std::pair<std::string, std::string>>;
 
 // The project-entry seam (docs/01-architecture.md A12, docs/00-design.md D22).
 // The tool rail's New / Open / Recent affordances drive this ABSTRACT interface,
@@ -116,6 +144,32 @@ public:
   virtual bool redo() = 0;
   virtual bool can_undo() const = 0;
   virtual bool can_redo() const = 0;
+
+  // Every kind the session's `arbc::Registry` advertises, with the fields its
+  // factory needs (A16). ONE entry per registered kind, unconditionally — the L4
+  // impl marshals `scene::insert_schemas`, which holds no allowlist, and the rail
+  // adds none. A kind the editor has never seen arrives with a single free-text
+  // `config` field and is fully insertable.
+  //
+  // Non-pure with an empty default (unlike the entry/session verbs above) so the
+  // gateway fakes of unrelated suites need no churn: an unwired gateway simply
+  // offers nothing to insert. The shipped L4 impl overrides both.
+  virtual std::vector<InsertKindSpec> insert_kinds() const { return {}; }
+
+  // Insert one cell of `kind_id` from the modal's field `values`, at the session's
+  // provisional placement (Constraint 7 — the overview-wireframe placement gesture
+  // is `editor.panels.overview`'s, so the modal labels this as provisional). Acts on
+  // THIS process's one owned session like `save()`; the L4 impl assembles the config
+  // through `scene::build_config` and runs the `commands::dispatch` inside
+  // `CanvasView::apply_edit` (Constraint 5).
+  //
+  // Errors are values: returns the EMPTY string on success, else the kind's own
+  // error message — which the modal renders inline while staying open, with the
+  // document untouched. That is why a kind whose factory always fails
+  // (`org.arbc.fade`) is still offered rather than filtered out.
+  virtual std::string insert_cell(const std::string& /*kind_id*/, const InsertValues& /*values*/) {
+    return "Insert is unavailable.";
+  }
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by
@@ -213,12 +267,41 @@ public:
   }
   void close_gc_modal() { gc_modal_open_ = false; }
 
+  // --- Insert Cell modal state (editor.cells.model / A16) --------------------
+  // The kind list is SNAPSHOT from the gateway when the modal opens, so the modal
+  // renders a stable list every frame (the BeginPopupModal balance rule) without
+  // re-walking the registry per frame. `dock` never inspects a `kind_id`.
+  bool insert_modal_open() const { return insert_modal_open_; }
+  void open_insert_modal(std::vector<InsertKindSpec> kinds);
+  void close_insert_modal() { insert_modal_open_ = false; }
+  const std::vector<InsertKindSpec>& insert_kinds() const { return insert_kinds_; }
+
+  // Which kind's fields the modal is editing, and the switch that re-seeds the
+  // field buffers from that kind's prefills (Constraint 8 — a raster's resolution
+  // arrives filled in, visible, and editable).
+  std::size_t insert_selected_kind() const { return insert_selected_; }
+  void select_insert_kind(std::size_t index);
+
+  // The per-field editable buffers (plain char buffers — this build ships no
+  // imgui_stdlib std::string overload). `field` indexes the SELECTED kind's fields;
+  // an out-of-range index yields a scratch buffer so the modal can never fault.
+  char* insert_field_buffer(std::size_t field);
+  int insert_field_buffer_size() const { return static_cast<int>(k_insert_field_capacity); }
+  std::string insert_field_value(std::size_t field) const;
+
+  // The kind's own error string from the last refused insert — rendered inline
+  // while the modal STAYS OPEN (errors are values). Empty means "no message".
+  std::string& insert_error() { return insert_error_; }
+  const std::string& insert_error() const { return insert_error_; }
+
   // Inline feedback the rail renders for the last project action (a non-project
   // Open selection, an unavailable recent, an invalid New name). The rail reads
   // and writes it; empty means "no message".
   std::string& project_feedback() { return project_feedback_; }
 
 private:
+  static constexpr std::size_t k_insert_field_capacity = 256;
+
   ace::dockmodel::ViewRegistry registry_;
   ace::dockmodel::DockLayout layout_;
   ace::dockmodel::ToolSelection tools_; // the rail's active-tool selection (A11)
@@ -230,11 +313,18 @@ private:
   std::filesystem::path new_project_parent_;  // parent the folder pick seeded
   std::string project_feedback_;              // inline feedback for the last action
   GcSummary gc_preview_;                      // the last Clean up dry-run reclaim counts
-  bool new_project_modal_open_ = false;       // the New Project modal is showing
-  bool gc_modal_open_ = false;                // the Clean up confirm modal is showing
-  bool built_ = false;                        // DockBuilder seeded at least once
-  bool rebuild_ = false;                      // a programmatic open/reopen needs a re-seed
-  unsigned int dockspace_id_ = 0;             // ImGuiID; assigned on first draw()
+  std::vector<InsertKindSpec> insert_kinds_;  // the Insert Cell kind list, snapshot at open
+  std::vector<std::array<char, k_insert_field_capacity>>
+      insert_fields_; // the selected kind's editable field buffers
+  std::array<char, k_insert_field_capacity> insert_scratch_{}; // out-of-range field sink
+  std::string insert_error_;                                   // the last refused insert's message
+  std::size_t insert_selected_ = 0;                            // index into insert_kinds_
+  bool insert_modal_open_ = false;                             // the Insert Cell modal is showing
+  bool new_project_modal_open_ = false;                        // the New Project modal is showing
+  bool gc_modal_open_ = false;    // the Clean up confirm modal is showing
+  bool built_ = false;            // DockBuilder seeded at least once
+  bool rebuild_ = false;          // a programmatic open/reopen needs a re-seed
+  unsigned int dockspace_id_ = 0; // ImGuiID; assigned on first draw()
 };
 
 // The stable ImGui window id of the fixed tool rail — exposed so the e2e can

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ace/app/view_framing.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/platform/threads.hpp>
 #include <ace/render/canvas_host.hpp>
@@ -108,6 +109,13 @@ public:
   // the last value computed from that pane's transient camera. The e2e asserts it changes
   // after a zoom (the scale readout tracks the camera; D-nav-6).
   double scale_bar_units(std::string_view view_id) const;
+
+  // The transient viewport framing of the first (lowest-id) live, sized canvas pane —
+  // camera + device size, BY VALUE. A zero-pane `ViewFraming` when no canvas has been
+  // sized yet. `editor.cells.model` reads this to compute a freshly-inserted cell's
+  // provisional placement from what the user is actually looking at (Constraint 7);
+  // nothing here mutates the Document, so it is a plain UI-thread session read.
+  ViewFraming primary_framing() const;
 
   // Stop + join the render thread and release every GL texture while the context is
   // still valid (before shutdown). Safe to call twice (the destructor also calls it).

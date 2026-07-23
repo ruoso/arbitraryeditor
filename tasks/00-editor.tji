@@ -159,6 +159,12 @@ task editor "Editor — host GUI over libarbc" {
       depends !open, !save_as
       note "The project directory IS the project (D16, project-as-a-directory): creation targets a path that does not yet exist, and the tool creates the directory. Tighten project::create_project (project_open.cpp) and project::save_project_as (save.cpp) to refuse ANY existing target directory — not just one already holding a project.arbc — so New and Save As behave identically; surface the refusal as a clear in-app message via dock::ProjectGateway. REVERSES D-save_as-4's narrow 'a populated directory without project.arbc is a fine destination' guard (flips the save_as_test populated-target case) and adds a create-time existence check to the open path. Design: D16 (project-as-a-directory), D19. Source-of-debt: tasks/refinements/editor/save_as.md, tasks/refinements/editor/open.md. Refinement: tasks/refinements/dir_is_project.md. Decided (pre-exec 2026-07-19): New AND Save As collect the target via a parent-location pick + typed project NAME (not a folder picker returning an existing dir); the tool creates that directory. 'Existing' means exists-at-all — refuse even an EMPTY existing dir, for full New/Save-As symmetry. So Save As switches from the shipped native-folder-pick UX to the same parent+name compose flow New uses."
     }
+    task raster_tile_store "Thread RasterTileStore/TileDecodeDispatch through save/open for raster memoisation" {
+      effort 1.5d
+      allocate team
+      depends editor.cells.model
+      note "Thread arbc::RasterTileStore (and TileDecodeDispatch) through project::save_project -> arbc::builtin_codecs(registry, &tiles) (document_serialize.hpp:134) and project::open_project -> arbc::load_document(..., tiles, decode) (:218) so raster-cell tiles are memoized across saves instead of re-hashed on every save. save.cpp:120 passes null tiles and project_open.cpp:97-98 passes none -- correct but O(all tiles) per save. editor.cells.model is the first leaf to put raster cells in a saved project, making this load-bearing. Source-of-debt: tasks/refinements/editor.cells/model.md. Design: docs/01-architecture.md A4/A14."
+    }
   }
 
   # ---- Canvas & rendering (A4/A5/A6) ----
@@ -310,8 +316,9 @@ task editor "Editor — host GUI over libarbc" {
     task model "Insert cell (image/raster/nested/solid) via Registry" {
       effort 2d
       allocate team
+      complete 100
       depends editor.canvas.view
-      note "Insert a cell of any registered kind (org.arbc.image/raster/nested/solid) off the library Registry::ids(); place it in the composition by affine. Design: D3. Refinement: tasks/refinements/cell_model.md. Decided (pre-exec 2026-07-19): the editor keeps NO kind allowlist — enumerate ALL Registry-advertised kinds uniformly (arbitrariness is the core principle); kind-specific content acquisition (raster resolution, image/nested file/URI, solid color) is the kind's concern, surfaced generically, not a hard-coded editor set. Cell resolution is a first-class user input at insert (NOT a fixed default — resolves the D3/00-design.md:116 open marker): the user specifies resolution, then PLACES the cell in the overview wireframe to see how it fits the composition. That placement gesture wants editor.panels.overview (not yet built) — this leaf ships the model-level insert (resolution + affine) with a provisional placement; the overview-wireframe placement lands with/after editor.panels.overview."
+      note "Insert a cell of any registered kind (org.arbc.image/raster/nested/solid) off the library Registry::ids(); place it in the composition by affine. Design: D3. Decided (pre-exec 2026-07-19): the editor keeps NO kind allowlist — enumerate ALL Registry-advertised kinds uniformly (arbitrariness is the core principle); kind-specific content acquisition (raster resolution, image/nested file/URI, solid color) is the kind's concern, surfaced generically, not a hard-coded editor set. Cell resolution is a first-class user input at insert (NOT a fixed default — resolves the D3/00-design.md:116 open marker): the user specifies resolution, then PLACES the cell in the overview wireframe to see how it fits the composition. That placement gesture wants editor.panels.overview (not yet built) — this leaf ships the model-level insert (resolution + affine) with a provisional placement; the overview-wireframe placement lands with/after editor.panels.overview. Refinement: tasks/refinements/editor.cells/model.md"
     }
     task selection "Project-level selection; hit-test; marquee; select-behind" {
       effort 2.5d
@@ -330,6 +337,12 @@ task editor "Editor — host GUI over libarbc" {
       allocate team
       depends !selection
       note "Show a cell's native/working resolution separately from placement; 'resample to crisp' grows a raster's grid; a referenced image is source-limited (the file is the floor). The health badge flags a camera out-resolving a cell. Design: D8. Refinement: tasks/refinements/resolution_ops.md"
+    }
+    task remove "Delete selected cell(s) via Document::remove_content + Delete chord" {
+      effort 1d
+      allocate team
+      depends !selection
+      note "Delete the selected cell(s) via arbc::Document::remove_content(content, composition, layer) (document.hpp:131 -- atomic, one journal entry, undoable) with the Delete chord and a rail/inspector affordance plus an e2e. Insert without delete is the gap editor.cells.model opens; the library verb already exists, so this is mechanical. Source-of-debt: tasks/refinements/editor.cells/model.md. Design: docs/00-design.md D7/D15."
     }
   }
 

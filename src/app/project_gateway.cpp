@@ -1,10 +1,20 @@
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/cells.hpp>
 #include <ace/commands/exec_new.hpp>
+#include <ace/interact/interact.hpp>
 #include <ace/project/project.hpp>
+#include <ace/scene/cell.hpp>
 
+#include <arbc/base/expected.hpp>
+#include <arbc/base/geometry.hpp>
+#include <arbc/base/transform.hpp>
+
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 // editor.project.open_ui — the L4 gateway wiring the already-built terminal
 // mechanisms (editor.project.open validate helpers, editor.project.exec_new
@@ -149,6 +159,91 @@ void AppProjectGateway::save_as() {
     }
     ace::commands::save_project_as(app_state_, filesystem_, launcher_, executable_, *picked);
   });
+}
+
+void AppProjectGateway::set_view_framing(std::function<ViewFraming()> framing) {
+  view_framing_ = std::move(framing);
+}
+
+ViewFraming AppProjectGateway::view_framing() const {
+  if (view_framing_) {
+    const ViewFraming live = view_framing_();
+    if (live.pane_w > 0 && live.pane_h > 0) {
+      return live;
+    }
+  }
+  // No live canvas (a headless gateway test, or a session whose Canvas pane has not
+  // been sized yet): frame the root composition itself at identity, so the
+  // provisional placement is still centred in something real rather than degenerate.
+  ViewFraming fallback;
+  if (const std::optional<ace::project::CompositionSize> size =
+          ace::project::root_composition_size(app_state_.document())) {
+    fallback.pane_w = static_cast<int>(size->width);
+    fallback.pane_h = static_cast<int>(size->height);
+  }
+  return fallback;
+}
+
+std::vector<ace::dock::InsertKindSpec> AppProjectGateway::insert_kinds() const {
+  // The L1 -> dock POD marshalling (D-cells_model-5), the exact shape `clean_up`
+  // uses for `GcSummary`: `dock` may include neither `ace/scene` nor `ace/commands`,
+  // and L4 is the level that sees both. The list is passed through ENTIRELY — this
+  // is a `for` over what `scene::insert_schemas` returned, never a filter.
+  const std::vector<ace::scene::KindInsertSchema> schemas = ace::scene::insert_schemas(
+      app_state_.registry(), ace::project::root_composition_size(app_state_.document()));
+  std::vector<ace::dock::InsertKindSpec> specs;
+  specs.reserve(schemas.size());
+  for (const ace::scene::KindInsertSchema& schema : schemas) {
+    ace::dock::InsertKindSpec spec;
+    spec.kind_id = schema.kind_id;
+    spec.human_name = schema.human_name;
+    spec.fields.reserve(schema.fields.size());
+    for (const ace::scene::InsertField& field : schema.fields) {
+      spec.fields.push_back(ace::dock::InsertFieldSpec{field.id, field.label, field.initial});
+    }
+    specs.push_back(std::move(spec));
+  }
+  return specs;
+}
+
+std::string AppProjectGateway::insert_cell(const std::string& kind_id,
+                                           const ace::dock::InsertValues& values) {
+  const std::vector<ace::scene::KindInsertSchema> schemas = ace::scene::insert_schemas(
+      app_state_.registry(), ace::project::root_composition_size(app_state_.document()));
+  const ace::scene::KindInsertSchema* schema = nullptr;
+  for (const ace::scene::KindInsertSchema& candidate : schemas) {
+    if (candidate.kind_id == kind_id) {
+      schema = &candidate;
+      break;
+    }
+  }
+  if (schema == nullptr) {
+    return kind_id + ": not a registered kind";
+  }
+  // Errors are values at every step, and each step leaves the Document untouched.
+  const arbc::expected<std::string, std::string> config = ace::scene::build_config(*schema, values);
+  if (!config) {
+    return config.error();
+  }
+  // Placement is a value the CALLER computes (Constraint 6): probe the extent the
+  // factory-built content would report, then centre it in the region the pane is
+  // currently showing. `editor.panels.overview` later swaps a drag-derived affine in
+  // right here, with no change to `scene`.
+  const arbc::expected<std::optional<arbc::Rect>, std::string> bounds =
+      ace::scene::probe_bounds(app_state_.registry(), kind_id, *config);
+  if (!bounds) {
+    return bounds.error();
+  }
+  const ViewFraming framing = view_framing();
+  const arbc::Affine placement =
+      ace::interact::place_in_view(framing.camera, framing.pane_w, framing.pane_h, *bounds);
+  ace::commands::InsertCellOutcome outcome;
+  const ace::commands::Command command = ace::commands::insert_cell_command(
+      app_state_.registry(), kind_id, *config, placement, outcome);
+  // Every UI-driven insert runs inside CanvasView::apply_edit (Constraint 5 /
+  // edit_render_sync Constraint 1, which names cells) — never a bare dispatch+poke.
+  run_edit([this, &command] { ace::commands::dispatch(app_state_, command); });
+  return outcome.error;
 }
 
 } // namespace ace::app

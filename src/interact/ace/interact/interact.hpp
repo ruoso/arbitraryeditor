@@ -1,7 +1,9 @@
 #pragma once
 
-#include <arbc/base/geometry.hpp>  // arbc::Vec2
+#include <arbc/base/geometry.hpp>  // arbc::Rect, arbc::Vec2
 #include <arbc/base/transform.hpp> // arbc::Affine
+
+#include <optional>
 
 namespace ace::interact {
 
@@ -52,6 +54,36 @@ ScaleBar scale_bar(const arbc::Affine& camera, double target_px);
 // get lost in unbounded space" recovery. A degenerate content/pane yields
 // identity (nothing to fit).
 arbc::Affine fit(double content_w, double content_h, double pane_w, double pane_h);
+
+// --- Provisional cell placement (editor.cells.model; D3/D8/A16) ---------------
+
+// The fraction of the visible region's SHORTER edge a provisionally-placed cell's
+// longer edge occupies. Half — big enough to see and grab, small enough to leave the
+// composition around it visible.
+inline constexpr double k_default_placement_fill = 0.5;
+
+// The provisional placement affine for a freshly-inserted cell (Constraint 6/7): the
+// content's own extent, uniformly scaled so its LONGER edge is `fill_fraction` of the
+// shorter edge of the region `view` currently shows over a `pane_w`x`pane_h` canvas,
+// and centred in that region. `view` is the transient viewport camera (composition
+// units -> device pixels, `Presenter::camera`); `content_bounds` is whatever
+// `arbc::Content::bounds()` reported.
+//
+// Primitives only — no `scene` type crosses this signature (D-manip-2/D-cells_model-6),
+// which is what lets `editor.panels.overview` later hand `scene::add_cell` a
+// drag-derived affine and `editor.import.image` a native-px->units 1:1 affine with no
+// change to `scene`.
+//
+// UNBOUNDED content (`nullopt`, e.g. a factory-built `org.arbc.solid`, whose config
+// grammar admits no bounds) yields IDENTITY, because scaling an unbounded fill is
+// meaningless (D-cells_model-3). So do all the degenerate ends — a non-invertible
+// view, a non-positive pane, an empty content rect, a non-positive/non-finite fill
+// fraction — rather than producing NaNs (the D-fit_bounds-3 fallback discipline).
+// Resolution NEVER enters this computation and this affine never enters a resolution
+// (D8's independence rule).
+arbc::Affine place_in_view(const arbc::Affine& view, int pane_w, int pane_h,
+                           const std::optional<arbc::Rect>& content_bounds,
+                           double fill_fraction = k_default_placement_fill);
 
 // --- New shot from view (editor.cameras.model; D2 §"new shot from view") ------
 

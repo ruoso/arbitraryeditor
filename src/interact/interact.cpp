@@ -62,6 +62,38 @@ arbc::Affine fit(double content_w, double content_h, double pane_w, double pane_
   return arbc::Affine{scale, 0.0, 0.0, scale, tx, ty};
 }
 
+arbc::Affine place_in_view(const arbc::Affine& view, int pane_w, int pane_h,
+                           const std::optional<arbc::Rect>& content_bounds, double fill_fraction) {
+  if (pane_w <= 0 || pane_h <= 0 || !content_bounds.has_value() || content_bounds->empty()) {
+    return arbc::Affine::identity(); // unbounded content / no pane: nothing to centre
+  }
+  if (!(fill_fraction > 0.0) || !std::isfinite(fill_fraction)) {
+    return arbc::Affine::identity();
+  }
+  // The composition region the pane currently shows: the pane rectangle pulled back
+  // through the viewport camera. A collapsed camera has no inverse — nothing visible.
+  const std::optional<arbc::Affine> inverse = view.inverse();
+  if (!inverse.has_value()) {
+    return arbc::Affine::identity();
+  }
+  const arbc::Rect visible = inverse->map_rect(
+      arbc::Rect::from_size(static_cast<double>(pane_w), static_cast<double>(pane_h)));
+  if (visible.empty()) {
+    return arbc::Affine::identity();
+  }
+  const arbc::Rect& extent = *content_bounds;
+  const double longest = std::max(extent.width(), extent.height());
+  const double target = std::min(visible.width(), visible.height()) * fill_fraction;
+  const double scale = target / longest;
+  // Centre the content's own extent on the visible region's centre.
+  const double tx = (visible.x0 + visible.x1) * 0.5 - scale * (extent.x0 + extent.x1) * 0.5;
+  const double ty = (visible.y0 + visible.y1) * 0.5 - scale * (extent.y0 + extent.y1) * 0.5;
+  if (!(scale > 0.0) || !std::isfinite(scale) || !std::isfinite(tx) || !std::isfinite(ty)) {
+    return arbc::Affine::identity(); // an infinite visible region etc. — never a NaN
+  }
+  return arbc::Affine{scale, 0.0, 0.0, scale, tx, ty};
+}
+
 ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_h) {
   ShotFraming shot;
   shot.width = pane_w;

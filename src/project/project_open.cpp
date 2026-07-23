@@ -92,7 +92,17 @@ rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_b
   if (register_extra_kinds) {
     register_extra_kinds(registry);
   }
+  // Seed the load bridge from the registry, exactly as `save_project` seeds its own
+  // (save.cpp:115-116). `KindBridge()` alone pre-interns only the built-in LEAF kinds
+  // and `load_document` then interns the rest in FILE-ENCOUNTER order — which makes
+  // the reloaded document's `ContentRecord.kind` tokens depend on what the file
+  // happened to contain. Seeding first makes them registry-order deterministic and
+  // therefore identical to the tokens the author-side mints
+  // (`scene::add_cell` / `scene::add_camera`), which is what lets a token-based kind
+  // read-back (`scene::cells`, D-cells_model-8) survive a reopen. Tokens are never
+  // serialized, so this changes no bytes on disk.
   arbc::KindBridge bridge;
+  seed_kind_bridge(bridge, registry);
   arbc::FilesystemAssetSource assets;
   const auto loaded = arbc::load_document(canonical_bytes, *document, bridge, registry,
                                           layout.canonical.string(), &assets);

@@ -15,6 +15,7 @@
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 #include <ace/scene/camera.hpp>
+#include <ace/scene/cell.hpp>
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
@@ -945,4 +946,54 @@ TEST_CASE("canvas_host: a ref-free document renders byte-identically through the
   CHECK(wired.pixels == empty.pixels);
   const Srgb8Image offline = ace::render::render_document_srgb8(*probe.document, k_w, k_h);
   CHECK(wired.pixels == offline.pixels);
+}
+
+TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against the render read") {
+  // editor.cells.model Acceptance (Threading): the SHIPPED insert path — a registry
+  // factory call, `Document::add_content` (which binds a Content vtable and
+  // self-commits), then one transact adding + attaching the placing layer — streamed
+  // through `apply_edit` on the REAL interactive pool against a live rendering canvas.
+  // Structurally heavier than `damage()`'s solid add (a raster mints a tile pyramid),
+  // so it widens the overlap window the D-edit_render_sync-3 anchor above opens. No
+  // new lock and no new thread: A4.1 writer-identity holds because every edit runs on
+  // the caller, and the render walk reads the COW-published bindings lock-free.
+  ProbeDocument probe = build_probe_document();
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  constexpr int k_inserts = 24;
+  for (int i = 0; i < k_inserts; ++i) {
+    host.apply_edit([&] {
+      // Alternate an opaque solid (a full-frame repaint) with a small raster (a tile
+      // pyramid mint) so both the cheap and the allocating insert overlap the read.
+      const bool solid = (i % 2) == 0;
+      const auto added = ace::scene::add_cell(
+          *probe.document, registry, solid ? "org.arbc.solid" : "org.arbc.raster",
+          solid ? "0.1,0.2,0.3,1" : "24x24",
+          arbc::Affine::translation(static_cast<double>(i), static_cast<double>(i)));
+      REQUIRE(added.has_value());
+    });
+  }
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+
+  // Every insert landed exactly once: the probe's own untokened solid plus k_inserts.
+  CHECK(ace::scene::cells(*probe.document, registry).size() ==
+        static_cast<std::size_t>(k_inserts) + 1);
 }

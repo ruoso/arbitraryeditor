@@ -370,6 +370,19 @@ double CanvasView::scale_bar_units(std::string_view view_id) const {
   return it == presenters_.end() ? 0.0 : it->second.scale_bar_units;
 }
 
+ViewFraming CanvasView::primary_framing() const {
+  // `presenters_` is id-ordered, so "canvas#1" wins over "canvas#2" — a deterministic
+  // choice, not the most-recently-drawn one. A pane that has never been sized carries
+  // no framing to read.
+  for (const auto& entry : presenters_) {
+    const Presenter& presenter = entry.second;
+    if (presenter.requested_width > 0 && presenter.requested_height > 0) {
+      return ViewFraming{presenter.camera, presenter.requested_width, presenter.requested_height};
+    }
+  }
+  return ViewFraming{};
+}
+
 void CanvasView::destroy() {
   // Deterministic teardown (Constraint 5): stop the loop, wake it, and join BEFORE
   // releasing any GL texture or destroying the host. The render thread touches no GL, so
