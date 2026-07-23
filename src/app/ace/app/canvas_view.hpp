@@ -1,9 +1,11 @@
 #pragma once
 
+#include <ace/interact/interact.hpp>
 #include <ace/platform/threads.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 
+#include <arbc/base/geometry.hpp>
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 
@@ -24,6 +26,10 @@ class AppState;
 namespace ace::scene {
 struct Camera;
 } // namespace ace::scene
+
+namespace ace::views {
+struct CanvasInput;
+} // namespace ace::views
 
 namespace ace::app {
 
@@ -61,12 +67,12 @@ public:
   // renders nothing (Constraint 7). Requires a current GL context.
   void draw_content(std::string_view view_id, int pane_width, int pane_height);
 
-  // Run a UI-thread Document-mutating edit serialized against the off-thread render read
-  // (editor.canvas.edit_render_sync, D-edit_render_sync-2): forwards to
-  // CanvasHost::apply_edit, so the mutation runs inside the render thread's per-frame
-  // `doc_mu` window and then wakes EVERY live canvas. The race-free replacement for
-  // "mutate the Document, then poke()" — the edit verbs (undo/redo via the gateway runner)
-  // funnel through here. Runs the edit synchronously on the calling (writer) thread.
+  // Run a UI-thread Document-mutating edit on the writer thread (editor.canvas.single_writer):
+  // forwards to CanvasHost::apply_edit, which runs the mutation and then wakes EVERY live
+  // canvas. No lock against the off-thread render read — arbc v0.2.0 content bindings publish
+  // copy-on-write (#10/#11), so the render walk reads a stable snapshot while the edit
+  // rebinds. The replacement for "mutate the Document, then poke()" — the edit verbs
+  // (undo/redo via the gateway runner) funnel through here, synchronously on the caller.
   void apply_edit(const std::function<void()>& edit);
 
   // Wake the render thread to re-render EVERY live canvas after a UI-thread edit (the
@@ -129,12 +135,35 @@ private:
     // submitted camera is the shot's (not `camera`, which is left at its free value —
     // D-look_through-6), so the two diverge; this dedups the per-frame submit across both.
     arbc::Affine submitted = arbc::Affine::identity();
+    // --- camera-frame gizmo (editor.cameras.manip; D-manip-4) ------------------
+    // The in-progress border-grab, if any: previewed as UI-thread session state (the gizmo
+    // redraws at the dragged `Affine`, no journal churn) and committed as ONE
+    // set_layer_transform through apply_edit on release. `gizmo_camera` is unset when no
+    // grab is active.
+    std::optional<arbc::ObjectId> gizmo_camera; // the shot being reframed
+    arbc::ObjectId gizmo_layer;                 // its binding layer (set_layer_transform target)
+    interact::FrameHandle gizmo_handle = interact::FrameHandle::None;
+    arbc::Affine gizmo_start_frame = arbc::Affine::identity(); // the frame at grab (preview base)
+    arbc::Vec2 gizmo_grab_comp{};                              // pointer in composition at grab
+    int gizmo_res_w = 0;
+    int gizmo_res_h = 0;
   };
 
   // Draw THIS canvas's camera picker (Viewport | shots from scene::cameras) as a compact
   // overlay at the pane's top-left, setting `p.look_through` on a click (D-look_through-5).
   void draw_camera_picker(std::string_view view_id, Presenter& p,
                           const std::vector<scene::Camera>& cameras);
+
+  // Draw the shot-camera frame gizmos over the free-viewport pane and drive a direct-
+  // manipulation border-grab (editor.cameras.manip; D-manip-4): hit-test each camera's
+  // frame outline, preview a re-crop / move / dutch drag as session state (the gizmo
+  // rectangle redraws at the dragged `Affine`, no journal churn), and commit ONE
+  // set_layer_transform through apply_edit on release (one undo step per gesture). The
+  // frame math is pure L1 interact; this only maps composition<->screen and commits.
+  // `origin_x`/`origin_y` are the pane's top-left in screen pixels.
+  void draw_frame_gizmos(std::string_view view_id, Presenter& p,
+                         const std::vector<scene::Camera>& cameras, const views::CanvasInput& in,
+                         float origin_x, float origin_y);
 
   commands::AppState& state_;
   render::CanvasHost host_;

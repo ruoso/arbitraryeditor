@@ -88,15 +88,15 @@ public:
   // an unknown id is dropped. Also wakes the loop (a camera change is device damage).
   void request_camera(std::string_view id, const arbc::Affine& camera);
 
-  // UI thread: run a document-mutating edit, serialized against the render thread's
-  // per-frame document read. arbc::Document is single-writer (its SlotStore binds the
-  // writer thread on first write) with NO internal lock, yet the render thread walks the
-  // live document every frame (bind_operators iterates its content) — so a UI-thread
-  // mutation racing that read is a data race (TSan-observable). The callback runs
-  // SYNCHRONOUSLY on the calling (writer) thread, but under a document lock the render
-  // thread also holds around its read, so the two never overlap; the loop is then woken to
-  // re-render every live entry (one writer, N observers — Constraint 4). This is the
-  // race-free replacement for "mutate the document, then poke()".
+  // UI thread: run a document-mutating edit on the calling (writer) thread, then wake the
+  // loop to re-render every live entry (one writer, N observers — Constraint 4). The edit
+  // runs SYNCHRONOUSLY. No lock is taken against the render thread's per-frame read: as of
+  // arbc v0.2.0 the document's content bindings publish copy-on-write behind an atomic
+  // (ruoso/arbitrarycomposer#10/#11), so the render walk (bind_operators / for_each_content)
+  // reads a stable snapshot while this edit's add_content rebinds — no data race. Keeping
+  // every edit on the caller also holds arbc's single writer-*identity* contract (SlotStore
+  // binds the writer thread on first write; editor.canvas.single_writer). This is the
+  // edit-serializing seam the app's edit-runner binds to; it replaces "mutate, then poke()".
   void apply_edit(const std::function<void()>& edit);
 
   // UI thread: wake the render loop to re-render EVERY live entry after an edit (the

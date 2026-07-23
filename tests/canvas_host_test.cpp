@@ -170,8 +170,8 @@ TEST_CASE("canvas_host: one edit + poke advances BOTH entries' sequences (N obse
   REQUIRE(host.published_sequence("canvas#1") == 1);
   REQUIRE(host.published_sequence("canvas#2") == 1);
 
-  // One edit to the SHARED document via apply_edit (runs synchronously here, under the
-  // document lock), then a drive fans the resulting damage out to both entries.
+  // One edit to the SHARED document via apply_edit (runs synchronously here on the writer
+  // thread), then a drive fans the resulting damage out to both entries.
   host.apply_edit([&] { damage(*probe.document, probe.composition); });
   host.drive_once();
 
@@ -316,10 +316,10 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
   }));
   CHECK(host.iterations() >= 1); // the render thread drove real iterations
 
-  // A UI-thread edit through apply_edit runs on THIS thread but under the document lock the
-  // render thread also holds around its per-frame read, so the two never overlap; the edit
-  // then fans out, advancing both entries off-thread. Mutating the shared document directly
-  // here (outside apply_edit) would race the render thread's live read (TSan).
+  // A UI-thread edit through apply_edit runs on THIS (writer) thread; the render thread's
+  // per-frame read needs no lock (arbc v0.2.0 COW content bindings, #10/#11), so the edit and
+  // the read do not race. The edit then fans out, advancing both entries off-thread. Mutating
+  // the shared document off the writer thread would break arbc's single writer-identity contract.
   const std::uint64_t before1 = host.published_sequence("canvas#1");
   const std::uint64_t before2 = host.published_sequence("canvas#2");
   host.apply_edit([&] { damage(*probe.document, probe.composition); });
@@ -347,69 +347,29 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
   CHECK(host.published_sequence("canvas#1") >= 2);
 }
 
-// --- editor.canvas.edit_render_sync: serialize UI-thread edits against the render read ----
+// --- editor.canvas.single_writer: UI-thread edits run lock-free against the render read ----
 //
-// The write-side complement of drive_once's doc_mu hold: every UI-thread Document mutation
-// runs through apply_edit's doc_mu window, mutually excluded with the render thread's
-// per-frame for_each_content read. A deterministic mutual-exclusion contract (below) plus a
-// real-pool streamed-edit overlap (the TSan acceptance anchor, D-edit_render_sync-3).
-
-TEST_CASE("canvas_host: apply_edit is mutually excluded with the render read (edit_render_sync)") {
-  ProbeDocument probe = build_probe_document();
-  // Real pool + bounded budget + a spawned render thread: the render read (drive_once ->
-  // for_each_content) genuinely overlaps the UI writer in wall-clock time — the path the race
-  // lives on (D-edit_render_sync-3), not the inline settle-fully executor.
-  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
-  std::unique_ptr<ace::platform::JoinHandle> handle =
-      threads.spawn([&] { host.run([] { return false; }); });
-
-  host.add("canvas#1", *probe.document);
-  host.request_resize("canvas#1", k_w, k_h);
-  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
-
-  // The mutual-exclusion contract: drive_once holds doc_mu across its WHOLE iteration and only
-  // then advances `iterations` (canvas_host.cpp), so that counter can move ONLY while the render
-  // thread holds doc_mu. Inside an apply_edit closure the UI thread holds that SAME doc_mu, so a
-  // concurrent drive_once cannot run and the counter must stay frozen — the edit body and the
-  // render read never overlap (an "inside-critical-section" count that never exceeds 1). We poke
-  // the loop from INSIDE the closure so a render drive is actively contending for doc_mu during
-  // the hold: with the lock it parks (counter frozen); with a broken lock it would drive and
-  // advance the counter, failing the CHECK — a genuine regression guard, not a tautology.
-  for (int round = 0; round < 8; ++round) {
-    std::uint64_t iters_start = 0;
-    host.apply_edit([&] {
-      damage(*probe.document, probe.composition); // a real d_contents mutation (the raced write)
-      host.poke(); // wake the render thread so it attempts drive_once WHILE we hold doc_mu
-      iters_start = host.iterations();
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
-      // The poked drive_once is parked on doc_mu (we hold it); it advanced nothing.
-      CHECK(host.iterations() == iters_start);
-    });
-    // Released: the render thread now acquires doc_mu, reads the mutated document, and advances —
-    // proving it really was blocked (alive), so the frozen-counter check above was non-vacuous.
-    REQUIRE(pump_until([&] { return host.iterations() > iters_start; }));
-  }
-
-  host.stop();
-  handle->join();
-  CHECK(host.published_sequence("canvas#1") >= 2);
-}
+// Every UI-thread Document mutation runs through apply_edit on the writer thread; the render
+// thread's per-frame for_each_content walk needs NO lock because arbc v0.2.0 publishes the
+// content bindings copy-on-write behind an atomic (#10/#11) — the walk reads a stable snapshot
+// while the edit rebinds. The real-pool streamed-edit overlap below is the TSan acceptance
+// anchor (formerly edit_render_sync's doc_mu mutual-exclusion contract, retired with the lock).
 
 TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the render read "
           "(edit_render_sync TSan anchor)") {
   ProbeDocument probe = build_probe_document();
-  // D-edit_render_sync-3, the acceptance anchor. Real interactive pool (worker threads) + a
-  // bounded budget + a spawned render thread looping drive_once -> for_each_content, so the read
-  // of the writer-owned d_contents genuinely overlaps the UI-thread writes in wall-clock time
-  // (the interleaving CI contention hit). The UI thread streams many edits — each a d_contents
-  // mutation (add_content/add_layer/attach_layer, an implicit transact) — through apply_edit, so
-  // every write lands inside doc_mu, mutually excluded with the read.
+  // The acceptance anchor (editor.canvas.single_writer). Real interactive pool (worker threads)
+  // + a bounded budget + a spawned render thread looping drive_once -> for_each_content, so the
+  // read of the content bindings genuinely overlaps the UI-thread writes in wall-clock time (the
+  // interleaving CI contention hit). The UI thread streams many edits — each a d_contents
+  // mutation (add_content/add_layer/attach_layer, an implicit transact) — through apply_edit on
+  // the writer thread. No lock serializes them against the read: arbc v0.2.0 publishes the
+  // content bindings copy-on-write behind an atomic (#10/#11), so the render walk reads a stable
+  // snapshot while add_content rebinds.
   //
-  // Regression-guard note (NOT a tautology): the SAME interleaving WITHOUT apply_edit — mutating
-  // *probe.document directly and only poke()-ing — is exactly the pre-fix shell.cpp path TSan
-  // flagged on d_contents (the debt this leaf closes). Routing through apply_edit is what makes
-  // it clean; drop the routing and TSan re-reports the race on d_contents.
+  // Regression-guard note (NOT a tautology): under arbc v0.1.0 this SAME interleaving raced on
+  // the writer-owned d_contents (the debt doc_mu papered over). v0.2.0's COW publish is what
+  // makes the lock-free read clean; pin back to v0.1.0 and TSan re-reports the race on d_contents.
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
   ace::platform::NativeThreads threads;
   std::unique_ptr<ace::platform::JoinHandle> handle =
@@ -817,12 +777,13 @@ TEST_CASE("canvas_host: the empty binding leaves a deferred external nested chil
 //
 // The threading acceptance (docs §9 ASan/TSan lane): two entries over one document, canvas#2
 // looking through a shot. The UI thread streams cameras.manip-style frame edits to that shot
-// through apply_edit (doc_mu) while, each iteration, re-reading scene::cameras(doc) via the
-// lock-free pin() snapshot, re-deriving the look-through viewport, and submitting the settled
-// request_resize + request_camera channels — the exact per-frame path draw_content walks. This
-// leaf adds NO new shared mutable state (the selection is UI-thread-only), so the per-frame
-// pin() derivation and the settled channels must coexist race-free with the concurrent writer
-// under the existing doc_mu discipline (D-look_through-7). Residual Mesa leaks via lsan.supp.
+// through apply_edit (on the writer thread) while, each iteration, re-reading scene::cameras(doc)
+// via the lock-free pin() snapshot, re-deriving the look-through viewport, and submitting the
+// settled request_resize + request_camera channels — the exact per-frame path draw_content walks.
+// This leaf adds NO new shared mutable state (the selection is UI-thread-only), so the per-frame
+// pin() derivation and the settled channels coexist race-free with the concurrent writer: the
+// render read is lock-free (arbc v0.2.0 COW content bindings, #10/#11; D-look_through-7).
+// Residual Mesa leaks via lsan.supp.
 
 TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against the render read "
           "(look_through TSan anchor)") {
@@ -852,8 +813,8 @@ TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against 
   // Stream frame edits to the shot; each round re-derives + re-submits canvas#2's look-through.
   constexpr int k_iters = 48;
   for (int i = 0; i < k_iters; ++i) {
-    // A cameras.manip-style frame edit through apply_edit (doc_mu, mutually excluded with the
-    // render read): nudge the shot's binding-layer transform.
+    // A cameras.manip-style frame edit through apply_edit (on the writer thread; the render
+    // read is lock-free via COW): nudge the shot's binding-layer transform.
     host.apply_edit([&] {
       const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
       if (!cams.empty()) {
@@ -861,7 +822,7 @@ TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against 
                                                          8.0 + static_cast<double>(i) * 0.25, 8.0));
       }
     });
-    // The per-frame look-through resolve: a lock-free pin() read (NO doc_mu), then the settled
+    // The per-frame look-through resolve: a lock-free pin() read, then the settled
     // resize + camera submit. A vanished shot would fall back to the pane (fail-safe).
     const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
     if (!cams.empty()) {
@@ -876,6 +837,80 @@ TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against 
   }
 
   // Both live entries converge on the streamed revisions off-thread — clean under the sanitizers.
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+}
+
+// --- editor.cameras.manip: streamed frame re-crops + resolution edits are data-race-clean ----
+//
+// The threading acceptance (docs §9 ASan/TSan lane): the UI thread streams BOTH cameras.manip
+// mutation channels to a shot — frame re-crops (interact::recrop_frame -> set_layer_transform,
+// the binding-layer Affine) AND in-place resolution edits (scene::set_camera_resolution, the
+// Content editable state) — through apply_edit (on the writer thread) while the render thread
+// re-reads scene::cameras(pin()) each frame and re-derives the look-through viewport for a second
+// canvas. This leaf adds NO new shared mutable state (the drag preview is UI-thread-only), so both
+// channels coexist race-free with the concurrent render read: the read is lock-free via arbc
+// v0.2.0 COW content bindings (#10/#11; D-manip / Constraint 5). Residual Mesa leaks via lsan.supp.
+TEST_CASE("canvas_host: streamed manip frame + resolution edits stay clean against the render "
+          "read (cameras.manip TSan anchor)") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  auto doc = build_raster_doc();
+  const arbc::ObjectId cam_id = ace::scene::add_camera(
+      *doc, registry, "hero", ace::scene::Resolution{32, 32}, arbc::Affine::translation(8.0, 8.0));
+  REQUIRE(cam_id.valid());
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *doc, &registry); // free
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *doc, &registry); // looks through the shot (submitted in the loop)
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  constexpr int k_iters = 48;
+  for (int i = 0; i < k_iters; ++i) {
+    // Two manip channels through apply_edit (on the writer thread; render read lock-free via COW):
+    // a frame re-crop (interact math -> set_layer_transform) AND a resolution edit
+    // (set_camera_resolution). The re-crop math runs on the UI thread over the pin() frame.
+    host.apply_edit([&] {
+      const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
+      if (cams.empty()) {
+        return;
+      }
+      const ace::scene::Camera& cam = cams.front();
+      const arbc::Affine recropped =
+          ace::interact::recrop_frame(cam.frame, cam.resolution.width, cam.resolution.height,
+                                      ace::interact::FrameHandle::CornerBottomRight,
+                                      arbc::Vec2{20.0 + static_cast<double>(i) * 0.25, 20.0});
+      doc->set_layer_transform(cam.layer, recropped);
+      const int side = 24 + (i % 8);
+      ace::scene::set_camera_resolution(*doc, registry, cam.id, ace::scene::Resolution{side, side});
+    });
+    // The per-frame look-through resolve: a lock-free pin() read, then the settled submit.
+    const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
+    if (!cams.empty()) {
+      const ace::interact::LookThrough lt =
+          ace::interact::look_through(cams.front().frame, cams.front().resolution.width,
+                                      cams.front().resolution.height, k_w, k_h);
+      if (lt.out_w > 0 && lt.out_h > 0) {
+        host.request_resize("canvas#2", lt.out_w, lt.out_h);
+        host.request_camera("canvas#2", lt.camera);
+      }
+    }
+  }
+
   REQUIRE(pump_until([&] {
     return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
   }));

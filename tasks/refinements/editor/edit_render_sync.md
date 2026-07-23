@@ -402,7 +402,18 @@ human/library review.
 
 ## Status
 
-**Done** — 2026-07-19.
+**Done** — 2026-07-19. **Superseded 2026-07-22** by `editor.canvas.single_writer`
+(libarbc v0.2.0 adoption). This leaf's central mechanism — `doc_mu` serializing
+UI-thread edits against the render-thread document read — was the correct v0.1.0
+answer to the `d_contents` data race, but v0.2.0 resolves the underlying gaps in the
+library where they belong: (1) render reads are now lock-free via a copy-on-write
+content-binding snapshot (arbc#10/#11), so the read guard is redundant; and (2) the
+writer-identity question surfaced in Open questions is answered
+(arbc#7 — single OS-thread identity required, a mutex is *not* a substitute), which
+makes `doc_mu` not merely redundant but insufficient. `single_writer` retires
+`doc_mu` and funnels all structural writes to one writer-thread identity. The
+`apply_edit`/edit-runner *seam* this leaf established survives unchanged; only its
+`doc_mu`-based implementation is replaced. See `docs/01-architecture.md` A4.1.
 
 - Replaced `set_edit_listener`/`on_edit_` post-hoc poke with an edit-serializing runner (`set_edit_runner` + private `run_edit`) in `src/app/ace/app/project_gateway.hpp` and `src/app/project_gateway.cpp`; `undo()`/`redo()` now hand their `commands::undo/redo` mutation to the runner (direct-run when none installed).
 - Added `CanvasView::apply_edit` forwarding to `host_.apply_edit` in `src/app/ace/app/canvas_view.hpp` and `src/app/canvas_view.cpp`.

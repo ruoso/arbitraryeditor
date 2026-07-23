@@ -83,11 +83,11 @@ bool AppProjectGateway::undo() {
   // Navigate the in-process session's journal (D15 / A13), not a sibling exec.
   // `commands::undo` drives `journal().undo()` as a forward publish and reports whether
   // the cursor moved; it never touches the dirty baseline (D-undo-4). The journal drive
-  // MUTATES the Document, which the off-thread render thread reads every frame — so it must
-  // run serialized against that read: hand it to the edit runner as a closure, which runs
-  // it inside CanvasHost::apply_edit's `doc_mu` window and then wakes the canvas
-  // (editor.canvas.edit_render_sync, D-edit_render_sync-2). This replaces frame_sync's
-  // fire-after poke, which mutated the Document BEFORE — and unserialized against — the read.
+  // MUTATES the Document, which the off-thread render thread reads every frame — hand it to
+  // the edit runner as a closure, which runs it on the UI/writer thread (via
+  // CanvasHost::apply_edit) and then wakes the canvas (editor.canvas.single_writer). The
+  // render read is lock-free: arbc v0.2.0 content bindings publish copy-on-write (#10/#11).
+  // This replaces frame_sync's fire-after poke, which mutated the Document before the wake.
   bool moved = false;
   run_edit([this, &moved] { moved = ace::commands::undo(app_state_).moved; });
   return moved;

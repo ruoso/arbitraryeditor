@@ -362,6 +362,158 @@ TEST_CASE("renaming after an undo recycles a freed version slot") {
   CHECK(cams[0].resolution == Resolution{800, 600}); // resolution preserved throughout
 }
 
+// --- editor.cameras.manip: the in-place resolution editor (D-manip-1/-7) -------------------
+
+namespace {
+// Dispatch a set_camera_resolution edit (the inspector's W×H control) bound to `state`'s
+// registry — the resolution mirror of add_camera_command.
+Command set_resolution_command(const arbc::Registry& registry, arbc::ObjectId id,
+                               Resolution resolution) {
+  return Command{"set_camera_resolution", [&registry, id, resolution](arbc::Document& doc) {
+                   ace::scene::set_camera_resolution(doc, registry, id, resolution);
+                 }};
+}
+} // namespace
+
+TEST_CASE("set_camera_resolution edits in place, preserving id/layer/name/frame/order") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "resize");
+  const arbc::Registry registry = camera_registry();
+  const arbc::Journal& journal = state.document().journal();
+
+  const arbc::Affine frame_a = arbc::Affine::translation(3.0, 4.0);
+  dispatch(state, add_camera_command(registry, "hero", Resolution{800, 600}, frame_a));
+  dispatch(state, add_camera_command(registry, "second", Resolution{640, 480},
+                                     arbc::Affine::translation(9.0, 9.0)));
+  const Camera before = ace::scene::cameras(state.document())[0];
+  const arbc::ObjectId id = before.id;
+  const arbc::ObjectId layer = before.layer;
+  const arbc::ObjectId second_id = ace::scene::cameras(state.document())[1].id;
+
+  const std::size_t depth_before = journal.depth();
+  dispatch(state, set_resolution_command(registry, id, Resolution{1920, 1080}));
+  CHECK(journal.depth() == depth_before + 1); // exactly ONE undo unit
+
+  const std::vector<Camera> cams = ace::scene::cameras(state.document());
+  REQUIRE(cams.size() == 2);
+  CHECK(cams[0].resolution == Resolution{1920, 1080}); // the resolution changed
+  CHECK(cams[0].id == id);                             // SAME content object (ObjectId preserved)
+  CHECK(cams[0].layer == layer);                       // SAME binding layer
+  CHECK(cams[0].name == "hero");                       // name preserved
+  CHECK(cams[0].frame == frame_a);                     // frame untouched (D7/D9 independence)
+  CHECK(cams[1].id == second_id);                      // sibling + layer order untouched
+  CHECK(cams[1].resolution == Resolution{640, 480});
+
+  // The editable facet is bound and every state call routed to it (tripwire zero).
+  CHECK(state.document().editable_binding().bound(id));
+
+  // Undo restores the OLD resolution on the SAME object; redo re-applies the new one.
+  const auto undone = ace::commands::undo(state);
+  CHECK(undone.moved);
+  CHECK(ace::scene::cameras(state.document())[0].resolution == Resolution{800, 600});
+  CHECK(ace::scene::cameras(state.document())[0].id == id);
+  const auto redone = ace::commands::redo(state);
+  CHECK(redone.moved);
+  CHECK(ace::scene::cameras(state.document())[0].resolution == Resolution{1920, 1080});
+
+  CHECK(state.document().editable_binding().unrouted_state_calls() == 0);
+}
+
+TEST_CASE("set_camera_resolution reuses a freed slot and rejects non-positive dims") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "resize_churn");
+  const arbc::Registry registry = camera_registry();
+  arbc::Document& doc = state.document();
+
+  dispatch(state,
+           add_camera_command(registry, "cam", Resolution{100, 100}, arbc::Affine::identity()));
+  const arbc::ObjectId id = ace::scene::cameras(doc)[0].id;
+
+  // resize -> undo -> resize -> resize: the middle undo frees a version whose slot the last
+  // resize must REUSE (free-list churn, the set_name-slot recycling mirror).
+  dispatch(state, set_resolution_command(registry, id, Resolution{200, 200}));
+  ace::commands::undo(state); // back to 100x100; the 200x200 version drains free
+  dispatch(state, set_resolution_command(registry, id, Resolution{300, 300}));
+  dispatch(state, set_resolution_command(registry, id, Resolution{400, 400}));
+  CHECK(ace::scene::cameras(doc)[0].resolution == Resolution{400, 400});
+  CHECK(ace::scene::cameras(doc)[0].id == id);
+
+  // A non-positive dimension is rejected as a no-op (returns false, no journal entry).
+  const std::size_t depth = doc.journal().depth();
+  CHECK_FALSE(ace::scene::set_camera_resolution(doc, registry, id, Resolution{0, 100}));
+  CHECK_FALSE(ace::scene::set_camera_resolution(doc, registry, id, Resolution{100, -5}));
+  CHECK(doc.journal().depth() == depth); // nothing journaled
+  CHECK(ace::scene::cameras(doc)[0].resolution == Resolution{400, 400});
+
+  // An unknown / non-camera id is a no-op too.
+  CHECK_FALSE(
+      ace::scene::set_camera_resolution(doc, registry, arbc::ObjectId{}, Resolution{10, 10}));
+}
+
+TEST_CASE("frame and resolution are always independent (D7/D9); an aspect change one entry") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "independence");
+  const arbc::Registry registry = camera_registry();
+  arbc::Document& doc = state.document();
+  const arbc::Journal& journal = doc.journal();
+
+  const arbc::Affine frame0{1.5, 0.0, 0.0, 1.5, 12.0, 9.0};
+  dispatch(state, add_camera_command(registry, "hero", Resolution{64, 64}, frame0));
+  const Camera cam0 = ace::scene::cameras(doc)[0];
+  const arbc::ObjectId id = cam0.id;
+  const arbc::ObjectId layer = cam0.layer;
+
+  // Editing resolution holding aspect leaves the frame BYTE-identical (pure resample).
+  dispatch(state, set_resolution_command(registry, id, Resolution{128, 128}));
+  CHECK(ace::scene::cameras(doc)[0].frame == frame0);
+  CHECK(ace::scene::cameras(doc)[0].resolution == Resolution{128, 128});
+
+  // Editing the frame leaves the resolution unchanged.
+  const arbc::Affine frame1 = arbc::Affine::translation(40.0, 40.0);
+  dispatch(state, Command{"reframe", [layer, frame1](arbc::Document& d) {
+                            d.set_layer_transform(layer, frame1);
+                          }});
+  CHECK(ace::scene::cameras(doc)[0].frame == frame1);
+  CHECK(ace::scene::cameras(doc)[0].resolution == Resolution{128, 128});
+
+  // An aspect change: the resolution edit AND the deterministic follow-frame (D-manip-7)
+  // commit as ONE journal entry (one undo step). Width 128 -> 256 (aspect 2:1); the frame
+  // follows via refit_frame_to_aspect.
+  const arbc::Affine expect_follow = ace::interact::refit_frame_to_aspect(frame1, 128, 256);
+  const std::size_t depth_before = journal.depth();
+  dispatch(state, Command{"aspect", [&registry, id, layer, expect_follow](arbc::Document& d) {
+                            ace::scene::set_camera_resolution_and_frame(
+                                d, registry, id, layer, Resolution{256, 128}, expect_follow);
+                          }});
+  CHECK(journal.depth() == depth_before + 1); // ONE undo step for the compound edit
+  CHECK(ace::scene::cameras(doc)[0].resolution == Resolution{256, 128});
+  CHECK(ace::scene::cameras(doc)[0].frame == expect_follow); // the frame followed
+
+  // A single undo reverts BOTH the resolution and the frame together.
+  const auto undone = ace::commands::undo(state);
+  CHECK(undone.moved);
+  CHECK(ace::scene::cameras(doc)[0].resolution == Resolution{128, 128});
+  CHECK(ace::scene::cameras(doc)[0].frame == frame1);
+
+  // The compound edit's guards (D-manip-1): a non-positive resolution and a non-camera id each
+  // decline as a no-op (false, no journal entry, no frame touched).
+  const std::size_t depth_guard = journal.depth();
+  CHECK_FALSE(ace::scene::set_camera_resolution_and_frame(doc, registry, id, layer,
+                                                          Resolution{0, 64}, frame0));
+  CHECK_FALSE(ace::scene::set_camera_resolution_and_frame(doc, registry, id, layer,
+                                                          Resolution{64, -1}, frame0));
+  const arbc::ObjectId noncam =
+      doc.add_content(std::make_shared<arbc::SolidContent>(arbc::Rgba{0.0F, 0.0F, 0.0F, 1.0F}));
+  CHECK_FALSE(ace::scene::set_camera_resolution_and_frame(doc, registry, noncam, layer,
+                                                          Resolution{64, 64}, frame0));
+  CHECK(journal.depth() == depth_guard); // nothing journaled by the declines
+  CHECK(ace::scene::cameras(doc)[0].resolution == Resolution{128, 128}); // resolution untouched
+  CHECK(ace::scene::cameras(doc)[0].frame == frame1);                    // frame untouched
+}
+
 TEST_CASE("rename_camera on a non-camera content id is a no-op") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;

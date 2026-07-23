@@ -78,6 +78,18 @@ CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height)
     in.pan_dx = io.MouseDelta.x;
     in.pan_dy = io.MouseDelta.y;
   }
+  // The camera-frame gizmo read (editor.cameras.manip): the button EDGES + modifiers over
+  // the SAME pane rect. The app hit-tests/drives the frame math from this; nothing here
+  // knows about cameras (A11 keeps the gizmo geometry in L1 interact). The gizmo shares the
+  // `##canvas_nav` button, so a border-grab and a Space-pan are the same drag disambiguated
+  // by the Space key (Space => nav pan, inert on the frame — Constraint 7).
+  in.pressed = ImGui::IsItemActivated();
+  in.down = ImGui::IsItemActive();
+  in.released = ImGui::IsItemDeactivated();
+  in.shift = io.KeyShift;
+  in.alt = io.KeyAlt;
+  in.ctrl = io.KeyCtrl;
+  in.rotate = ImGui::IsKeyDown(ImGuiKey_R);
   return in;
 }
 

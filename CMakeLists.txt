@@ -22,7 +22,7 @@ include(FetchContent)
 # (overrides the git fetch) or point ARBC_GIT_TAG at a branch.
 set(ARBC_GIT_REPOSITORY "https://github.com/ruoso/arbitrarycomposer.git"
     CACHE STRING "libarbc git remote")
-set(ARBC_GIT_TAG "v0.1.0" CACHE STRING "libarbc git ref")
+set(ARBC_GIT_TAG "v0.2.0" CACHE STRING "libarbc git ref")
 set(ARBC_SOURCE_DIR "" CACHE STRING "Local libarbc checkout (overrides the git fetch)")
 set(_editor_build_testing "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -228,7 +228,8 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/canvas_driver_test.cpp tests/canvas_host_test.cpp
                          tests/composition_bounds_test.cpp
                          tests/camera_model_test.cpp
-                         tests/look_through_test.cpp)
+                         tests/look_through_test.cpp
+                         tests/camera_manip_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene arbc::arbc
                                         Catch2::Catch2WithMain)
@@ -253,7 +254,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/undo_ui_e2e_test.cpp tests/history_e2e_test.cpp
                               tests/gc_ui_e2e_test.cpp tests/canvas_view_e2e_test.cpp
                               tests/multi_canvas_e2e_test.cpp tests/canvas_nav_e2e_test.cpp
-                              tests/look_through_e2e_test.cpp)
+                              tests/look_through_e2e_test.cpp tests/camera_manip_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

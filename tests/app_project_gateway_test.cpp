@@ -271,9 +271,9 @@ TEST_CASE("AppProjectGateway::undo/redo run their mutation inside the edit runne
   auto session = make_session(fs, scratch.root / "session");
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
-  // The edit-serializing runner (editor.canvas.edit_render_sync, D-edit_render_sync-2): the
-  // shell binds this to CanvasHost::apply_edit so the undo/redo mutation runs inside the
-  // render thread's `doc_mu` window. Here a FAKE runner records the ordering — runner
+  // The edit runner (editor.canvas.single_writer): the shell binds this to CanvasHost::apply_edit
+  // so the undo/redo mutation runs on the writer thread (the render read is lock-free via arbc
+  // v0.2.0 COW content bindings). Here a FAKE runner records the ordering — runner
   // entered -> mutation ran -> runner exited — proving the gateway funnels the Document
   // mutation THROUGH the runner (not a bare fire-after poke). `can_redo()` is sampled just
   // before and just after `edit()` inside the runner: a moved undo flips it false->true

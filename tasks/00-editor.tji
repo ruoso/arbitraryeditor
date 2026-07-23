@@ -231,6 +231,20 @@ task editor "Editor — host GUI over libarbc" {
       depends !blank_first_frame
       note "The interactive CanvasRenderer does not wire a KindBridge/Registry DocumentBinding, so a nested-composition canvas renders no coverage (blank) in production. Wire the DocumentBinding so nested cells render correctly in the interactive path. Source-of-debt: tasks/refinements/editor/blank_first_frame.md (2026-07-19). Design: docs/01-architecture.md A5. Refinement: tasks/refinements/editor/nested_composition_binding.md"
     }
+    task arbc_v020 "Bump libarbc pin to v0.2.0" {
+      effort 0.5d
+      allocate team
+      complete 100
+      depends !nested_composition_binding, !edit_render_sync
+      note "Bump ARBC_GIT_TAG v0.1.0->v0.2.0 (CMakeLists.txt:25); build + all goldens green (v0.2.0 is additive — every 0.1.0 registration compiles unchanged). Activates the lock-free copy-on-write content-binding render read path (ruoso/arbitrarycomposer#10, closed by #11: content bindings publish COW behind an atomic shared_ptr<const ContentBindings>), so the render walk of d_contents no longer races the writer — making doc_mu's read guard redundant. Prereq for single_writer and cameras.reopen_slab_adopt. Design: docs/01-architecture.md A4."
+    }
+    task single_writer "Retire doc_mu: render read lock-free via libarbc v0.2.0 COW content bindings" {
+      effort 1d
+      allocate team
+      complete 100
+      depends !arbc_v020
+      note "arbc v0.2.0 (#10/#11) publishes the id->Content* bindings copy-on-write behind an atomic, so the render-thread for_each_content/resolve walk reads a stable snapshot while a UI-thread add_content rebinds — the d_contents read race edit_render_sync's doc_mu papered over is gone in the library. Retire doc_mu (declaration, the drive_once hold, the apply_edit wrap) and keep apply_edit as the writer-thread edit seam. Supersedes editor.canvas.edit_render_sync's D-edit_render_sync-1 (doc_mu now redundant on the read side). NOTE the residual: HostViewport::settle_external_loads is itself a render-thread writer-publish, a second writer *identity* (arbc#7) that doc_mu never fixed — inert on documents with no pending external loads (every path exercised today). It is a LIBRARY-owned contract violation — HostViewport::step() publishes the arrival on the render thread — filed upstream as ruoso/arbitrarycomposer#13; the host cannot fix it without a library change. Design: docs/01-architecture.md A4/A4.1. Refinement: tasks/refinements/editor/single_writer.md"
+    }
   }
 
   # ---- Cameras (D2/D9/D14) ----
@@ -263,11 +277,18 @@ task editor "Editor — host GUI over libarbc" {
       depends !reopen_codec
       note "A checkpointed workspace containing an editor-defined editable Content (camera) aborts/corrupts on the Document::open fast-path remap (missing libarbc per-kind state-slab walk hook, model.cpp:771); a saved camera project crashes on fast-path reopen. Needs a libarbc bump exposing the slab hook, or an editor-side policy to force rebuild-from-canonical when custom editable kinds may be present. Source-of-debt: tasks/refinements/cameras/reopen_codec.md. Design: docs/01-architecture.md A14. Refinement: tasks/refinements/cameras/workspace_reopen_slab.md"
     }
+    task reopen_slab_adopt "Adopt libarbc v0.2.0 state-slab walk hook; retire A15 rebuild-from-canonical" {
+      effort 2d
+      allocate team
+      depends editor.canvas.arbc_v020, !workspace_reopen_slab
+      note "ruoso/arbitrarycomposer#5 shipped in v0.2.0: Registry::KindStateWalker (registered with the factory, looked up lock-free via Registry::state_walker) + Model::recovered_content_state() (the fast-reopen walk collects each reachable non-inert content StateHandle the model cannot descend) + arbc/runtime/recovered_state_replay.hpp's replay_recovered_content_state(). Register a camera-kind KindStateWalker, call replay_recovered_content_state on the Document::open map path, and retire A15's force-rebuild-from-canonical policy (reverses D-slab-2's durability cost). Also closes the never-saved-camera residual (D-slab-3): the fast path carries the camera's persisted state directly, no canonical floor needed. Source-of-debt: tasks/refinements/cameras/workspace_reopen_slab.md. Design: docs/01-architecture.md A14. Refinement: tasks/refinements/cameras/reopen_slab_adopt.md"
+    }
     task manip "Frame resize (hold resolution), aspect-lock, dutch, resolution inspector" {
       effort 2d
       allocate team
+      complete 100
       depends !model
-      note "Resize = re-crop (aspect-locked to resolution, holds resolution); resolution (pixel count + aspect) edited separately; dutch rotation modifier-gated. Design: D9. Refinement: tasks/refinements/camera_manip.md. Decided (pre-exec 2026-07-19): dutch rotation is gated behind the SAME modifier chosen for cell shear (keep the two advanced rotate/shear gestures consistent; must not collide with Shift=constrain / Alt=from-center / Cmd-Ctrl=select-behind-bypass-snap / Space=pan). Resolution inspector ships aspect presets 16:9, 4:3, 1:1, 3:2 + a swap-orientation toggle (list is low-stakes, easily extended)."
+      note "Resize = re-crop (aspect-locked to resolution, holds resolution); resolution (pixel count + aspect) edited separately; dutch rotation modifier-gated. Design: D9. Refinement: tasks/refinements/editor/manip.md. Decided (pre-exec 2026-07-19): dutch rotation is gated behind the SAME modifier chosen for cell shear (keep the two advanced rotate/shear gestures consistent; must not collide with Shift=constrain / Alt=from-center / Cmd-Ctrl=select-behind-bypass-snap / Space=pan). Resolution inspector ships aspect presets 16:9, 4:3, 1:1, 3:2 + a swap-orientation toggle (list is low-stakes, easily extended)."
     }
     task look_through "Activate a shot; multi-canvas look-through" {
       effort 1.5d
@@ -280,7 +301,7 @@ task editor "Editor — host GUI over libarbc" {
       effort 3d
       allocate team
       depends !model
-      note "A camera IS the export spec: pick camera(s) -> library render_offline each at its resolution -> file(s). PNG (working->sRGB8); batch (one file per camera) + contact sheet fall out; transparent/filled bg, N-times scale multiplier; async with progress. Design: D14. Refinement: tasks/refinements/export.md. Decided (pre-exec 2026-07-19): default background TRANSPARENT (preserves alpha; filled bg is a deliberate opt-in); N× multiplier default 1×; on filename collision OVERWRITE in place (batch export is idempotent, mirroring Save's re-dump — no auto-suffix, no prompt); contact sheet = uniform grid, each camera rendered then scaled to fit a common tile box preserving aspect, ceil(sqrt(N)) columns, thin gutters, a small per-tile camera-name caption, on the chosen background. NOTE: render_offline binds no nested-composition operators (ruoso/arbitrarycomposer#6) — nested children export blank until that lands."
+      note "A camera IS the export spec: pick camera(s) -> library render_offline each at its resolution -> file(s). PNG (working->sRGB8); batch (one file per camera) + contact sheet fall out; transparent/filled bg, N-times scale multiplier; async with progress. Design: D14. Refinement: tasks/refinements/export.md. Decided (pre-exec 2026-07-19): default background TRANSPARENT (preserves alpha; filled bg is a deliberate opt-in); N× multiplier default 1×; on filename collision OVERWRITE in place (batch export is idempotent, mirroring Save's re-dump — no auto-suffix, no prompt); contact sheet = uniform grid, each camera rendered then scaled to fit a common tile box preserving aspect, ceil(sqrt(N)) columns, thin gutters, a small per-tile camera-name caption, on the chosen background. NOTE: render_offline binds nested-composition operators as of libarbc v0.2.0 (ruoso/arbitrarycomposer#6, fixed) — nested children export correctly with the v0.2.0 pin (editor.canvas.arbc_v020)."
     }
   }
 

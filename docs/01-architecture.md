@@ -81,6 +81,22 @@ per `Document`** checkpoints the workspace. Threads:
 Edits flow UI → writer → damage → renderers; frames flow renderers → UI. The UI
 thread stays responsive because rendering is never on it.
 
+**A4.1 — single writer *identity*, not serialized access** (libarbc doc 15 § Thread
+rules; ruoso/arbitrarycomposer#7). "Single writer" means every structural write to a
+`Document` must originate from **one stable OS-thread identity** for the document's
+lifetime — not merely from access an external mutex serializes. libarbc's lock-free
+allocator/checkpoint path is written against one mutator (relaxed `high_water`,
+non-atomic `SlabDirectory::publish`, the writer-thread checkpoint seal); a consumer
+mutex only re-covers the accesses it wraps, and a checkpoint firing on a bounced
+writer identity can seal the wrong chunk frontier. Debug builds bind the identity on
+first write and assert it. **Consequence for the editor:** a design that writes from
+two threads (e.g. UI-thread `transact` + a render-thread `settle_external_loads`
+publish) must **funnel both to one writer thread via task-posting**, never take turns
+under a lock. Reads stay lock-free via `pin()` and the copy-on-write content-binding
+snapshot (arbc#10/#11); only *writes* are identity-bound. This retires the
+`doc_mu`-serialization approach `editor.canvas.edit_render_sync` shipped for v0.1.0
+(see `editor.canvas.single_writer`).
+
 ## 5. Multi-canvas — N observers, one document
 
 **A5.** A canvas view is **one `HostViewport` + `InteractiveRenderer` over the

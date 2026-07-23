@@ -107,4 +107,72 @@ struct LookThrough {
 };
 LookThrough look_through(const arbc::Affine& frame, int shot_w, int shot_h, int pane_w, int pane_h);
 
+// --- Camera frame manipulation (editor.cameras.manip; D7/D8/D9) ---------------
+// The frame is the binding layer's `Affine` (device -> composition): it places the
+// camera's output rectangle [0,native_w]x[0,native_h] into composition space. These
+// helpers reframe it as PURE placement math — they take/return the frame `Affine`
+// (+ the native output rectangle, whose ASPECT `native_w:native_h` the covered region
+// is aspect-locked to for square pixels) and NEVER a resolution value: a frame edit is
+// a re-crop / move / dutch and can never change the camera's pixel count (D8 anti-
+// resample). `native_w`/`native_h` are the aspect basis — primitive ints exactly as
+// `viewport_camera_for_shot` takes them, so no `scene` dependency is introduced
+// (D-manip-3). All are unit-tested headless (the bulk of the coverage).
+
+// Which part of the frame outline a composition-space point grabs (D7: border/label
+// grab, interior click-through). Corners/edges are resize handles; Label is the move
+// grab; None is an interior click-through (or a miss).
+enum class FrameHandle {
+  None,
+  Move,
+  Label,
+  EdgeLeft,
+  EdgeRight,
+  EdgeTop,
+  EdgeBottom,
+  CornerTopLeft,
+  CornerTopRight,
+  CornerBottomLeft,
+  CornerBottomRight,
+};
+
+// True for the eight corner/edge resize handles (not None/Label).
+bool is_resize_handle(FrameHandle handle);
+
+// Hit-test a composition-space `point` against the frame outline. Corners win over
+// edges within `corner_tol` (D7 near-corner precedence); a point within `edge_tol` of
+// an edge segment (but not a corner) grabs that edge; a point in the label band just
+// outside the top edge grabs Label (the move grab); a strictly-interior or far-outside
+// point is None (interior click-through, D7). Tolerances are composition units (the
+// caller converts screen px through the view scale). A non-invertible / degenerate
+// frame or non-positive native is None.
+FrameHandle hit_frame(const arbc::Affine& frame, int native_w, int native_h, arbc::Vec2 point,
+                      double edge_tol, double corner_tol);
+
+// Re-crop the frame by dragging `handle` to composition-space `pointer`: a uniform
+// (aspect-locked, square-pixel-preserving) scale of the covered region about the
+// opposite corner / edge midpoint (D9: resize = re-crop, HOLDS resolution). The pixel
+// count is untouched — only the covered region changes (D8 anti-resample). A degenerate
+// frame / native or a non-resize handle returns the frame unchanged.
+arbc::Affine recrop_frame(const arbc::Affine& frame, int native_w, int native_h, FrameHandle handle,
+                          arbc::Vec2 pointer);
+
+// Pan the frame: translate the covered composition region by `(dx, dy)` composition
+// units — no scale / rotation change (D7 move = drag border/label).
+arbc::Affine move_frame(const arbc::Affine& frame, double dx, double dy);
+
+// Dutch rotation (D9, modifier-gated): compose a pure rotation of `angle_rad` about the
+// covered region's center onto the frame — lengths preserved, so the resolution and the
+// covered-region size are unchanged. `snap_15` rounds to the nearest 15° (Shift). A
+// degenerate frame / non-positive native returns it unchanged.
+arbc::Affine dutch_frame(const arbc::Affine& frame, int native_w, int native_h, double angle_rad,
+                         bool snap_15);
+
+// The follow-frame for an aspect change (D-manip-7): when the resolution's pixel width
+// changes from `old_native_w` to `new_native_w` under an aspect edit, re-fit the covered
+// region to the new aspect HOLDING its top-left position and its horizontal extent while
+// adjusting the vertical extent — the deterministic "frame follows" rule, committed as
+// one coalesced step with the resolution edit. A non-positive width returns the frame
+// unchanged.
+arbc::Affine refit_frame_to_aspect(const arbc::Affine& frame, int old_native_w, int new_native_w);
+
 } // namespace ace::interact

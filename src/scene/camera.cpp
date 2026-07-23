@@ -109,6 +109,25 @@ void CameraContent::set_name(arbc::Model::Transaction& txn, arbc::ObjectId self,
   txn.set_content_state(self, after);
 }
 
+void CameraContent::set_resolution(arbc::Model::Transaction& txn, arbc::ObjectId self,
+                                   Resolution new_resolution) {
+  // The exact mirror of `set_name`, inverted: mint a new version carrying the new
+  // resolution over the CURRENT name (a re-resolution preserves the name), adopt it as the
+  // live base, and journal it via `set_content_state`. The frame — the binding layer's
+  // `Affine` — is not the `Content`'s state and is untouched here (D7/D9 independence).
+  arbc::StateHandle after;
+  {
+    const std::lock_guard<std::mutex> lock(d_mutex);
+    std::string name;
+    if (d_base.has_state() && d_base.slot < d_versions.size()) {
+      name = d_versions[d_base.slot].name; // re-resolution preserves the name
+    }
+    after = arbc::StateHandle{mint_version(std::move(name), new_resolution)};
+  }
+  d_base = after; // adopt the new version; the commit retains it and journals the prior
+  txn.set_content_state(self, after);
+}
+
 std::string CameraContent::camera_name() const {
   const std::lock_guard<std::mutex> lock(d_mutex);
   if (!d_base.has_state() || d_base.slot >= d_versions.size()) {
@@ -527,6 +546,48 @@ bool rename_camera(arbc::Document& document, const arbc::Registry& /*registry*/,
   // same object. ONE journal entry (down from two).
   auto txn = document.transact("rename_camera");
   content->set_name(txn, camera, new_name);
+  txn.commit();
+  return true;
+}
+
+bool set_camera_resolution(arbc::Document& document, const arbc::Registry& /*registry*/,
+                           arbc::ObjectId camera, Resolution new_resolution) {
+  // Reject a degenerate resolution before touching the document (Constraint 3 / D-manip-1):
+  // a non-positive pixel count is a no-op, never a stored zero-area shot.
+  if (new_resolution.width <= 0 || new_resolution.height <= 0) {
+    return false;
+  }
+  // Resolve + confirm it is a camera — the `rename_camera` no-op-returning-false mould.
+  auto* content = dynamic_cast<CameraContent*>(document.resolve(camera));
+  if (content == nullptr) {
+    return false;
+  }
+  // Re-resolution IN PLACE (D-manip-1): one `set_content_state` transaction. The camera
+  // keeps its `ObjectId`, binding layer, name, frame, and order — only its resolution
+  // changes — so the shared selection keeps its handle and `undo` restores the old
+  // resolution on the same object. The frame is independent and untouched (D7/D9).
+  auto txn = document.transact("set_camera_resolution");
+  content->set_resolution(txn, camera, new_resolution);
+  txn.commit();
+  return true;
+}
+
+bool set_camera_resolution_and_frame(arbc::Document& document, const arbc::Registry& /*registry*/,
+                                     arbc::ObjectId camera, arbc::ObjectId layer,
+                                     Resolution new_resolution, const arbc::Affine& new_frame) {
+  if (new_resolution.width <= 0 || new_resolution.height <= 0) {
+    return false; // degenerate resolution: a no-op (D-manip-1)
+  }
+  auto* content = dynamic_cast<CameraContent*>(document.resolve(camera));
+  if (content == nullptr) {
+    return false;
+  }
+  // The aspect change as ONE transaction (D-manip-7): the content-state re-resolution and
+  // the follow-frame layer transform ride a single `transact`, so they are one journal
+  // entry — `undo` restores the resolution and the frame together.
+  auto txn = document.transact("set_camera_resolution");
+  content->set_resolution(txn, camera, new_resolution);
+  txn.set_transform(layer, new_frame);
   txn.commit();
   return true;
 }

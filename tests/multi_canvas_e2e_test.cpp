@@ -181,9 +181,10 @@ TEST_CASE("multi_canvas e2e: two canvases over one host render, dock, fan-out, a
 
   ace::dock::Dockspace dockspace; // default layout → canvas#1 open + docked
 
-  // The in-process gateway wired to the shell's edit-serializing runner (D-edit_render_sync-2):
-  // a moved edit runs its Document mutation inside CanvasHost::apply_edit's `doc_mu` window and
-  // then fans the wake out to ALL canvases (one writer, N observers). The production wiring.
+  // The in-process gateway wired to the shell's edit runner (editor.canvas.single_writer):
+  // a moved edit runs its Document mutation via CanvasHost::apply_edit on the writer thread
+  // (render read lock-free via arbc v0.2.0 COW), then fans the wake out to ALL canvases (one
+  // writer, N observers). The production wiring.
   ace::dockmodel::RecentProjects recent(scratch.root / "prefs", fs);
   NoopFolderDialog dialog;
   NoopLauncher launcher;

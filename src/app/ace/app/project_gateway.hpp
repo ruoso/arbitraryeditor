@@ -52,11 +52,13 @@ public:
 
   // Install the edit-serializing runner the UI-thread edit verbs (undo/redo) funnel
   // their Document mutation through (editor.canvas.edit_render_sync, D-edit_render_sync-2).
-  // The runner receives the mutation as a closure and is responsible for running it
-  // serialized against the off-thread render read and then waking the canvas — the shell
-  // binds it to `CanvasHost::apply_edit` (the mutation runs inside the render thread's
-  // per-frame `doc_mu` window), replacing frame_sync's fire-after poke that mutated the
-  // Document BEFORE — and unserialized against — the render read. Default: none, so a
+  // The runner receives the mutation as a closure, runs it on the UI/writer thread, and
+  // wakes the canvas — the shell binds it to `CanvasHost::apply_edit`. The off-thread render
+  // read needs no lock: arbc v0.2.0 publishes content bindings copy-on-write (#10/#11), so
+  // the render walk reads a stable snapshot while the edit rebinds (editor.canvas.single_writer,
+  // superseding edit_render_sync's doc_mu). The runner keeps every edit on the one writer
+  // identity, replacing frame_sync's fire-after poke that mutated the Document BEFORE the
+  // wake. Default: none, so a
   // headless test or a session without a live canvas runs the mutation directly on the
   // calling thread (behaviour-identical, still single-threaded).
   void set_edit_runner(std::function<void(const std::function<void()>&)> runner);

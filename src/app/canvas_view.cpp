@@ -57,7 +57,7 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
   Presenter& p = it->second;
 
   // Read the persisted shot cameras ONCE per frame over the lock-free pin() snapshot (A4;
-  // no doc_mu, no render-cache touch — D-look_through-7). Reused by the look-through resolve
+  // no lock, no render-cache touch — D-look_through-7). Reused by the look-through resolve
   // below and the picker overlay at the end.
   const std::vector<scene::Camera> cameras = scene::cameras(state_.document());
 
@@ -155,6 +155,12 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       const interact::ScaleBar bar = interact::scale_bar(p.camera, target_px);
       p.scale_bar_units = bar.units;
       views::draw_scale_bar(bar.units, bar.device_px);
+
+      // The camera-frame gizmo overlay (editor.cameras.manip; D-manip-4): hit-test/drag the
+      // shot frames in the free viewport and commit a reframe. Drawn over the pane, under the
+      // picker (which is drawn last). Free viewport only — reframing a shot is a scene edit,
+      // distinct from looking through one (D9).
+      draw_frame_gizmos(view_id, p, cameras, in, pane_origin.x, pane_origin.y);
     }
 
     // Submit the resolved camera — the shot's affine while looking through, else the free
@@ -192,6 +198,129 @@ void CanvasView::draw_camera_picker(std::string_view view_id, Presenter& p,
     if (ImGui::SmallButton(cam.name.c_str())) {
       p.look_through = cam.id;
     }
+  }
+}
+
+void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,
+                                   const std::vector<scene::Camera>& cameras,
+                                   const views::CanvasInput& in, float origin_x, float origin_y) {
+  (void)view_id;
+  const std::optional<arbc::Affine> view_inv = p.camera.inverse();
+  if (!view_inv) {
+    return; // degenerate viewport camera: no gizmo this frame
+  }
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+  // Composition <-> screen for THIS pane's transient camera (comp -> device, offset by the
+  // pane origin). The pointer is reported relative to the image top-left (device px), so its
+  // composition position is the inverse-viewport of that.
+  auto to_screen = [&](arbc::Vec2 comp) {
+    const arbc::Vec2 dev = p.camera.apply(comp);
+    return ImVec2(origin_x + static_cast<float>(dev.x), origin_y + static_cast<float>(dev.y));
+  };
+  const arbc::Vec2 pointer_comp = view_inv->apply(arbc::Vec2{in.focus_x, in.focus_y});
+  const double scale = p.camera.max_scale(); // device px per composition unit
+  const double edge_tol = scale > 0.0 ? 6.0 / scale : 0.0;
+  const double corner_tol = scale > 0.0 ? 9.0 / scale : 0.0;
+
+  const ImU32 col_frame = IM_COL32(255, 210, 80, 200);
+  const ImU32 col_active = IM_COL32(120, 200, 255, 255);
+
+  // Draw one camera's covered-composition rectangle + corner handles, screen-mapped.
+  auto draw_frame = [&](const arbc::Affine& frame, int rw, int rh, bool active) {
+    const double dw = static_cast<double>(rw);
+    const double dh = static_cast<double>(rh);
+    const ImVec2 s_tl = to_screen(frame.apply(arbc::Vec2{0.0, 0.0}));
+    const ImVec2 s_tr = to_screen(frame.apply(arbc::Vec2{dw, 0.0}));
+    const ImVec2 s_br = to_screen(frame.apply(arbc::Vec2{dw, dh}));
+    const ImVec2 s_bl = to_screen(frame.apply(arbc::Vec2{0.0, dh}));
+    const ImU32 c = active ? col_active : col_frame;
+    draw_list->AddQuad(s_tl, s_tr, s_br, s_bl, c, 2.0F);
+    constexpr float hs = 3.0F;
+    for (const ImVec2& h : {s_tl, s_tr, s_br, s_bl}) {
+      draw_list->AddRectFilled(ImVec2(h.x - hs, h.y - hs), ImVec2(h.x + hs, h.y + hs), c);
+    }
+  };
+
+  // An active grab: preview the dragged frame and commit ONE set_layer_transform on release.
+  if (p.gizmo_camera) {
+    const scene::Camera* cam = nullptr;
+    for (const scene::Camera& c : cameras) {
+      if (c.id == *p.gizmo_camera) {
+        cam = &c;
+        break;
+      }
+    }
+    if (cam == nullptr) { // the shot vanished (undo/GC): drop the grab, fail-safe
+      p.gizmo_camera.reset();
+      p.gizmo_handle = interact::FrameHandle::None;
+      return;
+    }
+    // The previewed frame from the grab base + current pointer — UNLESS Space is held, in
+    // which case the drag is a nav pan of the VIEW, inert on the frame (Constraint 7), so
+    // the preview stays at the grab base and the release commits nothing.
+    arbc::Affine preview = p.gizmo_start_frame;
+    if (!ImGui::IsKeyDown(ImGuiKey_Space)) {
+      if (in.rotate) {
+        // Dutch: the signed angle swept about the frame center (Shift snaps to 15°, D-manip-5).
+        const arbc::Vec2 center =
+            p.gizmo_start_frame.apply(arbc::Vec2{p.gizmo_res_w * 0.5, p.gizmo_res_h * 0.5});
+        const double a0 =
+            std::atan2(p.gizmo_grab_comp.y - center.y, p.gizmo_grab_comp.x - center.x);
+        const double a1 = std::atan2(pointer_comp.y - center.y, pointer_comp.x - center.x);
+        preview = interact::dutch_frame(p.gizmo_start_frame, p.gizmo_res_w, p.gizmo_res_h, a1 - a0,
+                                        in.shift);
+      } else if (interact::is_resize_handle(p.gizmo_handle)) {
+        preview = interact::recrop_frame(p.gizmo_start_frame, p.gizmo_res_w, p.gizmo_res_h,
+                                         p.gizmo_handle, pointer_comp);
+      } else { // Move / Label: pan the covered region by the composition-space drag delta
+        preview = interact::move_frame(p.gizmo_start_frame, pointer_comp.x - p.gizmo_grab_comp.x,
+                                       pointer_comp.y - p.gizmo_grab_comp.y);
+      }
+    }
+    draw_frame(preview, p.gizmo_res_w, p.gizmo_res_h, /*active=*/true);
+
+    if (in.released) {
+      const arbc::ObjectId layer = p.gizmo_layer;
+      if (!(preview == p.gizmo_start_frame)) { // an inert (e.g. Space-held) drag adds no entry
+        apply_edit(
+            [this, layer, preview] { state_.document().set_layer_transform(layer, preview); });
+      }
+      p.gizmo_camera.reset();
+      p.gizmo_handle = interact::FrameHandle::None;
+    } else if (!in.down) { // lost activation without a release edge: drop the grab, no commit
+      p.gizmo_camera.reset();
+      p.gizmo_handle = interact::FrameHandle::None;
+    }
+    return;
+  }
+
+  // No active grab: draw all frames and start a grab on a border-press over a handle.
+  interact::FrameHandle hover_handle = interact::FrameHandle::None;
+  const scene::Camera* hover_cam = nullptr;
+  for (const scene::Camera& cam : cameras) {
+    draw_frame(cam.frame, cam.resolution.width, cam.resolution.height, /*active=*/false);
+    if (hover_cam == nullptr) {
+      const interact::FrameHandle h =
+          interact::hit_frame(cam.frame, cam.resolution.width, cam.resolution.height, pointer_comp,
+                              edge_tol, corner_tol);
+      if (h != interact::FrameHandle::None) {
+        hover_handle = h;
+        hover_cam = &cam;
+      }
+    }
+  }
+  // A left-press over a frame handle starts the grab — only when Space is up (Space is a nav
+  // pan, Constraint 7). The interior is click-through (hit_frame -> None, D7), so an interior
+  // press never grabs.
+  if (in.pressed && hover_cam != nullptr && !ImGui::IsKeyDown(ImGuiKey_Space)) {
+    p.gizmo_camera = hover_cam->id;
+    p.gizmo_layer = hover_cam->layer;
+    p.gizmo_handle = hover_handle;
+    p.gizmo_start_frame = hover_cam->frame;
+    p.gizmo_grab_comp = pointer_comp;
+    p.gizmo_res_w = hover_cam->resolution.width;
+    p.gizmo_res_h = hover_cam->resolution.height;
   }
 }
 

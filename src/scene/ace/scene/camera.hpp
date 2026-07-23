@@ -75,6 +75,16 @@ public:
   // WRITER-THREAD ONLY; the caller wraps it in a `commands::Command` for undo/redo.
   void set_name(arbc::Model::Transaction& txn, arbc::ObjectId self, std::string new_name);
 
+  // Re-resolution in place — the exact mirror of `set_name` (D-rename-2 chartered it
+  // "no new task"): mint a new version carrying `new_resolution` over the CURRENT name,
+  // adopt it as the live base, and journal it via `set_content_state` so the camera keeps
+  // its `ObjectId`, name, binding layer, and frame while `undo` restores the prior
+  // resolution on that same object (D-manip-1/3, Constraint 3). This is the D8 anti-
+  // resample seam's TYPE side: the resolution is edited only here, in the inspector, never
+  // by a frame drag. WRITER-THREAD ONLY; the caller wraps it in a `commands::Command`.
+  void set_resolution(arbc::Model::Transaction& txn, arbc::ObjectId self,
+                      Resolution new_resolution);
+
   // Read-only accessors the codec + `cameras()` read: the CURRENT base version's state
   // (so a persisted or round-tripped camera reflects the latest rename, Constraint 4).
   std::string camera_name() const;
@@ -154,5 +164,30 @@ arbc::ObjectId add_camera(arbc::Document& document, const arbc::Registry& regist
 // stability with `add_camera`.
 bool rename_camera(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId camera,
                    const std::string& new_name);
+
+// Re-resolution the shot camera whose content id is `camera`, preserving its `ObjectId`,
+// binding layer, name, frame, and position in layer order (Constraint 3, D-manip-1). The
+// exact mould of `rename_camera`: resolve + `dynamic_cast`, no-op-returning-false for an
+// unknown / non-camera id, and ONE `set_content_state` transaction through the camera's
+// `arbc::Editable` facet — so the re-resolutioned camera is the SAME object (the shared
+// selection and any active gizmo keep their handle) and `undo` restores the prior
+// resolution. The frame is untouched: resolution and frame are independent (D7/D9); a
+// non-positive width/height is rejected as a no-op (returns false). WRITER-THREAD ONLY;
+// undoable via the journal (D-model-4). `registry` is unused (no new Content is minted)
+// but kept for signature stability with `add_camera` / `rename_camera`.
+bool set_camera_resolution(arbc::Document& document, const arbc::Registry& registry,
+                           arbc::ObjectId camera, Resolution new_resolution);
+
+// The aspect-change edit (D-manip-7): re-resolution the camera `camera` AND re-fit its
+// binding layer `layer`'s frame to `new_frame` (the follow-frame, `interact::
+// refit_frame_to_aspect`) in ONE transaction — so the resolution change and the frame
+// follow are a single journal entry (one undo step). Both the content-state edit and the
+// layer-transform edit ride the same `document.transact(...)`; `undo` restores the prior
+// resolution AND the prior frame together. Returns false (a no-op) for a non-positive
+// resolution or an unknown / non-camera `camera`. WRITER-THREAD ONLY. `registry` is unused
+// (no new Content is minted) but kept for signature stability with the sibling mutators.
+bool set_camera_resolution_and_frame(arbc::Document& document, const arbc::Registry& registry,
+                                     arbc::ObjectId camera, arbc::ObjectId layer,
+                                     Resolution new_resolution, const arbc::Affine& new_frame);
 
 } // namespace ace::scene

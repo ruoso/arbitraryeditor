@@ -326,10 +326,10 @@ TEST_CASE(
 
   CanvasView canvas(state); // spawns the render thread
 
-  // The in-process gateway wired to the shell's edit-serializing runner (D-edit_render_sync-2):
-  // a moved undo runs its Document mutation inside CanvasHost::apply_edit's `doc_mu` window —
-  // mutually excluded with the render read — then wakes the canvas. This is the exact
-  // production wiring (shell.cpp), so this e2e drives the serialized edit path end-to-end.
+  // The in-process gateway wired to the shell's edit runner (editor.canvas.single_writer):
+  // a moved undo runs its Document mutation via CanvasHost::apply_edit on the writer thread —
+  // the render read is lock-free (arbc v0.2.0 COW content bindings) — then wakes the canvas.
+  // This is the exact production wiring (shell.cpp), so this e2e drives the edit path end-to-end.
   // undo() touches none of the inert collaborators.
   ace::dockmodel::RecentProjects recent(scratch.root / "prefs", fs);
   NoopFolderDialog dialog;

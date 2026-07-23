@@ -52,6 +52,18 @@ struct CanvasInput {
   float focus_x = 0.0F; // the cursor, relative to the image top-left (device px)
   float focus_y = 0.0F;
   bool reset = false; // reset-to-fit requested (F while hovered, D-nav-7)
+  // --- camera-frame gizmo input (editor.cameras.manip; D7/D9) -----------------
+  // The raw left-button + modifier read the app threads through the interact frame math
+  // to hit-test / drag a shot camera's frame. No camera knowledge here — the app owns the
+  // camera list and commits the edit (A11: interact stays pure math). `pressed`/`released`
+  // are the button EDGES (grab start / commit) and `down` the held-drag state.
+  bool pressed = false;  // left button went down over the pane this frame
+  bool down = false;     // left button is held over the pane (a drag is in progress)
+  bool released = false; // left button released this frame (a grab's commit edge)
+  bool shift = false;    // Shift constrains (15° / aspect / axis-lock, D9)
+  bool alt = false;      // Alt from center (D9)
+  bool ctrl = false;     // Cmd/Ctrl bypass-snap (D9)
+  bool rotate = false;   // the dutch-rotation gate held (R; D-manip-5, modifier-gated)
 };
 
 // Draw the Canvas body AND read its navigation gestures: the `draw_canvas_image`

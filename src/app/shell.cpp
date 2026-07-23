@@ -1,3 +1,4 @@
+#include <ace/app/camera_inspector.hpp>
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
@@ -231,6 +232,14 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   ace::views::register_view_body(
       ace::dockmodel::ViewType::History,
       [&app_state](std::string_view view_id) { ace::views::draw_history(app_state, view_id); });
+  // The Inspector view body hosts the first-cut camera resolution editor (editor.cameras.manip,
+  // D-manip-6): W×H + aspect presets driving set_camera_resolution through the same apply_edit
+  // seam the History/undo edits ride. It captures the one AppState& and the CanvasView (for the
+  // edit runner) and is cleared on exit like the other bodies (the seam is process-global).
+  ace::app::CameraInspector camera_inspector(app_state, canvas);
+  ace::views::register_view_body(
+      ace::dockmodel::ViewType::Inspector,
+      [&camera_inspector](std::string_view view_id) { camera_inspector.draw(view_id); });
   // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
   // it renders each open view by its instance id and syncs the tab ✕ back into
   // the authoritative DockLayout.
@@ -264,12 +273,12 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
     app_gateway = std::make_unique<ace::app::AppProjectGateway>(
         *recent_projects, filesystem, *folder_dialog, launcher, executable, app_state);
-    // Edit-serializing runner (editor.canvas.edit_render_sync, D-edit_render_sync-2): the
-    // gateway hands each undo/redo Document mutation to this runner, which runs it inside
-    // CanvasHost::apply_edit's `doc_mu` window — mutually excluded with the render thread's
-    // per-frame document read — then wakes the off-thread canvas to re-render the damage.
-    // This replaces frame_sync's fire-after poke, which mutated the Document before (and
-    // unserialized against) that read, leaving the shipped path with a latent TSan race.
+    // Edit runner (editor.canvas.single_writer): the gateway hands each undo/redo Document
+    // mutation to this runner, which runs it via CanvasHost::apply_edit on the UI/writer
+    // thread, then wakes the off-thread canvas to re-render the damage. The render read takes
+    // no lock — arbc v0.2.0 publishes content bindings copy-on-write (#10/#11), so the render
+    // walk reads a stable snapshot while the edit rebinds. This replaces frame_sync's
+    // fire-after poke, which mutated the Document before the wake (the v0.1.0 TSan race).
     // The gateway outlives the draw loop alongside `canvas`, so the capture is safe.
     app_gateway->set_edit_runner(
         [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
@@ -303,6 +312,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   // process-global, so a later shell run must not call into a dangling capture.
   ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
   ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
+  ace::views::register_view_body(ace::dockmodel::ViewType::Inspector, {});
   canvas.destroy();
   shell.shutdown();
   return 0;
