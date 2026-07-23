@@ -314,6 +314,44 @@ add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_v
   return content;
 }
 
+bool remove_cell(arbc::Document& document, arbc::ObjectId content, arbc::ObjectId layer) {
+  if (!content.valid() || !layer.valid()) {
+    return false;
+  }
+  // Resolve + validate against the live pinned generation BEFORE opening anything, so a
+  // stale id costs exactly one snapshot read and leaves the document byte-for-byte
+  // untouched (Constraint 5). `remove_content` names a specific `(composition, layer)`,
+  // so a layer that is not a live member of the root would detach the WRONG member.
+  arbc::ObjectId composition;
+  bool member = false;
+  {
+    const arbc::DocStatePtr state = document.pin();
+    if (!state) {
+      return false;
+    }
+    composition = root_composition(*state);
+    if (!composition.valid()) {
+      return false;
+    }
+    const arbc::LayerRecord* record = state->find_layer(layer);
+    if (record == nullptr || record->content != content) {
+      return false; // no such layer, or it does not place `content`
+    }
+    state->for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
+      if (layer_id == layer) {
+        member = true;
+      }
+    });
+  }
+  if (!member) {
+    return false; // live layer, but not in the root composition (a nested scope's)
+  }
+  // ONE library transaction: one journal entry, one revision bump, undoable through the
+  // journal alone (D15 / Constraint 2).
+  document.remove_content(content, composition, layer);
+  return true;
+}
+
 std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& registry) {
   std::vector<Cell> result;
   // The reverse map: seeded from the same registry the insert side interned through,

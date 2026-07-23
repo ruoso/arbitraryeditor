@@ -190,15 +190,27 @@ void draw_insert_cell_modal(Dockspace& dockspace, ProjectGateway& gateway) {
   ImGui::EndPopup();
 }
 
-// The rail's Insert section: the one-shot "put a cell in the composition" entry
-// point (D3). A confirmed one-shot op is what the two existing modals are for, so
-// this is a modal rather than a ninth view type (D-cells_model-5).
-void draw_insert_section(Dockspace& dockspace, ProjectGateway& gateway) {
+// The rail's Edit section: the one-shot "put a cell in the composition" entry point
+// (D3) and its inverse, "take the selection back out" (editor.cells.remove). A
+// confirmed one-shot op is what the two existing modals are for, so Insert is a modal
+// rather than a ninth view type (D-cells_model-5); Delete is an immediate rail ACTION
+// with no confirm — it is a journaled, undoable transaction, and the confirm modal
+// exists for Clean up precisely because GC is NOT undoable (D15 / D-cells_remove-4).
+// Both are actions, never a fifth modal `ToolId` (D20 / D-cells_remove-6).
+void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
   ImGui::Separator();
-  ImGui::TextUnformatted("Insert");
+  ImGui::TextUnformatted("Edit");
   if (ImGui::Selectable("Insert Cell…###insert_cell")) {
     dockspace.open_insert_modal(gateway.insert_kinds());
   }
+  // DISABLED rather than hidden with an empty selection: the rail's fixed geometry is
+  // the "home base" guarantee (§10), and a greyed item makes the gate discoverable.
+  const bool can_delete = gateway.can_delete();
+  ImGui::BeginDisabled(!can_delete);
+  if (ImGui::Selectable("Delete Selected###delete_selected") && can_delete) {
+    gateway.delete_selected();
+  }
+  ImGui::EndDisabled();
   draw_insert_cell_modal(dockspace, gateway);
 }
 
@@ -312,6 +324,32 @@ void handle_undo_shortcuts(ProjectGateway& gateway) {
   }
 }
 
+// The canonical delete affordance's keyboard half (Decision D-cells_remove-5): `Delete`
+// or `Backspace`, handled GLOBALLY here beside the undo chords and routed through the
+// same gateway seam the rail item uses, gated on can_delete() so a no-op is never
+// dispatched. `Backspace` is included because macOS's Delete key reports as
+// `ImGuiKey_Backspace`; without it the chord is unreachable on a MacBook keyboard.
+// Global rather than pane-scoped because Delete acts on the PROJECT-level selection
+// (D19), so it must work from wherever that selection is visible — the canvas today,
+// the Layers list and Overview once `editor.panels.*` ship.
+//
+// Unlike Ctrl+Z these are BARE keys, so they collide with text editing: `IsKeyChordPressed`
+// reads global key state and would steal every `InputText`'s Delete, including the Insert
+// Cell modal's config field. Hence the two guards (Constraint 9) — `WantTextInput` covers
+// any focused text field, and the top-most-modal check covers a modal that owns the
+// keyboard even between fields.
+void handle_delete_shortcut(ProjectGateway& gateway) {
+  if (ImGui::GetIO().WantTextInput || ImGui::GetTopMostPopupModal() != nullptr) {
+    return;
+  }
+  if (!ImGui::IsKeyChordPressed(ImGuiKey_Delete) && !ImGui::IsKeyChordPressed(ImGuiKey_Backspace)) {
+    return;
+  }
+  if (gateway.can_delete()) {
+    gateway.delete_selected();
+  }
+}
+
 } // namespace
 
 const char* name() { return "dock"; }
@@ -354,7 +392,7 @@ void draw_tool_rail(Dockspace& dockspace) {
   // The project-entry affordances (D22 / A12): New / Open / Open Recent, present
   // only when the app wired a gateway (null in the bare-shell smoke).
   if (ProjectGateway* gateway = dockspace.project_gateway()) {
-    draw_insert_section(dockspace, *gateway);
+    draw_edit_section(dockspace, *gateway);
     draw_project_section(dockspace, *gateway);
   }
 
@@ -450,9 +488,11 @@ void Dockspace::draw() {
   // The undo/redo keyboard chords route through the wired gateway to the in-process
   // session (D-undo-3), gated on can_undo()/can_redo(). Handled once per frame,
   // before any window, so it fires regardless of docked-window focus; omitted with
-  // the rail's Project section when no gateway is wired (the bare-shell smoke).
+  // the rail's Project section when no gateway is wired (the bare-shell smoke). The
+  // Delete/Backspace chord (D-cells_remove-5) rides the same block and the same seam.
   if (ProjectGateway* gateway = project_gateway_) {
     handle_undo_shortcuts(*gateway);
+    handle_delete_shortcut(*gateway);
   }
 
   ImGuiViewport* viewport = ImGui::GetMainViewport();

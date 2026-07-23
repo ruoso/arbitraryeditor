@@ -11,6 +11,7 @@
 #include <arbc/base/geometry.hpp>
 #include <arbc/base/transform.hpp>
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <utility>
@@ -244,6 +245,18 @@ std::string AppProjectGateway::insert_cell(const std::string& kind_id,
   // edit_render_sync Constraint 1, which names cells) — never a bare dispatch+poke.
   run_edit([this, &command] { ace::commands::dispatch(app_state_, command); });
   return outcome.error;
+}
+
+bool AppProjectGateway::can_delete() const { return ace::commands::can_delete(app_state_); }
+
+std::size_t AppProjectGateway::delete_selected() {
+  // Every UI-driven delete runs inside CanvasView::apply_edit (Constraint 4), exactly as
+  // insert does: `arbc::Document::remove_content` is WRITER-THREAD ONLY, so a bare dispatch
+  // from the UI thread is forbidden. `delete_selection` resolves its targets INSIDE the
+  // closure, on the writer thread, against the live document (D-cells_remove-3).
+  std::size_t removed = 0;
+  run_edit([this, &removed] { removed = ace::commands::delete_selection(app_state_).removed; });
+  return removed;
 }
 
 } // namespace ace::app

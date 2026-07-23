@@ -121,6 +121,28 @@ arbc::expected<arbc::ObjectId, std::string>
 add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_view kind_id,
          std::string_view config, const arbc::Affine& placement);
 
+// The declared inverse of `add_cell` (editor.cells.remove): make the placed object whose
+// content is `content`, placed by `layer`, leave the ROOT composition. Kind-AGNOSTIC — a
+// camera is a `Content` + a `Layer` structurally identical to a cell (A14), and D7 makes
+// them "one shape", so the same verb removes either (D-cells_remove-1).
+//
+// The whole deletion is `arbc::Document::remove_content(content, composition, layer)`
+// (`document.hpp:131`), never a hand-composed `detach_layer` + `remove` + `remove`: the
+// library wrapper is ONE transaction — atomic, revision +1, ONE journal entry, one damage
+// flush — and it owns the invariant that the content's binding row stays RETAINED while
+// the journal holds the removal. So the delete is undoable BY CONSTRUCTION: the editor
+// writes no inverse and no snapshot, and one undo restores the object on the SAME
+// `ObjectId` with its layer and placement intact (D15).
+//
+// Returns false, having opened no transaction and mutated NOTHING, when the document has
+// no root composition, when either id is invalid, when `layer` is not a live member of the
+// root composition, or when `layer` does not place `content` — a selected id whose target
+// was already deleted (or undone away, or GC'd) is a SKIP, not an error. Deleting from an
+// entered/isolated nested scope is `editor.panels.layers`', symmetric with `add_cell`,
+// which only inserts into the root. WRITER-THREAD ONLY (`document.hpp:130`); wrap it in a
+// `commands::Command` and `dispatch` it so the edit rides the single-writer seam.
+bool remove_cell(arbc::Document& document, arbc::ObjectId content, arbc::ObjectId layer);
+
 struct Cell {
   arbc::ObjectId id;      // the `Content` object (the cell's identity)
   arbc::ObjectId layer;   // the layer that places it

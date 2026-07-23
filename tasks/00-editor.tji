@@ -348,8 +348,9 @@ task editor "Editor — host GUI over libarbc" {
     task remove "Delete selected cell(s) via Document::remove_content + Delete chord" {
       effort 1d
       allocate team
+      complete 100
       depends !selection
-      note "Delete the selected cell(s) via arbc::Document::remove_content(content, composition, layer) (document.hpp:131 -- atomic, one journal entry, undoable) with the Delete chord and a rail/inspector affordance plus an e2e. Insert without delete is the gap editor.cells.model opens; the library verb already exists, so this is mechanical. Source-of-debt: tasks/refinements/editor.cells/model.md. Design: docs/00-design.md D7/D15."
+      note "Delete the selected cell(s) via arbc::Document::remove_content(content, composition, layer) (document.hpp:131 -- atomic, one journal entry, undoable) with the Delete chord and a rail/inspector affordance plus an e2e. Insert without delete is the gap editor.cells.model opens; the library verb already exists, so this is mechanical. Source-of-debt: tasks/refinements/editor.cells/model.md. Design: docs/00-design.md D7/D15. Refinement: tasks/refinements/editor.cells/remove.md"
     }
   }
 

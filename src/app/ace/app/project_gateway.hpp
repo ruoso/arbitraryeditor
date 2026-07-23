@@ -7,6 +7,7 @@
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
 
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -76,6 +77,16 @@ public:
   // (Constraint 5). Returns the kind's own error string, or empty on success.
   std::string insert_cell(const std::string& kind_id,
                           const ace::dock::InsertValues& values) override;
+
+  // --- Delete Selected (editor.cells.remove) ---------------------------------
+  // The inverse of `insert_cell`, over the ONE project-level selection (D19). `can_delete`
+  // is the cheap gate both affordances poll each frame; `delete_selected` resolves the
+  // targets against the live document and dispatches one `remove_cell_command` per object,
+  // with the mutation wrapped in `run_edit` so it runs inside `CanvasView::apply_edit`
+  // (Constraint 5) — `arbc::Document::remove_content` is WRITER-THREAD ONLY. Returns how
+  // many objects actually left the composition (a stale selected id is skipped).
+  bool can_delete() const override;
+  std::size_t delete_selected() override;
 
   // Install the source of the provisional placement's framing — the shell binds it to
   // the live canvas's transient viewport camera + pane size, read by value per insert

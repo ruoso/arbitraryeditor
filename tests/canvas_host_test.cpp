@@ -400,6 +400,53 @@ TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the rende
   handle->join();
 }
 
+TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean against the render read "
+          "(cells.remove TSan anchor)") {
+  ProbeDocument probe = build_probe_document();
+  // editor.cells.remove's one genuinely NEW threading surface: every prior edit only ADDED
+  // records, so this is the first time a `ContentRecord` is ERASED while the render thread
+  // walks the same document over the lock-free pin() seam. `Document::remove_content` runs
+  // its three teardowns inside ONE transaction, so an observer sees the content present or
+  // fully gone, never a layer naming an erased content; and Decision 1 keeps the content's
+  // binding row alive while the journal holds the removal, so the render walk's
+  // `resolve()` of a pinned older generation stays valid. Same real-pool + spawned-render-
+  // thread rig as the insert anchor above, so the erase genuinely overlaps the read in
+  // wall-clock time. Runs in the shipped ASan and TSan lanes; no new lane, no suppression.
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // Attach then erase, many rounds, each half its own apply_edit — a wide overlap window.
+  constexpr int k_rounds = 32;
+  for (int i = 0; i < k_rounds; ++i) {
+    arbc::ObjectId content;
+    arbc::ObjectId layer;
+    host.apply_edit([&] {
+      content = probe.document->add_content(
+          std::make_shared<arbc::SolidContent>(arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}));
+      layer = probe.document->add_layer(content, arbc::Affine::identity());
+      probe.document->attach_layer(probe.composition, layer);
+    });
+    host.apply_edit([&] { probe.document->remove_content(content, probe.composition, layer); });
+  }
+  // The frames keep arriving: both live readers advanced past the removals off-thread.
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+}
+
 // --- editor.canvas.nav: the per-entry camera channel + deep-zoom observability ------
 
 namespace {

@@ -170,6 +170,22 @@ public:
   virtual std::string insert_cell(const std::string& /*kind_id*/, const InsertValues& /*values*/) {
     return "Insert is unavailable.";
   }
+
+  // Delete the project-level selection (editor.cells.remove / D19): the inverse of
+  // `insert_cell`, and the seventh verb that acts on THIS process's one owned session
+  // rather than spawning a sibling. `can_delete()` gates BOTH affordances — the rail item
+  // is disabled (not hidden) when it is false, and the Delete/Backspace chord never
+  // dispatches a no-op — exactly the shape `can_undo()`/`undo()` established (D-undo-3).
+  // `delete_selected()` returns how many objects actually left the composition.
+  //
+  // The seam traffics in `bool`/`std::size_t` only: `dock` may include neither
+  // `ace/scene` nor `ace/commands` (A12/A13), and two primitives carry everything the rail
+  // and the e2e need, so this needs not even a dock-local POD (D-cells_remove-6). Non-pure
+  // with inert defaults, exactly as `insert_kinds` above, so the gateway fakes of unrelated
+  // suites need no churn: an unwired gateway simply has nothing to delete. The shipped L4
+  // impl overrides both.
+  virtual bool can_delete() const { return false; }
+  virtual std::size_t delete_selected() { return 0; }
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by
