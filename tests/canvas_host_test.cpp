@@ -17,6 +17,7 @@
 #include <ace/render/render.hpp>
 #include <ace/scene/camera.hpp>
 #include <ace/scene/cell.hpp>
+#include <ace/writer/writer_thread.hpp>
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
@@ -86,6 +87,53 @@ std::unique_ptr<arbc::Document> build_empty_doc() {
   auto doc = std::make_unique<arbc::Document>();
   doc->add_composition(static_cast<double>(k_w), static_cast<double>(k_h));
   return doc;
+}
+
+// THE edit seam, as the shipped app now binds it (editor.canvas.writer_thread,
+// D-writer_thread-11): POST the mutation to the document's one writer thread, block until it has
+// run, then wake every live canvas. `CanvasHost::apply_edit` and its writer-priority document
+// lease are gone — `render` no longer owns the document write path, and the render walk's read
+// takes no lock because it needs none (COW bindings, the accumulator's own mutex, and a `step()`
+// that declines to publish off the writer thread).
+//
+// With an INLINE-degenerate writer (`WriterThread{}`) the closure runs on the caller, which is
+// what keeps the deterministic drive_once() fixtures below thread-free and byte-exact
+// (D-writer_thread-5 / Constraint 6).
+void apply_edit(ace::writer::WriterThread& writer, CanvasHost& host,
+                const std::function<void()>& edit) {
+  writer.submit_sync(edit);
+  host.poke();
+}
+
+// Build a document ON the writer thread. The FIRST write binds the document's writer identity for
+// its lifetime (`SlotStore::allocate` asserts it in debug builds), so a fixture that builds on the
+// main thread and then posts its edits would be TWO identities — the exact bug this leaf removes.
+// The shipped bootstrap has the same shape: the writer starts before `open_or_create_app_state`.
+template <class Build>
+auto build_on_writer(ace::writer::WriterThread& writer, Build build_fn) -> decltype(build_fn()) {
+  decltype(build_fn()) built{};
+  writer.submit_sync([&] { built = build_fn(); });
+  return built;
+}
+
+// Read the WRITER-OWNED external-load counters on the writer thread, where libarbc says they
+// live: `Document::pending_external_loads()` and `external_loads_auto_settled()` are documented
+// writer-thread (only `external_loads_ready()` and `on_writer_thread()` are any-thread), so a test
+// that polled them from the main thread would be asserting the very thing this leaf forbids — and
+// the hermetic gcc-tsan lane reports exactly that. Posting the read also supplies the
+// happens-before edge that makes the returned value meaningful.
+struct LoadCounters {
+  std::size_t pending = 0;
+  std::uint64_t auto_settled = 0;
+};
+
+LoadCounters load_counters(ace::writer::WriterThread& writer, const arbc::Document& doc) {
+  LoadCounters out;
+  writer.submit_sync([&] {
+    out.pending = doc.pending_external_loads();
+    out.auto_settled = doc.external_loads_auto_settled();
+  });
+  return out;
 }
 
 // Deadline-based pump for the off-thread lifecycle case — holds under a sanitizer build's
@@ -167,6 +215,7 @@ TEST_CASE("canvas_host: request_resize is per-entry — resizing one leaves the 
 }
 
 TEST_CASE("canvas_host: one edit + poke advances BOTH entries' sequences (N observers)") {
+  ace::writer::WriterThread writer; // inline degenerate: this thread IS the writer identity
   ProbeDocument probe = build_probe_document();
   CanvasHost host = make_inline_host();
   seed_two(host, *probe.document, k_w, k_h);
@@ -175,7 +224,7 @@ TEST_CASE("canvas_host: one edit + poke advances BOTH entries' sequences (N obse
 
   // One edit to the SHARED document via apply_edit (runs synchronously here on the writer
   // thread), then a drive fans the resulting damage out to both entries.
-  host.apply_edit([&] { damage(*probe.document, probe.composition); });
+  apply_edit(writer, host, [&] { damage(*probe.document, probe.composition); });
   host.drive_once();
 
   // Both observers of the one document re-rendered the new revision.
@@ -285,6 +334,7 @@ TEST_CASE(
 }
 
 TEST_CASE("canvas_host: once content has published, a partial refinement publishes normally") {
+  ace::writer::WriterThread writer; // inline degenerate: this thread IS the writer identity
   ProbeDocument probe = build_probe_document();
   CanvasHost host = make_inline_host();
   host.add("canvas#1", *probe.document);
@@ -294,19 +344,26 @@ TEST_CASE("canvas_host: once content has published, a partial refinement publish
 
   // Once content has published (content_published latched) the gate is skipped, so a later
   // damaged frame publishes on the normal frames_issued advance (the sequence stays monotonic).
-  host.apply_edit([&] { damage(*probe.document, probe.composition); });
+  apply_edit(writer, host, [&] { damage(*probe.document, probe.composition); });
   host.drive_once();
   CHECK(host.published_sequence("canvas#1") == 2);
 }
 
 TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned render thread") {
-  ProbeDocument probe = build_probe_document();
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   // The shipped path: a real interactive WorkerPool (worker threads) + a bounded budget —
   // the escalated ASan/TSan target (N renderers ‖ one pool ‖ one render thread ‖ UI
   // writer+poke ‖ HousekeepingThread ‖ N double-buffer handoffs).
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
 
-  ace::platform::NativeThreads threads;
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -325,7 +382,7 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
   // the shared document off the writer thread would break arbc's single writer-identity contract.
   const std::uint64_t before1 = host.published_sequence("canvas#1");
   const std::uint64_t before2 = host.published_sequence("canvas#2");
-  host.apply_edit([&] { damage(*probe.document, probe.composition); });
+  apply_edit(writer, host, [&] { damage(*probe.document, probe.composition); });
   REQUIRE(pump_until([&] {
     return host.published_sequence("canvas#1") > before1 &&
            host.published_sequence("canvas#2") > before2;
@@ -360,7 +417,14 @@ TEST_CASE("canvas_host: the REAL shared-pool lifecycle runs clean off a spawned 
 
 TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the render read "
           "(edit_render_sync TSan anchor)") {
-  ProbeDocument probe = build_probe_document();
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   // The acceptance anchor (editor.canvas.single_writer). Real interactive pool (worker threads)
   // + a bounded budget + a spawned render thread looping drive_once -> for_each_content, so the
   // read of the content bindings genuinely overlaps the UI-thread writes in wall-clock time (the
@@ -374,7 +438,7 @@ TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the rende
   // the writer-owned d_contents (the debt doc_mu papered over). v0.2.0's COW publish is what
   // makes the lock-free read clean; pin back to v0.1.0 and TSan re-reports the race on d_contents.
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -389,7 +453,7 @@ TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the rende
   // Stream the edits: many rounds so TSan gets a wide overlap window against the looping read.
   constexpr int k_edits = 64;
   for (int i = 0; i < k_edits; ++i) {
-    host.apply_edit([&] { damage(*probe.document, probe.composition); });
+    apply_edit(writer, host, [&] { damage(*probe.document, probe.composition); });
   }
   // Both live readers converge on the streamed revisions off-thread — the fan-out reached them.
   REQUIRE(pump_until([&] {
@@ -403,7 +467,14 @@ TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the rende
 
 TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean against the render read "
           "(cells.remove TSan anchor)") {
-  ProbeDocument probe = build_probe_document();
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   // editor.cells.remove's one genuinely NEW threading surface: every prior edit only ADDED
   // records, so this is the first time a `ContentRecord` is ERASED while the render thread
   // walks the same document over the lock-free pin() seam. `Document::remove_content` runs
@@ -414,7 +485,7 @@ TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean agains
   // thread rig as the insert anchor above, so the erase genuinely overlaps the read in
   // wall-clock time. Runs in the shipped ASan and TSan lanes; no new lane, no suppression.
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -431,13 +502,14 @@ TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean agains
   for (int i = 0; i < k_rounds; ++i) {
     arbc::ObjectId content;
     arbc::ObjectId layer;
-    host.apply_edit([&] {
+    apply_edit(writer, host, [&] {
       content = probe.document->add_content(
           std::make_shared<arbc::SolidContent>(arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}));
       layer = probe.document->add_layer(content, arbc::Affine::identity());
       probe.document->attach_layer(probe.composition, layer);
     });
-    host.apply_edit([&] { probe.document->remove_content(content, probe.composition, layer); });
+    apply_edit(writer, host,
+               [&] { probe.document->remove_content(content, probe.composition, layer); });
   }
   // The frames keep arriving: both live readers advanced past the removals off-thread.
   REQUIRE(pump_until([&] {
@@ -638,15 +710,22 @@ TEST_CASE("canvas_host: an interactive-camera frame is byte-exact vs offline + t
 }
 
 TEST_CASE("canvas_host: a blank-then-content first frame publishes under the REAL bounded pool") {
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
   // The gate's liveness path: under a real WorkerPool + bounded budget the first step() can
   // issue a blank frame (tiles still resolving) that the content gate withholds. There is NO
   // async-completion wake, so the drive loop must stay armed while the renderer keeps issuing
   // new frames (tiles in flight) until a content frame composites and publishes — otherwise
   // the canvas stalls blank at sequence 0. build_raster_doc's full-frame solid background is
   // covered content the compositor resolves within a few bounded steps.
-  auto doc = build_raster_doc();
+  auto doc = build_on_writer(writer, [] { return build_raster_doc(); });
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -725,15 +804,30 @@ constexpr const char* k_leaf =
 
 // Load a parent document that references `mem/child.arbc` through the deferring `source` (which
 // already holds the child bytes): the parent loads WITHOUT the child, so pending == 1 until a
-// settle. `bridge` is the load-side KindBridge (kept alive by the caller); the host seeds its
-// OWN bridge from the same registry.
+// settle. `bridge` is the load-side KindBridge (kept alive by the caller).
+//
+// ASSERTION-FREE, because `load_document` is the FIRST write and therefore BINDS the document's
+// writer identity — so the cases below run this ON the writer thread, and a Catch2 REQUIRE that
+// threw inside a posted closure would unwind straight through the writer's loop. Callers assert
+// the post-conditions from their own thread instead.
+std::unique_ptr<arbc::Document> load_pending_nested_raw(DeferringAssetSource& source,
+                                                        arbc::KindBridge& bridge,
+                                                        const arbc::Registry& registry) {
+  source.put("mem/child.arbc", k_leaf);
+  auto doc = std::make_unique<arbc::Document>();
+  if (!arbc::load_document(nesting_doc("child.arbc"), *doc, bridge, registry, "mem/parent.arbc",
+                           &source)) {
+    return nullptr;
+  }
+  return doc;
+}
+
+// The same, for the single-threaded fixtures (this thread IS the writer identity there).
 std::unique_ptr<arbc::Document> load_pending_nested(DeferringAssetSource& source,
                                                     arbc::KindBridge& bridge,
                                                     const arbc::Registry& registry) {
-  source.put("mem/child.arbc", k_leaf);
-  auto doc = std::make_unique<arbc::Document>();
-  REQUIRE(arbc::load_document(nesting_doc("child.arbc"), *doc, bridge, registry, "mem/parent.arbc",
-                              &source));
+  std::unique_ptr<arbc::Document> doc = load_pending_nested_raw(source, bridge, registry);
+  REQUIRE(doc != nullptr);
   REQUIRE(doc->pending_external_loads() == 1);
   return doc;
 }
@@ -823,6 +917,193 @@ TEST_CASE("canvas_host: the empty binding leaves a deferred external nested chil
   CHECK_FALSE(host.consume("canvas#1", s, frame)); // nothing was ever published
 }
 
+// --- editor.canvas.writer_thread: the writer consumes the deferred settle PROACTIVELY -------
+//
+// Since the v0.3.0 pin `HostViewport::step()` refuses to publish off the writer thread, so a
+// landed arrival is work only the WRITER can do. D-writer_thread-10's claim is that the writer
+// does not wait to be told: it polls whenever its queue drains, before waiting. The two cases
+// below are the two halves of that claim — the arrival installs with NOTHING else running at all,
+// and with a live render loop the D-10 nudge only shortens the latency (it does not double-settle).
+
+TEST_CASE("canvas_host: an idle writer settles a deferred external arrival with NO edit and NO "
+          "render loop (D-writer_thread-10)") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+
+  // ONE document-scoped, writer-owned KindBridge (D-writer_thread-9) — the same object the load
+  // used and the one every canvas over this document is handed, because the document holds a
+  // single external-load settler slot.
+  DeferringAssetSource source;
+  arbc::KindBridge bridge;
+  std::unique_ptr<arbc::Document> doc =
+      build_on_writer(writer, [&] { return load_pending_nested_raw(source, bridge, registry); });
+  REQUIRE(doc != nullptr);
+  REQUIRE(load_counters(writer, *doc).pending == 1);
+
+  // The writer's idle work, bound exactly as `run_editor` binds it.
+  std::atomic<int> installs{0};
+  writer.set_idle_work([&] {
+    if (doc->external_loads_ready() > 0) {
+      installs += static_cast<int>(arbc::settle_external_loads(*doc, bridge, registry));
+    }
+    return doc->pending_external_loads() > 0;
+  });
+
+  // Nobody is editing. Nothing is rendering. There is no host and no render thread in this case
+  // AT ALL — which is precisely the state in which the pre-writer_thread editor would have sat on
+  // the placeholder forever, because no one was watching.
+  REQUIRE(source.fire_all() == 1);
+  // Poll an EDITOR-owned atomic, never the document's writer-owned counters (see load_counters).
+  REQUIRE(pump_until([&] { return installs.load() >= 1; }));
+  CHECK(doc->external_loads_ready() == 0); // any-thread, lock-free: the queue drained
+  writer.set_idle_work({});                // disarm before reading the writer-owned counters
+  CHECK(load_counters(writer, *doc).pending == 0);
+
+  // The install is real, not just a drained counter: a driven frame now composites the child.
+  CanvasHost host = make_inline_host();
+  host.set_writer(&writer);
+  host.add("canvas#1", *doc, &registry, &bridge);
+  host.request_resize("canvas#1", k_w, k_h);
+  settle(host);
+  std::uint64_t s = 0;
+  Srgb8Image frame;
+  REQUIRE(host.consume("canvas#1", s, frame));
+  CHECK(ace::render::frame_has_content(frame));
+}
+
+TEST_CASE("canvas_host: a LIVE render loop nudges the arrival onto the writer within the "
+          "observing frame, and it settles exactly once (D-writer_thread-10)") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+
+  DeferringAssetSource source;
+  arbc::KindBridge bridge;
+  std::unique_ptr<arbc::Document> doc =
+      build_on_writer(writer, [&] { return load_pending_nested_raw(source, bridge, registry); });
+  REQUIRE(doc != nullptr);
+  REQUIRE(load_counters(writer, *doc).pending == 1);
+
+  // NO idle work here — deliberately. This case pins the OTHER wake path in isolation: the render
+  // thread's per-frame `StepOutcome::external_loads_ready` report, turned into ONE deduped ASYNC
+  // submission (the render thread must never block a frame on an arrival, Constraint 3). The
+  // inline degenerate pool + settle-fully budget keeps the composite deterministic while the
+  // drive loop genuinely runs off-thread.
+  CanvasHost host(arbc::WorkerPoolConfig{}, std::chrono::hours(1));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+  host.add("canvas#1", *doc, &registry, &bridge);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.iterations() >= 1; }));
+  CHECK(host.published_sequence("canvas#1") == 0); // the placeholder composites no coverage yet
+
+  REQUIRE(source.fire_all() == 1);
+  // Keep the loop stepping so a frame OBSERVES the landed arrival — that observation is the
+  // nudge. `step()` itself installs nothing (it is not the writer thread and, since v0.3.0,
+  // refuses to publish from there); it reports, and the writer installs.
+  //
+  // Poll the HOST's install counter, NOT `external_loads_ready()`: `settle_external_loads` takes
+  // the whole ready queue as its FIRST act and only returns the installed count once the arrival
+  // has been parsed and its child model built, so `external_loads_ready() == 0` is observable
+  // strictly BEFORE `settles_installed` is bumped. Waiting on the drain and then reading the
+  // counter races against the settle's own body — a window the asan lane loses.
+  REQUIRE(pump_until([&] {
+    host.poke();
+    return host.settles_installed() >= 1;
+  }));
+  // With no edits in this case, arbc's own auto-settler at `Document::begin()` never runs and the
+  // writer has no idle poll bound, so the nudge is the ONLY path that could have installed it.
+  CHECK(host.settles_installed() == 1);
+  CHECK(doc->external_loads_ready() == 0); // any-thread, lock-free: the queue drained
+
+  // ...and the install composites: the child replaces the placeholder on a later frame.
+  REQUIRE(pump_until([&] {
+    host.poke();
+    return host.published_sequence("canvas#1") >= 1;
+  }));
+
+  // EXACTLY ONE install, summed across every path that could have performed it: the host's async
+  // nudge (`settles_installed`) and arbc's own auto-settler at the next `Document::begin()`
+  // (`external_loads_auto_settled`). All three settle paths are idempotent — the settle drains the
+  // ready queue and re-entry is suppressed by arbc's InstallScope — so whichever got there first,
+  // the others installed nothing. That is the "without double-settling" half of D-writer_thread-10,
+  // and it is why none of the three has to be load-bearing alone.
+  std::uint64_t s = 0;
+  Srgb8Image frame;
+  REQUIRE(host.consume("canvas#1", s, frame));
+  CHECK(ace::render::frame_has_content(frame));
+
+  host.stop();
+  handle->join();
+  const LoadCounters counters = load_counters(writer, *doc);
+  CHECK(counters.pending == 0);
+  CHECK(host.settles_installed() + counters.auto_settled == 1);
+}
+
+// --- editor.canvas.writer_thread: the identity tripwire -------------------------------------
+//
+// The v0.3.0 predicate asserted directly (`Document::on_writer_thread()`), which is what makes
+// this design testable rather than commented: ONE identity, it is the writer thread, and neither
+// the UI thread nor the render thread is it.
+
+TEST_CASE("canvas_host: on_writer_thread() is true inside every posted closure and false on the "
+          "UI and render threads (D-writer_thread-1)") {
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  // The identity is bound by the load/build above, so it is already NOT this thread.
+  CHECK_FALSE(probe.document->on_writer_thread());
+  CHECK_FALSE(writer.on_writer_thread());
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  // The render thread asks the SAME predicate from inside its own drive loop — this is the thread
+  // that, before this leaf, installed the settler and published from `step()`, i.e. the second
+  // identity the whole task exists to remove.
+  std::atomic<bool> stop_render{false};
+  std::atomic<int> render_polls{0};
+  std::atomic<int> render_was_writer{0};
+  std::unique_ptr<ace::platform::JoinHandle> handle = threads.spawn([&] {
+    while (!stop_render.load()) {
+      if (probe.document->on_writer_thread()) {
+        ++render_was_writer;
+      }
+      ++render_polls;
+      host.drive_once();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // Every posted edit runs on the ONE identity — asked of libarbc, not of our own bookkeeping.
+  std::atomic<int> on_writer{0};
+  for (int i = 0; i < 8; ++i) {
+    apply_edit(writer, host, [&] {
+      if (probe.document->on_writer_thread() && writer.on_writer_thread()) {
+        ++on_writer;
+      }
+      damage(*probe.document, probe.composition);
+    });
+  }
+  CHECK(on_writer.load() == 8);
+
+  stop_render.store(true);
+  handle->join();
+  CHECK(render_polls.load() > 0);
+  CHECK(render_was_writer.load() == 0);            // the render thread is NOT the writer
+  CHECK_FALSE(probe.document->on_writer_thread()); // and neither is the UI thread
+
+  host.stop();
+}
+
 // --- editor.cameras.look_through: a look-through canvas is data-race-clean ---------------
 //
 // The threading acceptance (docs §9 ASan/TSan lane): two entries over one document, canvas#2
@@ -837,18 +1118,31 @@ TEST_CASE("canvas_host: the empty binding leaves a deferred external nested chil
 
 TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against the render read "
           "(look_through TSan anchor)") {
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
   ace::scene::register_camera_kind(registry);
 
-  auto doc = build_raster_doc(); // a bounded raster square over a solid bg (a root composition)
-  // Seed the shot in the root composition on THIS (writer) thread, before the render loop.
-  const arbc::ObjectId cam_id = ace::scene::add_camera(
-      *doc, registry, "hero", ace::scene::Resolution{32, 32}, arbc::Affine::translation(8.0, 8.0));
+  auto doc = build_on_writer(writer, [] {
+    return build_raster_doc();
+  }); // a bounded raster square over a solid bg (a root composition)
+  // Seed the shot in the root composition ON the writer thread, before the render loop —
+  // `add_camera` transacts, and every transaction belongs to the one identity (D-writer_thread-1).
+  arbc::ObjectId cam_id;
+  writer.submit_sync([&] {
+    cam_id = ace::scene::add_camera(*doc, registry, "hero", ace::scene::Resolution{32, 32},
+                                    arbc::Affine::translation(8.0, 8.0));
+  });
   REQUIRE(cam_id.valid());
 
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -865,7 +1159,7 @@ TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against 
   for (int i = 0; i < k_iters; ++i) {
     // A cameras.manip-style frame edit through apply_edit (on the writer thread; the render
     // read is lock-free via COW): nudge the shot's binding-layer transform.
-    host.apply_edit([&] {
+    apply_edit(writer, host, [&] {
       const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
       if (!cams.empty()) {
         doc->set_layer_transform(cams.front().layer, arbc::Affine::translation(
@@ -907,17 +1201,27 @@ TEST_CASE("canvas_host: a look-through canvas streams frame edits clean against 
 // v0.2.0 COW content bindings (#10/#11; D-manip / Constraint 5). Residual Mesa leaks via lsan.supp.
 TEST_CASE("canvas_host: streamed manip frame + resolution edits stay clean against the render "
           "read (cameras.manip TSan anchor)") {
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
   ace::scene::register_camera_kind(registry);
 
-  auto doc = build_raster_doc();
-  const arbc::ObjectId cam_id = ace::scene::add_camera(
-      *doc, registry, "hero", ace::scene::Resolution{32, 32}, arbc::Affine::translation(8.0, 8.0));
+  auto doc = build_on_writer(writer, [] { return build_raster_doc(); });
+  arbc::ObjectId cam_id;
+  writer.submit_sync([&] {
+    cam_id = ace::scene::add_camera(*doc, registry, "hero", ace::scene::Resolution{32, 32},
+                                    arbc::Affine::translation(8.0, 8.0));
+  });
   REQUIRE(cam_id.valid());
 
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -934,7 +1238,7 @@ TEST_CASE("canvas_host: streamed manip frame + resolution edits stay clean again
     // Two manip channels through apply_edit (on the writer thread; render read lock-free via COW):
     // a frame re-crop (interact math -> set_layer_transform) AND a resolution edit
     // (set_camera_resolution). The re-crop math runs on the UI thread over the pin() frame.
-    host.apply_edit([&] {
+    apply_edit(writer, host, [&] {
       const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*doc);
       if (cams.empty()) {
         return;
@@ -998,6 +1302,13 @@ TEST_CASE("canvas_host: a ref-free document renders byte-identically through the
 }
 
 TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against the render read") {
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
   // editor.cells.model Acceptance (Threading): the SHIPPED insert path — a registry
   // factory call, `Document::add_content` (which binds a Content vtable and
   // self-commits), then one transact adding + attaching the placing layer — streamed
@@ -1006,11 +1317,11 @@ TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against th
   // so it widens the overlap window the D-edit_render_sync-3 anchor above opens. No
   // new lock and no new thread: A4.1 writer-identity holds because every edit runs on
   // the caller, and the render walk reads the COW-published bindings lock-free.
-  ProbeDocument probe = build_probe_document();
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -1024,7 +1335,7 @@ TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against th
 
   constexpr int k_inserts = 24;
   for (int i = 0; i < k_inserts; ++i) {
-    host.apply_edit([&] {
+    apply_edit(writer, host, [&] {
       // Alternate an opaque solid (a full-frame repaint) with a small raster (a tile
       // pyramid mint) so both the cheap and the allocating insert overlap the read.
       const bool solid = (i % 2) == 0;
@@ -1048,6 +1359,13 @@ TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against th
 }
 
 TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live render walk") {
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
   // editor.cells.selection Acceptance (Threading): selection mutates NOTHING, so this leaf adds
   // no writer path — but `interact::pick_targets` now calls a `Content` VIRTUAL
   // (`arbc::Content::bounds()`, via `scene::cells`' pinned walk, D-selection-11) on the UI
@@ -1057,12 +1375,12 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
   // (the D-edit_render_sync-3 anchor) while cell inserts stream through `apply_edit`. No new
   // lock and no new thread; a TSan/ASan report here is the tripwire the refinement's parking-lot
   // item names (the fix would be a libarbc-side contract statement, not an editor-side lock).
-  ProbeDocument probe = build_probe_document();
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
   ace::scene::register_camera_kind(registry);
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -1071,7 +1389,7 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
   REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
 
   // A camera in the mix so the merge half of the adapter (cells + cameras) is walked too.
-  host.apply_edit([&] {
+  apply_edit(writer, host, [&] {
     REQUIRE(ace::scene::add_camera(*probe.document, registry, "Hero",
                                    ace::scene::Resolution{16, 16},
                                    arbc::Affine::translation(4.0, 4.0))
@@ -1081,7 +1399,7 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
   constexpr int k_inserts = 24;
   std::size_t last_targets = 0;
   for (int i = 0; i < k_inserts; ++i) {
-    host.apply_edit([&] {
+    apply_edit(writer, host, [&] {
       const bool solid = (i % 2) == 0;
       const auto added = ace::scene::add_cell(
           *probe.document, registry, solid ? "org.arbc.solid" : "org.arbc.raster",
@@ -1114,6 +1432,13 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
 
 TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a camera WRITE in one "
           "apply_edit — runs clean against the live render walk") {
+  // The document's ONE writer identity, bound the way the shipped bootstrap binds it
+  // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
+  // ON it (the first write binds the identity for life), and it is stopped only after the host
+  // — whose entry/router teardown posts WRITER-THREAD-ONLY work — has been destroyed. The
+  // declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
   // editor.cameras.frame_selection Acceptance (Threading): a genuinely NEW threading surface.
   // Every prior edit performed only a WRITE inside `apply_edit`; the mint performs a full
   // document READ WALK there too — `interact::pick_targets` resolves every Content and calls
@@ -1123,12 +1448,12 @@ TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a c
   // come from the generation the transaction lands on. Driven on the REAL interactive pool
   // (the D-edit_render_sync-3 anchor) while the render thread walks the same document over the
   // lock-free `pin()` seam. No new lock, no new thread, no new suppression.
-  ProbeDocument probe = build_probe_document();
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
   ace::scene::register_camera_kind(registry);
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
-  ace::platform::NativeThreads threads;
+  host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
 
@@ -1140,7 +1465,7 @@ TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a c
   std::size_t minted = 0;
   for (int i = 0; i < k_mints; ++i) {
     // A bounded cell to frame, so the union is never empty and the walk keeps growing.
-    host.apply_edit([&] {
+    apply_edit(writer, host, [&] {
       const auto added = ace::scene::add_cell(
           *probe.document, registry, "org.arbc.raster", "24x24",
           arbc::Affine::translation(static_cast<double>(i) * 3.0, static_cast<double>(i) * 3.0));
@@ -1148,7 +1473,7 @@ TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a c
     });
     // The SHIPPED mint, whole, inside ONE apply_edit: read the stack, union the placed
     // extents, derive the framing, write the camera.
-    host.apply_edit([&] {
+    apply_edit(writer, host, [&] {
       const std::vector<ace::interact::PickTarget> targets =
           ace::interact::pick_targets(*probe.document, registry);
       const std::vector<arbc::ObjectId> ids = ace::interact::all_ids(targets);
@@ -1172,4 +1497,96 @@ TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a c
   // pixels, so the render walk saw them without ever compositing one).
   CHECK(minted == static_cast<std::size_t>(k_mints));
   CHECK(ace::scene::cameras(*probe.document).size() == static_cast<std::size_t>(k_mints));
+}
+
+// --- editor.canvas.writer_thread: the TSan acceptance anchor --------------------------------
+//
+// The escalated concurrency target this leaf owns, and the successor to the streamed-edit anchor
+// above (which proved the lock-free COW read UNDER the writer-priority lease — a lease this leaf
+// deletes rather than renames). Four things overlap in wall-clock time on the real interactive
+// pool: streamed UI edits posted to the writer, a live off-thread render loop, a canvas added and
+// removed MID-STREAM (so the per-entry HostViewport ctor/dtor — the WRITER-THREAD-ONLY settler
+// slot and the DamageRouter registrant list — are posted while edits are in flight), and a
+// deferred external child arriving from a thread that is neither. No lock stands between any of
+// them; what makes it sound is that every WRITE has ONE identity.
+//
+// Regression-guard note (NOT a tautology): keep the writer thread but leave the HostViewport
+// construction on the render thread and this is a live race on the document's settler slot and
+// the router's registrant vector, which the hermetic gcc-tsan lane reports.
+TEST_CASE("canvas_host: streamed edits + a live render loop + a canvas added/removed mid-stream + "
+          "a deferred external arrival run clean (writer_thread TSan anchor)") {
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+
+  DeferringAssetSource source;
+  arbc::KindBridge bridge; // the ONE document-scoped, writer-owned bridge (D-writer_thread-9)
+  std::unique_ptr<arbc::Document> doc =
+      build_on_writer(writer, [&] { return load_pending_nested_raw(source, bridge, registry); });
+  REQUIRE(doc != nullptr);
+  REQUIRE(load_counters(writer, *doc).pending == 1);
+  // The parent composition libarbc's own lowest-id-wins root rule picks — the same anchor the
+  // compositor walks from.
+  arbc::ObjectId composition;
+  {
+    const arbc::CompositionRecord* rec = nullptr;
+    REQUIRE(doc->pin()->find_first_composition(composition, rec));
+  }
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  // The writer's own idle poll, bound exactly as `run_editor` binds it — so the arrival has a
+  // consumer even in the windows where no frame is being stepped at all.
+  std::atomic<int> idle_installs{0};
+  writer.set_idle_work([&] {
+    if (doc->external_loads_ready() > 0) {
+      idle_installs += static_cast<int>(arbc::settle_external_loads(*doc, bridge, registry));
+      host.poke();
+    }
+    return doc->pending_external_loads() > 0;
+  });
+
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+  host.add("canvas#1", *doc, &registry, &bridge);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.iterations() >= 1; }));
+
+  constexpr int k_edits = 48;
+  for (int i = 0; i < k_edits; ++i) {
+    // A canvas joins and leaves in the middle of the burst: its viewport is constructed and
+    // destroyed ON the writer thread while these edits are being posted to that same thread.
+    if (i == 8) {
+      host.add("canvas#2", *doc, &registry, &bridge);
+      host.request_resize("canvas#2", k_w, k_h);
+    }
+    if (i == 16) {
+      REQUIRE(source.fire_all() == 1); // the bytes land on the test's thread — a third one
+    }
+    if (i == 24) {
+      host.remove("canvas#2");
+    }
+    apply_edit(writer, host, [&] { damage(*doc, composition); });
+  }
+
+  // `fire_all` delivers synchronously, so `external_loads_ready()` is 1 on return and drops back
+  // to 0 exactly when SOME path installs it. It is the one counter here that is any-thread and
+  // lock-free, which is why the poll reads it and not `pending_external_loads()`.
+  REQUIRE(pump_until([&] { return doc->external_loads_ready() == 0; }));
+  REQUIRE(pump_until([&] { return host.live_count() == 1; }));
+  // The arrival was installed, and exactly once, by whichever of the three idempotent paths got
+  // there first (D-writer_thread-10). NOTE the composite itself is asserted by the deterministic
+  // inline cases above, not here: the real interactive pool composites a deferred-external nested
+  // child blank even when the document is pre-settled — a pre-existing gap this leaf surfaces but
+  // does not own (see the `editor.canvas.nested_real_pool` follow-up).
+  host.stop();
+  handle->join();
+  writer.set_idle_work({}); // disarm before the host the closure pokes goes out of scope
+  const LoadCounters counters = load_counters(writer, *doc);
+  CHECK(counters.pending == 0);
+  CHECK(static_cast<std::uint64_t>(idle_installs.load()) + host.settles_installed() +
+            counters.auto_settled ==
+        1);
 }

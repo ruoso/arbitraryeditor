@@ -58,6 +58,8 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
+
 using ace::app::CameraInspector;
 using ace::app::CanvasView;
 using ace::app::Shell;
@@ -175,14 +177,20 @@ ace::scene::Resolution hero_res(AppState& state, arbc::ObjectId id) {
 TEST_CASE("camera_manip e2e: gizmo re-crop, resolution inspector, modifier gating, live preview") {
   ScratchDir scratch("main");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "cm");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  seed_cells(state);
-
-  const arbc::ObjectId hero = ace::scene::add_camera(
-      state.document(), state.registry(), "Hero", ace::scene::Resolution{k_hero_res, k_hero_res},
-      arbc::Affine::translation(k_hero_at, k_hero_at));
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "cm");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  arbc::ObjectId hero;
+  session.on_writer([&] {
+    seed_cells(state);
+    hero = ace::scene::add_camera(state.document(), state.registry(), "Hero",
+                                  ace::scene::Resolution{k_hero_res, k_hero_res},
+                                  arbc::Affine::translation(k_hero_at, k_hero_at));
+  });
   REQUIRE(hero.valid());
   const arbc::ObjectId hero_layer = ace::scene::cameras(state.document()).front().layer;
 
@@ -193,7 +201,7 @@ TEST_CASE("camera_manip e2e: gizmo re-crop, resolution inspector, modifier gatin
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   CameraInspector inspector(state, canvas);
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -420,6 +428,9 @@ TEST_CASE("camera_manip e2e: gizmo re-crop, resolution inspector, modifier gatin
         cam.frame, cam.resolution.width, cam.resolution.height, 128, 128);
     REQUIRE(lt0.out_w > 0);
     ace::render::CanvasHost host(arbc::WorkerPoolConfig{}, std::chrono::hours(1));
+    // Even this deterministic single-threaded host posts its WRITER-THREAD-ONLY slots (the
+    // per-document DamageRouter, each HostViewport ctor/dtor) to the document's one identity.
+    host.set_writer(&session.writer());
     host.add("look", state.document(), &state.registry());
     host.request_resize("look", lt0.out_w, lt0.out_h);
     host.request_camera("look", lt0.camera);
@@ -435,7 +446,9 @@ TEST_CASE("camera_manip e2e: gizmo re-crop, resolution inspector, modifier gatin
         cam.frame, cam.resolution.width, cam.resolution.height,
         ace::interact::FrameHandle::CornerBottomRight, arbc::Vec2{320.0, 320.0});
     CHECK(!(recropped == cam.frame));
-    state.document().set_layer_transform(cam.layer, recropped);
+    // A structural write, so it goes to the ONE writer identity like every other — the inline
+    // host below is single-threaded, but "single-threaded" is not "the writer" (D-writer_thread-1).
+    session.on_writer([&] { state.document().set_layer_transform(cam.layer, recropped); });
     const ace::interact::LookThrough lt1 = ace::interact::look_through(
         recropped, cam.resolution.width, cam.resolution.height, 128, 128);
     host.request_resize("look", lt1.out_w, lt1.out_h);

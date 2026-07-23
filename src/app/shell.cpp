@@ -11,7 +11,11 @@
 #include <ace/gl/gl.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
+#include <ace/platform/threads.hpp>
 #include <ace/views/views.hpp>
+#include <ace/writer/writer_thread.hpp>
+
+#include <arbc/runtime/document_serialize.hpp> // settle_external_loads (the writer's idle work)
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -22,6 +26,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -194,16 +199,32 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   ace::platform::NativeFileSystem filesystem;
   const std::filesystem::path project_dir =
       opts.project_dir.empty() ? scratch_project_dir() : opts.project_dir;
-  auto session = ace::commands::open_or_create_app_state(filesystem, project_dir);
-  if (!session) {
+
+  // The document's ONE writer thread, started BEFORE the document exists and stopped after the
+  // last canvas is gone but before the document is released (D-writer_thread-1/6). The ordering
+  // is the whole point: `arbc::load_document` (and a fresh `create_project`'s first checkpoint)
+  // is the FIRST write, and the first write BINDS the writer identity for the document's
+  // lifetime — so opening on the UI thread and then posting edits would give the document two
+  // identities, i.e. exactly the bug this thread exists to remove, relocated. Declared before
+  // `session` so it also outlives it if an early return skips the explicit `stop()`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  std::optional<ace::platform::Result<ace::commands::AppState>> session;
+  writer.submit_sync(
+      [&] { session.emplace(ace::commands::open_or_create_app_state(filesystem, project_dir)); });
+  if (!session || !session->has_value()) {
     std::fprintf(stderr, "shell: could not open project '%s': %s\n", project_dir.string().c_str(),
-                 session.error().message().c_str());
+                 session ? session->error().message().c_str() : "writer thread refused the open");
+    writer.stop();
+    session.reset();
     shell.shutdown();
     return 2;
   }
-  ace::commands::AppState& app_state = *session;
+  ace::commands::AppState& app_state = **session;
   if (on_ready) {
-    on_ready(app_state);
+    // The hook may seed the document (the e2e fixtures do), which is a write: post it, so the
+    // seeding runs on the identity the open just bound.
+    writer.submit_sync([&] { on_ready(app_state); });
   }
   // The Canvas subsystem is N LIVE interactive renders of the one owned Document over
   // ONE shared WorkerPool + ONE render thread (editor.canvas.multi_canvas; A5 "N
@@ -215,120 +236,170 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
   // layer, not in the shell. The body draws by its per-pane view_id, so every canvas#N
   // the dock mints renders independently. Every other view type draws a placeholder until
   // its downstream panel leaf lands (D-view-registry-5).
-  CanvasView canvas(app_state);
-  ace::views::register_view_body(
-      ace::dockmodel::ViewType::Canvas, [&canvas](std::string_view view_id) {
-        // The dockspace owns the canvas#N window; render at the
-        // pane's pixel size (Constraint 7). A degenerate pane
-        // draws nothing.
-        const ImVec2 avail = ImGui::GetContentRegionAvail();
-        canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
-      });
-  // The History view IS the undo journal made visible and click-navigable (D18
-  // "History is a view"; editor.panels.history). It reads the one owned session's
-  // journal and loops the shipped undo/redo verbs, so the body captures the same
-  // AppState& the shell owns (D-history-3). Cleared on exit like the Canvas body —
-  // the register_view_body seam is process-global.
-  ace::views::register_view_body(
-      ace::dockmodel::ViewType::History,
-      [&app_state](std::string_view view_id) { ace::views::draw_history(app_state, view_id); });
-  // The Inspector view body hosts the first-cut camera resolution editor (editor.cameras.manip,
-  // D-manip-6): W×H + aspect presets driving set_camera_resolution through the same apply_edit
-  // seam the History/undo edits ride. It captures the one AppState& and the CanvasView (for the
-  // edit runner) and is cleared on exit like the other bodies (the seam is process-global).
-  ace::app::CameraInspector camera_inspector(app_state, canvas);
-  ace::views::register_view_body(
-      ace::dockmodel::ViewType::Inspector,
-      [&camera_inspector](std::string_view view_id) { camera_inspector.draw(view_id); });
-  // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
-  // it renders each open view by its instance id and syncs the tab ✕ back into
-  // the authoritative DockLayout.
-  ace::dock::Dockspace dockspace;
-  // The saved-workspace preset store (editor.dock.workspaces): persisted through
-  // the native FileSystem seam (the same one the session bootstrap used) under
-  // the per-user prefs root. Wired into the dockspace so the rail's switcher can
-  // list/apply/save/delete presets. Both outlive the draw loop below; no preset
-  // file is touched until a user saves.
-  ace::dockmodel::WorkspaceStore workspace_store(workspace_prefs_root(), filesystem);
-  dockspace.set_workspace_store(&workspace_store);
-  // The project-entry gateway (A12/D22): the rail's New / Open / Recent seam. A
-  // test may inject a fake through ShellOptions; otherwise wire the L4 SDL-backed
-  // AppProjectGateway (the sole native-folder-dialog holder) over the same
-  // FileSystem, a ProcessLauncher, and the recent-projects prefs store (a sibling
-  // of the workspaces prefs dir). Every action spawns a sibling editor — the one
-  // owned Document is never swapped (D19/A7). All outlive the draw loop below.
-  ace::platform::NativeProcessLauncher launcher;
-  std::unique_ptr<ace::dockmodel::RecentProjects> recent_projects;
-  std::unique_ptr<ace::app::SdlFolderDialog> folder_dialog;
-  std::unique_ptr<ace::app::AppProjectGateway> app_gateway;
-  ace::dock::ProjectGateway* project_gateway = opts.project_gateway;
-  if (project_gateway == nullptr) {
-    std::filesystem::path executable;
-    if (const platform::Result<std::filesystem::path> exe =
-            ace::platform::current_executable_path()) {
-      executable = *exe;
+  //
+  // SCOPED so the whole canvas subsystem — the render thread, the host, its per-document
+  // DamageRouter and every HostViewport — is fully destroyed BEFORE `writer.stop()` below. All of
+  // that teardown posts WRITER-THREAD-ONLY work (D-writer_thread-8), and the writer must still be
+  // running to accept it: "stop after the last canvas entry is gone and before the document is
+  // released" (D-writer_thread-6) is an ordering contract, and this brace is what enforces it.
+  {
+    CanvasView canvas(app_state, writer);
+    // The writer consumes the deferred external-arrival settle PROACTIVELY; it does not wait to
+    // be told (D-writer_thread-10). The work `HostViewport::step()` declines to do — it will not
+    // publish off the writer thread — is the writer's own work, so the writer polls for it
+    // whenever its queue drains, before waiting. `external_loads_ready()` is an any-thread,
+    // lock-free relaxed load, so a document with no external references costs exactly that per
+    // drain; the return value keeps the poll honest — armed (a fetch still in flight) waits
+    // boundedly and re-polls, disarmed waits indefinitely and costs ZERO timer wakeups. An
+    // arrival on a completely idle app — nobody editing, nothing rendering — is therefore
+    // consumed with no submission from anywhere. The other two paths to the same settle (the
+    // render thread's per-frame nudge, arbc's own auto-settler at the next `begin()`) are
+    // idempotent with this one and none is load-bearing alone; that is the point.
+    writer.set_idle_work([&app_state, &canvas] {
+      arbc::Document& doc = app_state.document();
+      if (doc.external_loads_ready() > 0) {
+        arbc::settle_external_loads(doc, app_state.kind_bridge(), app_state.registry());
+        canvas.poke(); // the install publishes a revision and flushes damage — re-render it
+      }
+      return doc.pending_external_loads() > 0;
+    });
+    ace::views::register_view_body(
+        ace::dockmodel::ViewType::Canvas, [&canvas](std::string_view view_id) {
+          // The dockspace owns the canvas#N window; render at the
+          // pane's pixel size (Constraint 7). A degenerate pane
+          // draws nothing.
+          const ImVec2 avail = ImGui::GetContentRegionAvail();
+          canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
+        });
+    // The History view IS the undo journal made visible and click-navigable (D18
+    // "History is a view"; editor.panels.history). It reads the one owned session's
+    // journal and loops the shipped undo/redo verbs, so the body captures the same
+    // AppState& the shell owns (D-history-3). Cleared on exit like the Canvas body —
+    // the register_view_body seam is process-global.
+    ace::views::register_view_body(
+        ace::dockmodel::ViewType::History,
+        [&app_state](std::string_view view_id) { ace::views::draw_history(app_state, view_id); });
+    // The Inspector view body hosts the first-cut camera resolution editor (editor.cameras.manip,
+    // D-manip-6): W×H + aspect presets driving set_camera_resolution through the same apply_edit
+    // seam the History/undo edits ride. It captures the one AppState& and the CanvasView (for the
+    // edit runner) and is cleared on exit like the other bodies (the seam is process-global).
+    ace::app::CameraInspector camera_inspector(app_state, canvas);
+    ace::views::register_view_body(
+        ace::dockmodel::ViewType::Inspector,
+        [&camera_inspector](std::string_view view_id) { camera_inspector.draw(view_id); });
+    // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
+    // it renders each open view by its instance id and syncs the tab ✕ back into
+    // the authoritative DockLayout.
+    ace::dock::Dockspace dockspace;
+    // The saved-workspace preset store (editor.dock.workspaces): persisted through
+    // the native FileSystem seam (the same one the session bootstrap used) under
+    // the per-user prefs root. Wired into the dockspace so the rail's switcher can
+    // list/apply/save/delete presets. Both outlive the draw loop below; no preset
+    // file is touched until a user saves.
+    ace::dockmodel::WorkspaceStore workspace_store(workspace_prefs_root(), filesystem);
+    dockspace.set_workspace_store(&workspace_store);
+    // The project-entry gateway (A12/D22): the rail's New / Open / Recent seam. A
+    // test may inject a fake through ShellOptions; otherwise wire the L4 SDL-backed
+    // AppProjectGateway (the sole native-folder-dialog holder) over the same
+    // FileSystem, a ProcessLauncher, and the recent-projects prefs store (a sibling
+    // of the workspaces prefs dir). Every action spawns a sibling editor — the one
+    // owned Document is never swapped (D19/A7). All outlive the draw loop below.
+    ace::platform::NativeProcessLauncher launcher;
+    std::unique_ptr<ace::dockmodel::RecentProjects> recent_projects;
+    std::unique_ptr<ace::app::SdlFolderDialog> folder_dialog;
+    std::unique_ptr<ace::app::AppProjectGateway> app_gateway;
+    ace::dock::ProjectGateway* project_gateway = opts.project_gateway;
+    if (project_gateway == nullptr) {
+      std::filesystem::path executable;
+      if (const platform::Result<std::filesystem::path> exe =
+              ace::platform::current_executable_path()) {
+        executable = *exe;
+      }
+      recent_projects = std::make_unique<ace::dockmodel::RecentProjects>(
+          workspace_prefs_root().parent_path(), filesystem);
+      folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
+      app_gateway = std::make_unique<ace::app::AppProjectGateway>(
+          *recent_projects, filesystem, *folder_dialog, launcher, executable, app_state);
+      // Edit runner (editor.canvas.writer_thread, D-writer_thread-11): the gateway hands each
+      // Document mutation to this runner, which POSTS it to the document's one writer thread,
+      // blocks until it has run, and then wakes the off-thread canvas to re-render the damage.
+      // The render read takes no lock and needs none — the binding table publishes copy-on-write
+      // (arbc#10/#11), the DamageAccumulator carries its own mutex, and `step()` declines to
+      // publish off the writer thread (v0.3.0). What the posting buys is IDENTITY: the whole
+      // lock-free growth path is written against one mutator, and a mutex re-covers accesses, not
+      // identity (libarbc doc 15 § Thread rules). This supersedes single_writer's run-on-the-
+      // caller seam, which was one identity only by coincidence. The gateway outlives the draw
+      // loop alongside `canvas`, so the capture is safe.
+      app_gateway->set_edit_runner(
+          [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
+      // The NON-EDIT writer post (D-writer_thread-7): save's `capture_snapshot` copies the
+      // writer-owned content side-map and unknown-field stash, so it must run on the writer — but
+      // it publishes no revision, so it takes the bare post rather than the edit runner (no
+      // History republish, no canvas wake). The serialize + atomic publish stay off the writer.
+      app_gateway->set_writer_post(
+          [&canvas](const std::function<void()>& work) { canvas.on_writer(work); });
+      // The writer-turn epilogue (A18 / D-history_published_reads-3): republish the History
+      // panel's entry-name snapshot after EVERY edit that passes through apply_edit, ON the
+      // writer thread and inside the same posted closure — so it reads the writer-owned journal
+      // structure the edit just changed. The `commands` verbs already refresh themselves, but
+      // they are not the only writers — the camera inspector and the frame manipulator commit
+      // bare `scene::` transactions inside raw apply_edit closures that no verb ever observes,
+      // and without this hook the panel would go stale after each of them. Same lifetime argument
+      // as the edit runner above: the canvas is stopped and joined before `app_state` is
+      // destroyed.
+      canvas.set_post_edit_hook([&app_state] { ace::commands::publish_history(app_state); });
+      // The ONE framing source both framing-derived verbs read (D-mint_from_focused_canvas-4):
+      // `insert_cell`'s provisional placement (editor.cells.model, Constraint 7) and
+      // `new_shot_from_view`'s mint (D23) both go through this provider, so binding it to the
+      // FOCUSED canvas moves both at once — an inserted cell lands where the canvas the user is
+      // working in is looking, and a mint promotes that same pane rather than canvas#1. Read by
+      // value at verb time. Same lifetime argument as the edit runner above.
+      app_gateway->set_view_framing([&canvas] { return canvas.focused_framing(); });
+      project_gateway = app_gateway.get();
     }
-    recent_projects = std::make_unique<ace::dockmodel::RecentProjects>(
-        workspace_prefs_root().parent_path(), filesystem);
-    folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
-    app_gateway = std::make_unique<ace::app::AppProjectGateway>(
-        *recent_projects, filesystem, *folder_dialog, launcher, executable, app_state);
-    // Edit runner (editor.canvas.single_writer): the gateway hands each undo/redo Document
-    // mutation to this runner, which runs it via CanvasHost::apply_edit on the UI/writer
-    // thread, then wakes the off-thread canvas to re-render the damage. The render read takes
-    // no lock — arbc v0.2.0 publishes content bindings copy-on-write (#10/#11), so the render
-    // walk reads a stable snapshot while the edit rebinds. This replaces frame_sync's
-    // fire-after poke, which mutated the Document before the wake (the v0.1.0 TSan race).
-    // The gateway outlives the draw loop alongside `canvas`, so the capture is safe.
-    app_gateway->set_edit_runner(
-        [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
-    // The writer-turn epilogue (A18 / D-history_published_reads-3): republish the History
-    // panel's entry-name snapshot after EVERY edit that passes through apply_edit. The
-    // `commands` verbs already refresh themselves, but they are not the only writers — the
-    // camera inspector and the frame manipulator commit bare `scene::` transactions inside
-    // raw apply_edit closures that no verb ever observes, and without this hook the panel
-    // would go stale after each of them. Same lifetime argument as the edit runner above:
-    // the canvas is stopped and joined before `app_state` is destroyed.
-    canvas.set_post_edit_hook([&app_state] { ace::commands::publish_history(app_state); });
-    // The ONE framing source both framing-derived verbs read (D-mint_from_focused_canvas-4):
-    // `insert_cell`'s provisional placement (editor.cells.model, Constraint 7) and
-    // `new_shot_from_view`'s mint (D23) both go through this provider, so binding it to the
-    // FOCUSED canvas moves both at once — an inserted cell lands where the canvas the user is
-    // working in is looking, and a mint promotes that same pane rather than canvas#1. Read by
-    // value at verb time. Same lifetime argument as the edit runner above.
-    app_gateway->set_view_framing([&canvas] { return canvas.focused_framing(); });
-    project_gateway = app_gateway.get();
-  }
-  dockspace.set_project_gateway(project_gateway);
-  // After the dock draws every open view body (each canvas#N pane lazily registering its
-  // host entry), reconcile the canvas subsystem against the authoritative layout: a
-  // canvas#N that was closed leaves DockLayout::view_ids(), so its host entry + GL texture
-  // are freed (D-multi_canvas-5 / Constraint 7). Runs on the UI thread with a live context.
-  shell.set_draw_content([&dockspace, &canvas]() {
-    dockspace.draw();
-    canvas.reconcile(dockspace.layout().view_ids());
-  });
-  while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
-    shell.new_frame();
-    shell.draw_ui();
-    shell.render();
-  }
-  // On-close GC (§8 "runs `gc_project_directory` … on close", D-gc-3 / Constraint 6):
-  // a SILENT, best-effort sweep of the on-disk `assets/` orphans before teardown. It
-  // runs while the Document's `HousekeepingThread` may still be checkpointing
-  // `workspace/` — a DISJOINT directory, and the sweep roots on the on-disk canonical
-  // and reads no live Document state, so there is no shared mutable state to race. Its
-  // result is ignored: a mandated-automatic maintenance op must never nag or block
-  // shutdown (no confirm modal here, unlike the rail). No-ops when no `project.arbc`
-  // has been published yet (the no-canonical guard).
-  (void)ace::commands::gc_project(app_state, /*dry_run=*/false);
+    dockspace.set_project_gateway(project_gateway);
+    // After the dock draws every open view body (each canvas#N pane lazily registering its
+    // host entry), reconcile the canvas subsystem against the authoritative layout: a
+    // canvas#N that was closed leaves DockLayout::view_ids(), so its host entry + GL texture
+    // are freed (D-multi_canvas-5 / Constraint 7). Runs on the UI thread with a live context.
+    shell.set_draw_content([&dockspace, &canvas]() {
+      dockspace.draw();
+      canvas.reconcile(dockspace.layout().view_ids());
+    });
+    while (should_continue_loop(shell.frames_rendered(), opts.max_frames, shell.quit_requested())) {
+      shell.new_frame();
+      shell.draw_ui();
+      shell.render();
+    }
+    // On-close GC (§8 "runs `gc_project_directory` … on close", D-gc-3 / Constraint 6):
+    // a SILENT, best-effort sweep of the on-disk `assets/` orphans before teardown. It
+    // runs while the Document's `HousekeepingThread` may still be checkpointing
+    // `workspace/` — a DISJOINT directory, and the sweep roots on the on-disk canonical
+    // and reads no live Document state, so there is no shared mutable state to race. Its
+    // result is ignored: a mandated-automatic maintenance op must never nag or block
+    // shutdown (no confirm modal here, unlike the rail). No-ops when no `project.arbc`
+    // has been published yet (the no-canonical guard).
+    (void)ace::commands::gc_project(app_state, /*dry_run=*/false);
 
-  // Clear the body before the CanvasView it captures is destroyed — the seam is
-  // process-global, so a later shell run must not call into a dangling capture.
-  ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
-  ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
-  ace::views::register_view_body(ace::dockmodel::ViewType::Inspector, {});
-  canvas.destroy();
+    // Clear the body before the CanvasView it captures is destroyed — the seam is
+    // process-global, so a later shell run must not call into a dangling capture.
+    ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
+    ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
+    ace::views::register_view_body(ace::dockmodel::ViewType::Inspector, {});
+    // Disarm the writer's idle poll BEFORE the canvas it pokes goes out of scope, then tear the
+    // canvas down. `destroy()` stops and joins the render thread; the `CanvasView` destructor at
+    // the closing brace then destroys the host, whose entries and per-document DamageRouter post
+    // their WRITER-THREAD-ONLY teardown — which is why `writer.stop()` is below this brace and
+    // not above it (D-writer_thread-6).
+    writer.set_idle_work({});
+    canvas.destroy();
+  }
+  // The last canvas is gone: drain and join the writer, THEN release the document. A queued save
+  // or checkpoint is drained, never discarded (D-writer_thread-6). `~Document`'s final drain runs
+  // after this — the drainer is explicitly not the writer (libarbc doc 15), and `Model::drain()`
+  // is documented single-drainer/any-thread, so it needs no posting.
+  writer.stop();
+  session.reset();
   shell.shutdown();
   return 0;
 }

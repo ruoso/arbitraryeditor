@@ -55,15 +55,21 @@ public:
   // Install the edit-serializing runner the UI-thread edit verbs (undo/redo) funnel
   // their Document mutation through (editor.canvas.edit_render_sync, D-edit_render_sync-2).
   // The runner receives the mutation as a closure, runs it on the UI/writer thread, and
-  // wakes the canvas — the shell binds it to `CanvasHost::apply_edit`. The off-thread render
-  // read needs no lock: arbc v0.2.0 publishes content bindings copy-on-write (#10/#11), so
-  // the render walk reads a stable snapshot while the edit rebinds (editor.canvas.single_writer,
-  // superseding edit_render_sync's doc_mu). The runner keeps every edit on the one writer
-  // identity, replacing frame_sync's fire-after poke that mutated the Document BEFORE the
-  // wake. Default: none, so a
-  // headless test or a session without a live canvas runs the mutation directly on the
-  // calling thread (behaviour-identical, still single-threaded).
+  // wakes the canvas — the shell binds it to `CanvasView::apply_edit`, which POSTS the closure
+  // to the document's one writer thread and blocks until it has run (editor.canvas.writer_thread,
+  // D-writer_thread-11, superseding single_writer's run-on-the-caller seam). That posting is what
+  // holds arbc's single writer IDENTITY (doc 15 § Thread rules) — the off-thread render read
+  // needs no lock and never did after v0.3.0. Default: none, so a headless test or a session
+  // without a live canvas runs the mutation directly on the calling thread, which is the one
+  // identity there.
   void set_edit_runner(std::function<void(const std::function<void()>&)> runner);
+
+  // Install the NON-EDIT writer-thread post: the seam the save path's `capture_snapshot` rides
+  // (D-writer_thread-7). Same posting and blocking as the edit runner, but no epilogue and no
+  // canvas wake — a capture publishes no revision, so republishing the History snapshot and
+  // re-rendering every canvas would both be pure cost. Default: none, so a headless caller
+  // captures inline on its own (writer) thread.
+  void set_writer_post(ace::project::WriterPost post);
 
   // --- Insert Cell (editor.cells.model / A16) --------------------------------
   // Marshal L1 `scene::insert_schemas` — one entry per `registry.ids()` entry, no
@@ -134,8 +140,8 @@ private:
   // The framing the provisional placement is computed in: the live canvas's when one
   // is wired and sized, else the root composition's own extent at identity.
   ViewFraming view_framing() const;
-  // Run a Document-mutating edit through the installed runner (serialized against the
-  // render read via CanvasHost::apply_edit), or directly when none is installed.
+  // Run a Document-mutating edit through the installed runner (posted to the document's writer
+  // thread via CanvasView::apply_edit), or directly when none is installed.
   void run_edit(const std::function<void()>& edit);
 
   ace::dockmodel::RecentProjects& recent_;
@@ -144,9 +150,11 @@ private:
   const ace::platform::ProcessLauncher& launcher_;
   std::filesystem::path executable_;
   ace::commands::AppState& app_state_; // the one in-process session (A7) Save/dirty drive
-  // Serializes a UI-thread edit against the off-thread render read (bound to
-  // CanvasHost::apply_edit by the shell); null in headless tests -> run directly.
+  // Posts a UI-thread edit onto the document's one writer thread (bound to
+  // CanvasView::apply_edit by the shell); null in headless tests -> run directly.
   std::function<void(const std::function<void()>&)> run_edit_;
+  // Posts the save path's non-edit writer work (`capture_snapshot`); null -> capture inline.
+  ace::project::WriterPost writer_post_;
   // The live canvas framing source for a cell insert's provisional placement; null in
   // headless tests -> fall back to the root composition's extent.
   std::function<ViewFraming()> view_framing_;

@@ -3,7 +3,7 @@
 // depth as any-thread atomics but deliberately NOT its entry vector: `entry_at`
 // hands out a reference into writer-owned memory a concurrent commit may
 // reallocate. These cases pin the host-side publication that replaces it — the
-// refresh points (the `commands` verbs AND the `CanvasHost` writer-turn hook, which
+// refresh points (the `commands` verbs AND the L4 writer-turn epilogue, which
 // is the only one a bare `scene::` transaction passes through), the stamp guard, the
 // immutability of a held snapshot, and `navigate_to`'s clamped end-stopped walk.
 // The concurrent-reader case gives the whole thing TSan/ASan coverage on every lane
@@ -14,8 +14,8 @@
 #include <ace/commands/history.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/project/project.hpp>
-#include <ace/render/canvas_host.hpp>
 #include <ace/scene/camera.hpp>
+#include <ace/writer/writer_thread.hpp>
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
@@ -34,6 +34,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -354,17 +355,28 @@ TEST_CASE("history publish: a bare scene transaction refreshes through the write
                           }});
   REQUIRE(camera.value != 0);
 
-  // The deterministic inline host (no worker threads; no entries added — apply_edit takes
-  // the document lease and runs the closure regardless).
-  ace::render::CanvasHost host(arbc::WorkerPoolConfig{}, std::chrono::hours(1));
-  host.set_post_edit_hook([&state] { publish_history(state); });
+  // The edit seam exactly as `CanvasView::apply_edit` now assembles it
+  // (editor.canvas.writer_thread, D-writer_thread-11): ONE unit of writer-thread work carrying
+  // the mutation AND the A18 epilogue, so the epilogue reads the writer-owned journal structure
+  // the edit just changed. The epilogue moved off `CanvasHost` with the edit seam — `render` no
+  // longer owns the document write path — so the seam under test is the closure shape, not a
+  // host method. Inline-degenerate writer: this thread is the identity that built the document
+  // above, which is precisely the invariant (D-writer_thread-5).
+  ace::writer::WriterThread writer;
+  const std::function<void()> post_edit_hook = [&state] { publish_history(state); };
+  const auto apply_edit = [&](const std::function<void()>& edit) {
+    writer.submit_sync([&] {
+      edit();
+      post_edit_hook();
+    });
+  };
 
   const std::size_t names_before = state.history().load()->names.size();
 
   // A BARE scene transaction inside a raw apply_edit closure — the camera-inspector
   // shape (src/app/camera_inspector.cpp). It never touches a `commands` verb, so
   // verb-only refresh would leave the panel stale; only the writer-turn hook covers it.
-  host.apply_edit([&] {
+  apply_edit([&] {
     ace::scene::set_camera_resolution(state.document(), registry, camera,
                                       ace::scene::Resolution{32, 24});
   });

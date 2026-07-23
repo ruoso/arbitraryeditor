@@ -56,6 +56,7 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
 #include <GLES3/gl3.h>
 
 using ace::app::CanvasView;
@@ -184,10 +185,15 @@ TEST_CASE("selection e2e: click, click-through, shift, select-behind, marquee, c
           "Space/frame-grab interplay drive ONE project-level selection") {
   ScratchDir scratch("main");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "sel");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  const Seeded ids = seed(state);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "sel");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  Seeded ids;
+  session.on_writer([&] { ids = seed(state); });
   REQUIRE(ids.cell_a.valid());
   REQUIRE(ids.cell_b.valid());
   REQUIRE(ids.hero.valid());
@@ -200,7 +206,7 @@ TEST_CASE("selection e2e: click, click-through, shift, select-behind, marquee, c
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

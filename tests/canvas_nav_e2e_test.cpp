@@ -43,6 +43,8 @@
 #include <thread>
 #include <utility>
 
+#include "writer_session.hpp"
+
 using ace::app::CanvasView;
 using ace::app::Shell;
 using ace::app::ShellOptions;
@@ -140,10 +142,14 @@ struct E2EState {
 TEST_CASE("canvas_nav e2e: wheel zooms (anchor_depth rises), Space-drag pans, scale bar tracks") {
   ScratchDir scratch("nav");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "nav");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  seed_nested(state);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "nav");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { seed_nested(state); });
 
   Shell shell;
   ShellOptions opts;
@@ -152,7 +158,7 @@ TEST_CASE("canvas_nav e2e: wheel zooms (anchor_depth rises), Space-drag pans, sc
   opts.height = 480;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state); // spawns the render thread
+  CanvasView canvas(state, session.writer()); // spawns the render thread
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

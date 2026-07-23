@@ -60,6 +60,8 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
+
 using ace::app::AppProjectGateway;
 using ace::app::CanvasView;
 using ace::app::Shell;
@@ -193,21 +195,31 @@ std::string kind_row(const ace::dock::Dockspace& dockspace, std::string_view kin
 TEST_CASE("mint_from_focused_canvas e2e: the framing verbs follow the focused canvas") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "focus");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  state.document().add_composition(128.0, 128.0);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "focus");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { state.document().add_composition(128.0, 128.0); });
 
   // An OPAQUE (and unbounded, D-cells_model-3) backdrop so neither pane's composite is ever
   // blank — the canvas withholds an all-transparent frame, and both panes must publish.
-  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
-                               "0.15,0.2,0.25,1", arbc::Affine::identity())
-              .has_value());
+  arbc::expected<arbc::ObjectId, std::string> backdrop = arbc::unexpected<std::string>("unset");
+  session.on_writer([&] {
+    backdrop = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
+                                    "0.15,0.2,0.25,1", arbc::Affine::identity());
+  });
+  REQUIRE(backdrop.has_value());
   // A pre-seeded shot to look THROUGH in phase 8. Named "Hero", so it never consumes a
   // `Camera <n>` slot and the minted names stay assertable (D-frame_selection-9).
-  const arbc::ObjectId hero = ace::scene::add_camera(
-      state.document(), state.registry(), "Hero", ace::scene::Resolution{k_hero_w, k_hero_h},
-      arbc::Affine::translation(k_hero_at, k_hero_at));
+  arbc::ObjectId hero;
+  session.on_writer([&] {
+    hero = ace::scene::add_camera(state.document(), state.registry(), "Hero",
+                                  ace::scene::Resolution{k_hero_w, k_hero_h},
+                                  arbc::Affine::translation(k_hero_at, k_hero_at));
+  });
   REQUIRE(hero.valid());
   REQUIRE(ace::scene::cameras(state.document()).size() == 1);
 
@@ -218,7 +230,7 @@ TEST_CASE("mint_from_focused_canvas e2e: the framing verbs follow the focused ca
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

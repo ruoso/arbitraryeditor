@@ -49,6 +49,8 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
+
 using ace::app::CanvasView;
 using ace::app::Shell;
 using ace::app::ShellOptions;
@@ -117,11 +119,15 @@ std::string kind_row(const ace::dock::Dockspace& dockspace, std::string_view kin
 TEST_CASE("cells insert e2e: registry-length kind list, prefilled resolution, inline kind error") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "cells");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "cells");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
   // A root composition to place cells in (a fresh create_project document is empty).
-  state.document().add_composition(64.0, 64.0);
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { state.document().add_composition(64.0, 64.0); });
   REQUIRE(ace::scene::cells(state.document(), state.registry()).empty());
 
   Shell shell;
@@ -131,7 +137,7 @@ TEST_CASE("cells insert e2e: registry-length kind list, prefilled resolution, in
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

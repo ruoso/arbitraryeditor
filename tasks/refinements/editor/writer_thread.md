@@ -380,4 +380,16 @@ viewport construction across N canvases.
 
 ## Status
 
-_pending implementation_
+**Done** — 2026-07-23.
+
+- New L1 component `src/writer/ace/writer/writer_thread.hpp` + `src/writer/writer_thread.cpp`: `ace::writer::WriterThread` with sync FIFO (`submit_sync`), async FIFO (`submit`), idle-work hook, re-entrant inline path, inline-degenerate mode, and drain-then-join teardown — depending on `base` + `platform` only.
+- `tests/writer_thread_test.cpp` (9 Catch2 units): FIFO order, sync edge, one identity, re-entrancy, drain-on-stop/refusal, inline degenerate, idle arm/disarm.
+- `tests/canvas_host_test.cpp` +4 cases: idle-writer proactive settle, live-loop nudge settling exactly once, `on_writer_thread()` tripwire, TSan anchor (streamed edits ‖ live render loop ‖ canvas add/remove mid-stream ‖ deferred arrival).
+- `tests/project_save_test.cpp` +2 cases: capture posted once, refused capture publishes nothing.
+- `tests/writer_session.hpp`: shared e2e fixture wiring `WriterThread` into existing test suites (11 `*_e2e_test.cpp` files migrated).
+- `src/render/canvas_host.{cpp,hpp}`, `src/render/canvas_renderer.{cpp,hpp}`: writer-priority lease (`doc_mu`/`doc_cv`/`doc_busy`/`doc_waiting_writers`/`Impl::Lease`/`apply_edit`) deleted; `KindBridge` moved from per-renderer/render-confined to document-scoped/writer-owned; `HostViewport` ctor/dtor wrapped in `submit_sync` from the render thread (D-8); `poke()` retained as render-wake.
+- `src/app/shell.cpp`, `src/app/canvas_view.{cpp,hpp}`, `src/app/project_gateway.{cpp,hpp}`: edit-runner rebound to `writer.submit_sync` + `canvas.poke()`; all `run_edit`/`apply_edit` call sites posting through the writer.
+- `src/commands/{app_state.cpp,ace/commands/app_state.hpp}`: `saved_revision_` made atomic; all verb dispatch funnelled through the writer.
+- `src/project/{save.cpp,ace/project/save.hpp}`: `capture_snapshot` and `checkpoint` posted to the writer thread.
+- `CMakeLists.txt`, `scripts/check_levels.py`, `docs/01-architecture.md`: `writer` registered as a new L1 component; `check_levels` DAG updated; A4/A4.1/A4.1a documentation updated to reflect the retired lease and the new single-identity design.
+- TSan-clean under gcc-tsan (31 warnings in the shell bundle are all pre-existing libdbus lock-order-inversion inside `SDL_Init`/`SDL_Quit`, no editor mutex in the cycle).

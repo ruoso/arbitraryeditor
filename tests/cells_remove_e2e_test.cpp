@@ -53,6 +53,8 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
+
 using ace::app::CanvasView;
 using ace::app::Shell;
 using ace::app::ShellOptions;
@@ -124,10 +126,14 @@ TEST_CASE("cells remove e2e: the rail action, the Delete/Backspace chords, undo,
           "text-input guard") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "cells");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  state.document().add_composition(64.0, 64.0);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "cells");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { state.document().add_composition(64.0, 64.0); });
 
   // Three cells to delete one way each, plus a camera for the look-through fail-safe. They
   // are OPAQUE solids rather than (transparent) rasters so the composite is never blank —
@@ -135,14 +141,20 @@ TEST_CASE("cells remove e2e: the rail action, the Delete/Backspace chords, undo,
   // assertion below needs the pane to be genuinely issuing frames.
   const char* const k_colors[3] = {"0.6,0,0,1", "0,0.6,0,1", "0,0,0.6,1"};
   for (int i = 0; i < 3; ++i) {
-    const arbc::expected<arbc::ObjectId, std::string> added =
-        ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid", k_colors[i],
-                             arbc::Affine::translation(static_cast<double>(i) * 10.0, 0.0));
+    arbc::expected<arbc::ObjectId, std::string> added = arbc::unexpected<std::string>("unset");
+    session.on_writer([&] {
+      added =
+          ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid", k_colors[i],
+                               arbc::Affine::translation(static_cast<double>(i) * 10.0, 0.0));
+    });
     REQUIRE(added.has_value());
   }
-  const arbc::ObjectId camera =
-      ace::scene::add_camera(state.document(), state.registry(), "shot",
-                             ace::scene::Resolution{32, 24}, arbc::Affine::translation(4.0, 4.0));
+  arbc::ObjectId camera;
+  session.on_writer([&] {
+    camera =
+        ace::scene::add_camera(state.document(), state.registry(), "shot",
+                               ace::scene::Resolution{32, 24}, arbc::Affine::translation(4.0, 4.0));
+  });
   REQUIRE(camera.valid());
   REQUIRE(ace::scene::cells(state.document(), state.registry()).size() == 3);
 
@@ -153,7 +165,7 @@ TEST_CASE("cells remove e2e: the rail action, the Delete/Backspace chords, undo,
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -315,4 +316,61 @@ TEST_CASE("save_project's dump reloads and renders byte-exact against the probe 
   const std::string golden =
       "render_probe_" + std::to_string(image.width) + "x" + std::to_string(image.height) + ".rgba8";
   CHECK(ace_test::compare_golden(golden, image.pixels));
+}
+
+// --- editor.canvas.writer_thread: the capture/serialize split (D-writer_thread-7) ------------
+//
+// `capture_snapshot` is a READ, but it copies the writer-owned content side-map and unknown-field
+// stash, so it must run on the document's ONE writer thread; everything after it runs over an
+// immutable, off-thread-safe snapshot and must NOT, or a disk publish would hold the writer
+// against every queued edit. `save_project` therefore takes a `WriterPost` and uses it for the
+// capture alone.
+
+TEST_CASE("save_project posts ONLY the capture through the writer seam, and serializes off it") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "posted";
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  ace::project::OpenedProject& opened = *created;
+  build_saveable_probe(*opened.document);
+  const arbc::Registry registry = builtin_registry();
+
+  // A recording post: it runs the closure (this thread IS the writer here — the document was
+  // built on it) and counts how many times save reached for the writer. Exactly ONE crossing per
+  // save is the contract; two would mean the serialize half had leaked onto the writer too.
+  int posts = 0;
+  const ace::project::WriterPost post = [&posts](const std::function<void()>& work) {
+    ++posts;
+    work();
+  };
+
+  const auto saved =
+      ace::project::save_project(fs, opened.layout, *opened.document, registry, post);
+  REQUIRE(saved.has_value());
+  CHECK(posts == 1);
+  CHECK(saved.value().revision == opened.document->pin()->revision());
+  CHECK(fs.exists(opened.layout.canonical));
+}
+
+TEST_CASE("save_project publishes NOTHING when the writer refuses the capture") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "refused";
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  ace::project::OpenedProject& opened = *created;
+  build_saveable_probe(*opened.document);
+  const arbc::Registry registry = builtin_registry();
+
+  // A stopped writer refuses the submission and the closure never runs (D-writer_thread-6). Save
+  // must then publish nothing rather than dumping an empty snapshot over a live `project.arbc` —
+  // the one outcome that would turn a shutdown race into data loss.
+  const ace::project::WriterPost refuse = [](const std::function<void()>&) {};
+
+  const auto saved =
+      ace::project::save_project(fs, opened.layout, *opened.document, registry, refuse);
+  REQUIRE_FALSE(saved.has_value());
+  CHECK(saved.error() == ace::project::SaveError::SerializeFailed);
+  CHECK_FALSE(fs.exists(opened.layout.canonical));
 }

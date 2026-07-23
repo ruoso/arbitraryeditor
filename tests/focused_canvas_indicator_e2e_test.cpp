@@ -57,6 +57,7 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
 #include <GLES3/gl3.h>
 
 using ace::app::AppProjectGateway;
@@ -196,17 +197,24 @@ bool accent_near(const Frame& frame, int cx, int cy) {
 TEST_CASE("focused_canvas_indicator e2e: the marker names the pane the framing verbs act on") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "marker");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  state.document().add_composition(128.0, 128.0);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "marker");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { state.document().add_composition(128.0, 128.0); });
   // An OPAQUE, unbounded backdrop so neither pane's composite is ever blank (the canvas withholds
   // an all-transparent frame) — and so the pixel under the border is canvas content, which is what
   // makes "the border survived over the pane" a real observation rather than a read of the clear
   // colour.
-  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
-                               "0.15,0.2,0.25,1", arbc::Affine::identity())
-              .has_value());
+  arbc::expected<arbc::ObjectId, std::string> backdrop = arbc::unexpected<std::string>("unset");
+  session.on_writer([&] {
+    backdrop = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
+                                    "0.15,0.2,0.25,1", arbc::Affine::identity());
+  });
+  REQUIRE(backdrop.has_value());
 
   Shell shell;
   ShellOptions opts;
@@ -215,7 +223,7 @@ TEST_CASE("focused_canvas_indicator e2e: the marker names the pane the framing v
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

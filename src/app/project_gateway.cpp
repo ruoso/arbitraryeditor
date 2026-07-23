@@ -87,8 +87,10 @@ bool AppProjectGateway::save() {
   // Publish the in-process session (A13), not a sibling exec. `commands::save_project`
   // dumps `project.arbc` + `assets/` and marks the session clean on success; a
   // returned error value is surfaced to the rail as a failed Save (session stays
-  // dirty). Errors are values — never a throw across the seam.
-  return ace::commands::save_project(app_state_, filesystem_).has_value();
+  // dirty). Errors are values — never a throw across the seam. Only the CAPTURE crosses to the
+  // writer thread (`writer_post_`); the serialize + atomic publish run here, so a disk write
+  // never holds the one writer thread against a queued edit (D-writer_thread-7).
+  return ace::commands::save_project(app_state_, filesystem_, writer_post_).has_value();
 }
 
 bool AppProjectGateway::is_dirty() const { return app_state_.is_dirty(); }
@@ -96,12 +98,11 @@ bool AppProjectGateway::is_dirty() const { return app_state_.is_dirty(); }
 bool AppProjectGateway::undo() {
   // Navigate the in-process session's journal (D15 / A13), not a sibling exec.
   // `commands::undo` drives `journal().undo()` as a forward publish and reports whether
-  // the cursor moved; it never touches the dirty baseline (D-undo-4). The journal drive
-  // MUTATES the Document, which the off-thread render thread reads every frame — hand it to
-  // the edit runner as a closure, which runs it on the UI/writer thread (via
-  // CanvasHost::apply_edit) and then wakes the canvas (editor.canvas.single_writer). The
-  // render read is lock-free: arbc v0.2.0 content bindings publish copy-on-write (#10/#11).
-  // This replaces frame_sync's fire-after poke, which mutated the Document before the wake.
+  // the cursor moved; it never touches the dirty baseline (D-undo-4). `journal().undo()` is a
+  // structural write via `Model::navigate`, so it is WRITER-THREAD ONLY — hand it to the edit
+  // runner as a closure, which POSTS it to the document's one writer thread (via
+  // CanvasView::apply_edit) and then wakes the canvas (editor.canvas.writer_thread). The render
+  // read is lock-free: arbc content bindings publish copy-on-write (#10/#11).
   bool moved = false;
   run_edit([this, &moved] { moved = ace::commands::undo(app_state_).moved; });
   return moved;
@@ -114,10 +115,11 @@ bool AppProjectGateway::redo() {
 }
 
 void AppProjectGateway::run_edit(const std::function<void()>& edit) {
-  // With a runner installed (the shell binds it to CanvasHost::apply_edit) the mutation
-  // runs serialized against the render read. Without one — a headless test or a session
-  // with no live canvas — run it directly on the calling (writer) thread: behaviour-
-  // identical and still single-threaded, so nothing races it.
+  // With a runner installed (the shell binds it to CanvasView::apply_edit) the mutation is
+  // POSTED to the document's one writer thread and this call blocks until it has run. Without
+  // one — a headless test or a session with no live canvas — run it directly on the calling
+  // thread, which IS the one identity there (D-writer_thread-5's degenerate mode by another
+  // name), so nothing races it.
   if (run_edit_) {
     run_edit_(edit);
   } else {
@@ -129,6 +131,13 @@ void AppProjectGateway::set_edit_runner(std::function<void(const std::function<v
   run_edit_ = std::move(runner);
 }
 
+void AppProjectGateway::set_writer_post(ace::project::WriterPost post) {
+  writer_post_ = std::move(post);
+}
+
+// ANY-THREAD atomic reads since the v0.3.0 pin (arbc#15): the journal publishes its cursor and
+// depth as relaxed atomics, so the rail can poll them every frame off the writer thread with no
+// editor-side snapshot (D-writer_thread-12).
 bool AppProjectGateway::can_undo() const { return app_state_.document().journal().can_undo(); }
 
 bool AppProjectGateway::can_redo() const { return app_state_.document().journal().can_redo(); }
@@ -161,7 +170,8 @@ void AppProjectGateway::save_as() {
     if (!picked.has_value()) {
       return;
     }
-    ace::commands::save_project_as(app_state_, filesystem_, launcher_, executable_, *picked);
+    ace::commands::save_project_as(app_state_, filesystem_, launcher_, executable_, *picked,
+                                   writer_post_);
   });
 }
 

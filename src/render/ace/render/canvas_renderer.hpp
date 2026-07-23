@@ -12,8 +12,13 @@ class Document;
 class WorkerPool;
 class DamageRouter;
 class Registry;
+class KindBridge;
 struct Affine;
 } // namespace arbc
+
+namespace ace::writer {
+class WriterThread;
+} // namespace ace::writer
 
 namespace ace::render {
 
@@ -66,9 +71,24 @@ public:
   // document, so N canvases all re-render an edit (`damage_router.hpp`). `pool` and `router`
   // MUST outlive this renderer. `registry` carries the external-arrival settle binding as
   // above (default null == empty binding).
+  //
+  // `bridge` is the DOCUMENT-SCOPED KindBridge (D-writer_thread-9), owned beside the document
+  // and shared by every canvas over it. The document holds ONE external-load settler slot, so a
+  // per-renderer bridge would intern an arrival into whichever viewport installed last — wrong
+  // at N canvases — and, since v0.3.0 runs the settle on the WRITER thread, it would also be
+  // writer-mutated render-owned state. Null falls back to a renderer-owned bridge seeded from
+  // `registry`, the shape the single-canvas golden path uses.
+  //
+  // `writer` is the document's writer thread. The HostViewport ctor/dtor install and release the
+  // document's WRITER-THREAD-ONLY settler slot and (un)register with the DamageRouter whose
+  // registrant list a commit's flush walks, so both are posted through it (D-writer_thread-8);
+  // the InteractiveRenderer / TileCache / SurfacePool / target Surface stay render-thread-
+  // confined exactly as Constraint 3 has them. Null (the default) means the caller IS the one
+  // writer identity — the headless single-threaded fixtures — and both run inline.
   CanvasRenderer(arbc::Document& document, arbc::WorkerPool& pool, arbc::DamageRouter& router,
                  std::chrono::steady_clock::duration budget,
-                 const arbc::Registry* registry = nullptr);
+                 const arbc::Registry* registry = nullptr, arbc::KindBridge* bridge = nullptr,
+                 writer::WriterThread* writer = nullptr);
   ~CanvasRenderer();
 
   CanvasRenderer(const CanvasRenderer&) = delete;
@@ -125,6 +145,13 @@ public:
   // executor. The CanvasHost exposes this so a test can prove N canvases borrow one
   // pool (acceptance criterion f).
   const arbc::WorkerPool* borrowed_pool() const;
+
+  // External arrivals the LAST step() saw landed but declined to install, because the step did
+  // not run on the document's writer thread (`StepOutcome::external_loads_ready`, arbc#13). The
+  // host turns a non-zero report into ONE deduped async settle on the writer thread
+  // (D-writer_thread-10) — a latency shortcut over the writer's own idle poll, never the
+  // load-bearing path. Zero when the step settled them itself (writer == driver).
+  std::size_t external_loads_ready() const;
 
 private:
   struct Impl;

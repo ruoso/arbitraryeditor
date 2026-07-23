@@ -61,6 +61,8 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
+
 using ace::app::AppProjectGateway;
 using ace::app::CameraInspector;
 using ace::app::CanvasView;
@@ -154,20 +156,27 @@ bool layout_contains(const ace::dock::Dockspace& d, const char* id) {
 TEST_CASE("new_shot_from_view e2e: the rail action promotes the live viewport into a shot") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "shot");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  state.document().add_composition(128.0, 128.0);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "shot");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { state.document().add_composition(128.0, 128.0); });
 
   // An OPAQUE (and unbounded, D-cells_model-3) backdrop so the composite is never blank — the
   // canvas's content gate withholds an all-transparent frame — plus one BOUNDED cell, used only
   // to enable `Frame Selection` in the independent-gating phase.
-  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
-                               "0.15,0.2,0.25,1", arbc::Affine::identity())
-              .has_value());
-  const arbc::expected<arbc::ObjectId, std::string> cell =
-      ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster", "32x32",
-                           arbc::Affine::translation(10.0, 10.0));
+  arbc::expected<arbc::ObjectId, std::string> backdrop = arbc::unexpected<std::string>("unset");
+  arbc::expected<arbc::ObjectId, std::string> cell = arbc::unexpected<std::string>("unset");
+  session.on_writer([&] {
+    backdrop = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
+                                    "0.15,0.2,0.25,1", arbc::Affine::identity());
+    cell = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster", "32x32",
+                                arbc::Affine::translation(10.0, 10.0));
+  });
+  REQUIRE(backdrop.has_value());
   REQUIRE(cell.has_value());
   REQUIRE(ace::scene::cameras(state.document()).empty());
 
@@ -178,7 +187,7 @@ TEST_CASE("new_shot_from_view e2e: the rail action promotes the live viewport in
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   CameraInspector inspector(state, canvas);
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();

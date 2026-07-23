@@ -11,16 +11,45 @@
 
 #include <arbc/contract/registry.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge (the document-scoped bridge)
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 
 namespace ace::commands {
+
+// A move-safe atomic revision slot. `std::atomic` is neither copyable nor movable, and
+// `AppState`'s defaulted move is load-bearing (`open_or_create_app_state` returns by value), so
+// the atomic is wrapped rather than declared inline — the same problem `history_`'s `unique_ptr`
+// indirection solves for `HistoryPublisher`. `k_none` is the "no known-published snapshot this
+// session" sentinel; no real document revision can reach it.
+class SavedRevision {
+public:
+  static constexpr std::uint64_t k_none = std::numeric_limits<std::uint64_t>::max();
+
+  SavedRevision() = default;
+  SavedRevision(SavedRevision&& other) noexcept
+      : value_(other.value_.load(std::memory_order_relaxed)) {}
+  SavedRevision& operator=(SavedRevision&& other) noexcept {
+    value_.store(other.value_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    return *this;
+  }
+  SavedRevision(const SavedRevision&) = delete;
+  SavedRevision& operator=(const SavedRevision&) = delete;
+
+  std::uint64_t load() const { return value_.load(std::memory_order_relaxed); }
+  void store(std::uint64_t revision) { value_.store(revision, std::memory_order_relaxed); }
+
+private:
+  std::atomic<std::uint64_t> value_{k_none};
+};
 
 // The process's ONE owned project session (docs/00-design.md D19, arch A7,
 // refinement Decisions D-app_state-1/2). The app owns exactly one `Document` for
@@ -51,6 +80,16 @@ public:
   arbc::Registry& registry() { return registry_; }
   const arbc::Registry& registry() const { return registry_; }
 
+  // The DOCUMENT-SCOPED `KindBridge` (D-writer_thread-9), seeded from `registry()` at
+  // construction exactly as the save and load bridges are (A14). WRITER-OWNED: the only thing
+  // that mutates it is `arbc::settle_external_loads`, which is writer-thread only. It lives here
+  // — beside the document, not inside a canvas — because the document holds ONE external-load
+  // settler slot, so a per-renderer bridge would intern an arrival into whichever viewport
+  // installed last, and would be render-owned state a writer mutates. Every canvas over this
+  // document is handed this one bridge.
+  arbc::KindBridge& kind_bridge() { return kind_bridge_; }
+  const arbc::KindBridge& kind_bridge() const { return kind_bridge_; }
+
   Selection& selection() { return selection_; }
   const Selection& selection() const { return selection_; }
 
@@ -75,14 +114,20 @@ public:
   // built from `project.arbc`) and on each successful publish; `nullopt` (dirty) for
   // a fresh `create_project` or a workspace-mapped open (no known-published snapshot
   // this session). Persisting a cross-session baseline is a deliberate non-goal.
+  //
+  // Race-free across the writer/UI split (D-writer_thread-12): `pin()->revision()` is already an
+  // any-thread read of the immutable `DocRoot`, and `saved_revision_` — the one editor-owned
+  // scalar here, written by `mark_saved` inside the POSTED save closure and read by the UI thread
+  // every frame — is atomic.
   bool is_dirty() const {
-    return !saved_revision_ || *saved_revision_ != document_->pin()->revision();
+    const std::uint64_t saved = saved_revision_.load();
+    return saved == SavedRevision::k_none || saved != document_->pin()->revision();
   }
 
   // Mark the session clean at `revision` — the revision a successful publish dumped.
   // Called by `save_project` after `project::save_project` returns; not part of the
   // edit path (a revision-bumping `dispatch` re-dirties by advancing past it).
-  void mark_saved(std::uint64_t revision) { saved_revision_ = revision; }
+  void mark_saved(std::uint64_t revision) { saved_revision_.store(revision); }
 
   // Hand out the next gesture-coalescing key for a continuous gesture (a brush
   // stroke, a handle drag), the collision-free seam `editor.project.undo` ships
@@ -100,10 +145,13 @@ private:
   std::unique_ptr<arbc::Document> document_;
   project::ProjectLayout layout_;
   arbc::Registry registry_;
+  // The document-scoped, writer-owned kind bridge (D-writer_thread-9). Declared after
+  // `registry_`, which seeds it.
+  arbc::KindBridge kind_bridge_;
   Selection selection_;
   bool rebuilt_from_canonical_ = false;
-  // The last-published revision this session, or `nullopt` when none is known.
-  std::optional<std::uint64_t> saved_revision_;
+  // The last-published revision this session, or `SavedRevision::k_none` when none is known.
+  SavedRevision saved_revision_;
   // The next gesture-coalescing key (D-undo-2): monotonic, seeded at 1 so it never
   // hands out `k_no_coalesce` (0) and never repeats within a session.
   std::uint64_t next_gesture_key_ = 1;
@@ -216,8 +264,14 @@ platform::Result<AppState> open_or_create_app_state(const platform::FileSystem& 
 // failed publish returns cleanly and the session stays dirty — the workspace is
 // durable regardless). The L4 `AppProjectGateway::save()` drives this against the
 // one in-process `AppState`; the rail never reaches into `project` directly (A13).
-platform::Result<project::SaveOutcome> save_project(AppState& state,
-                                                    const platform::FileSystem& fs);
+//
+// `post_writer` posts the CAPTURE half onto the document's writer thread and returns when it has
+// run (D-writer_thread-7); the serialize + publish half deliberately stays off it, over the
+// immutable snapshot. Empty (the headless default) means the caller is already the one writer
+// identity. `mark_saved` is stamped from inside that posted capture's caller, on the revision the
+// snapshot pinned, and `saved_revision_` is atomic for the UI's per-frame dirty read (D-12).
+platform::Result<project::SaveOutcome> save_project(AppState& state, const platform::FileSystem& fs,
+                                                    const project::WriterPost& post_writer = {});
 
 // Save As: publish a COPY of the session's live `Document` as a new project under
 // `target_root`, then open THAT copy in a detached sibling editor (D-save_as-1/2).
@@ -237,7 +291,8 @@ platform::Result<project::SaveOutcome> save_project_as(AppState& state,
                                                        const platform::FileSystem& fs,
                                                        const platform::ProcessLauncher& launcher,
                                                        const std::filesystem::path& executable,
-                                                       const std::filesystem::path& target_root);
+                                                       const std::filesystem::path& target_root,
+                                                       const project::WriterPost& post_writer = {});
 
 // Clean up (GC): reclaim the on-disk `assets/` orphans this session's saves left
 // behind, through the L1 `project::gc_project` sweep over `state.layout()`

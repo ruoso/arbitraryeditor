@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <string_view>
 #include <system_error>
@@ -73,17 +74,31 @@ private:
   std::uint64_t blobs_written_ = 0;
 };
 
+// Run one closure on the document's writer thread and return only after it has run — the
+// opaque post seam a save uses to reach the writer without `project` learning what a
+// `writer::WriterThread` is (§8 keeps `project` at base+platform+libarbc). Empty means "the
+// caller IS the writer identity": the closure runs inline, which is exactly the headless and
+// single-threaded case.
+using WriterPost = std::function<void(const std::function<void()>&)>;
+
 // Publish the live `doc` as the canonical `project.arbc` (+ owned `assets/` bytes)
 // under `layout` (D-save-1). Captures the document on the WRITER THREAD
-// (`arbc::capture_snapshot`) — the caller must be the writer context (A4) — then
-// serializes off the pinned immutable snapshot over `builtin_codecs(registry)`,
+// (`arbc::capture_snapshot`) — via `post_writer`, or inline when the caller is already the
+// writer — then serializes off the pinned immutable snapshot over `builtin_codecs(registry)`,
 // routes owned bytes to `<root>/assets/` through a `FilesystemAssetSink`, and
 // ATOMICALLY publishes the JSON to `layout.canonical` via `atomic_replace` (D16).
 // The `registry` is the caller's persistent seeded one (`AppState::registry()`,
 // D-app_state-2). Errors are values.
+//
+// The CAPTURE/SERIALIZE SPLIT is load-bearing, not an optimization detail (D-writer_thread-7):
+// `capture_snapshot` reads writer-owned state (the content side-map, the unknown-field stash)
+// and so must be posted, but everything after it runs over an immutable snapshot and must NOT
+// be — holding the single writer thread for the whole serialize+write would stall every queued
+// edit and every canvas's viewport rebuild behind a disk publish.
 platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
                                            const ProjectLayout& layout, const arbc::Document& doc,
-                                           const arbc::Registry& registry);
+                                           const arbc::Registry& registry,
+                                           const WriterPost& post_writer = {});
 
 // Publish a COPY of the live `doc` as a fresh project rooted at `target_root` — the
 // portable core (`project.arbc` + content-addressed `assets/`) plus a
@@ -100,7 +115,8 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
 platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
                                               const std::filesystem::path& target_root,
                                               const arbc::Document& doc,
-                                              const arbc::Registry& registry);
+                                              const arbc::Registry& registry,
+                                              const WriterPost& post_writer = {});
 
 } // namespace ace::project
 

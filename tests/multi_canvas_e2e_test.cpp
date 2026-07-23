@@ -49,6 +49,7 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
 #include <GLES3/gl3.h>
 
 using ace::app::CanvasView;
@@ -147,22 +148,29 @@ struct E2EState {
 TEST_CASE("multi_canvas e2e: two canvases over one host render, dock, fan-out, and close") {
   ScratchDir scratch("two");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "multi");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  const arbc::ObjectId comp = seed_solid_fill(state);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "multi");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  arbc::ObjectId comp;
+  session.on_writer([&] { comp = seed_solid_fill(state); });
 
   // A journal tip to navigate: a covering layer (one dispatched transaction) — undo
   // reverts it, a visible edit whose fan-out re-render both panes must show.
-  ace::commands::dispatch(
-      state, ace::commands::Command{"cover", [comp](arbc::Document& doc) {
-                                      const arbc::ObjectId content =
-                                          doc.add_content(std::make_shared<arbc::SolidContent>(
-                                              arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}));
-                                      const arbc::ObjectId layer =
-                                          doc.add_layer(content, arbc::Affine::identity());
-                                      doc.attach_layer(comp, layer);
-                                    }});
+  session.on_writer([&] {
+    ace::commands::dispatch(
+        state, ace::commands::Command{"cover", [comp](arbc::Document& doc) {
+                                        const arbc::ObjectId content =
+                                            doc.add_content(std::make_shared<arbc::SolidContent>(
+                                                arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}));
+                                        const arbc::ObjectId layer =
+                                            doc.add_layer(content, arbc::Affine::identity());
+                                        doc.attach_layer(comp, layer);
+                                      }});
+  });
 
   Shell shell;
   ShellOptions opts;
@@ -173,7 +181,7 @@ TEST_CASE("multi_canvas e2e: two canvases over one host render, dock, fan-out, a
 
   // ONE host + ONE render thread for ALL canvases (D-multi_canvas-2). The body draws by
   // per-pane view_id, so every canvas#N renders independently.
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

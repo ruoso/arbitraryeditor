@@ -62,12 +62,17 @@ AppState::AppState(project::OpenedProject opened)
   // edge (Constraint 1). The SAME registrar restores those kinds on reopen via
   // `open_project`'s callback (`open_or_create_app_state`, D-reopen-2).
   register_editor_kinds(registry_);
+  // The document-scoped kind bridge (D-writer_thread-9): seeded from the SAME registry the
+  // save/load bridges seed from (A14), so an external arrival the writer settles interns its
+  // kind tokens identically to the author-side mints. Every canvas over this document is handed
+  // this one bridge — the document holds a single external-load settler slot.
+  project::seed_kind_bridge(kind_bridge_, registry_);
   // The dirty baseline (D-save-4): a session rebuilt from the canonical `project.arbc`
   // starts CLEAN (the workspace was just built from the snapshot); a fresh
   // `create_project` or a workspace-mapped open starts DIRTY (`saved_revision_`
-  // stays `nullopt` — no known-published snapshot this session).
+  // stays `k_none` — no known-published snapshot this session).
   if (rebuilt_from_canonical_) {
-    saved_revision_ = document_->pin()->revision();
+    saved_revision_.store(document_->pin()->revision());
   }
   // The initial publication (A18): a reopened session may already carry journal entries,
   // and a fresh one publishes an empty snapshot — either way the History panel loads a
@@ -159,12 +164,13 @@ platform::Result<AppState> open_or_create_app_state(const platform::FileSystem& 
   return AppState(std::move(*created));
 }
 
-platform::Result<project::SaveOutcome> save_project(AppState& state,
-                                                    const platform::FileSystem& fs) {
+platform::Result<project::SaveOutcome> save_project(AppState& state, const platform::FileSystem& fs,
+                                                    const project::WriterPost& post_writer) {
   // The dump lives in `project` (D-save-1); `commands` only wires the session into
-  // it and updates the dirty baseline. Capture runs on this (writer) thread (A4).
+  // it and updates the dirty baseline. The capture half is POSTED to the writer thread
+  // through `post_writer`; the serialize + publish half runs here, off it (D-writer_thread-7).
   platform::Result<project::SaveOutcome> published =
-      project::save_project(fs, state.layout(), state.document(), state.registry());
+      project::save_project(fs, state.layout(), state.document(), state.registry(), post_writer);
   if (!published.has_value()) {
     return published.error(); // a failed publish leaves the session dirty
   }
@@ -172,11 +178,10 @@ platform::Result<project::SaveOutcome> save_project(AppState& state,
   return *published;
 }
 
-platform::Result<project::SaveOutcome> save_project_as(AppState& state,
-                                                       const platform::FileSystem& fs,
-                                                       const platform::ProcessLauncher& launcher,
-                                                       const std::filesystem::path& executable,
-                                                       const std::filesystem::path& target_root) {
+platform::Result<project::SaveOutcome>
+save_project_as(AppState& state, const platform::FileSystem& fs,
+                const platform::ProcessLauncher& launcher, const std::filesystem::path& executable,
+                const std::filesystem::path& target_root, const project::WriterPost& post_writer) {
   // Reject an empty target before any I/O or exec (Constraint 5, mirroring
   // `open_another_project`): an empty path would publish into the CWD and spawn a
   // mystery sibling. The launcher is never touched and nothing is written.
@@ -196,11 +201,12 @@ platform::Result<project::SaveOutcome> save_project_as(AppState& state,
     return ec;
   }
 
-  // Publish a COPY of the LIVE document into the target (D-save_as-1). Capture runs
-  // on this (writer) thread (A4). The current session is deliberately left untouched
-  // — no `mark_saved`, no `layout_` rebind (D-save_as-2 / Constraint 4).
+  // Publish a COPY of the LIVE document into the target (D-save_as-1). The capture is POSTED to
+  // the writer thread through `post_writer` (D-writer_thread-7); the serialize + publish runs
+  // here. The current session is deliberately left untouched — no `mark_saved`, no `layout_`
+  // rebind (D-save_as-2 / Constraint 4).
   platform::Result<project::SaveOutcome> published =
-      project::save_project_as(fs, resolved, state.document(), state.registry());
+      project::save_project_as(fs, resolved, state.document(), state.registry(), post_writer);
   if (!published.has_value()) {
     return published.error(); // a failed publish execs nothing (Constraint 7)
   }

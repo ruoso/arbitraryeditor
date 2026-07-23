@@ -6,6 +6,7 @@
 #include <ace/platform/threads.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
+#include <ace/writer/writer_thread.hpp>
 
 #include <arbc/base/geometry.hpp>
 #include <arbc/base/ids.hpp>
@@ -57,7 +58,13 @@ namespace ace::app {
 // the shell holds; it must outlive this view.
 class CanvasView {
 public:
-  explicit CanvasView(commands::AppState& state);
+  // `writer` is the DOCUMENT's one writer thread (editor.canvas.writer_thread). It must already
+  // be running and must have executed the document's creation/load — `arbc::load_document` is the
+  // FIRST write and binds the identity, so a session opened on the UI thread and then edited
+  // through here would be two identities, which is the exact bug this leaf removes. Its lifetime
+  // strictly encloses this view's AND the document's (D-writer_thread-6): construct it before the
+  // `AppState`, `stop()` it after this view is destroyed and before the document is released.
+  CanvasView(commands::AppState& state, writer::WriterThread& writer);
   ~CanvasView();
 
   CanvasView(const CanvasView&) = delete;
@@ -69,19 +76,34 @@ public:
   // renders nothing (Constraint 7). Requires a current GL context.
   void draw_content(std::string_view view_id, int pane_width, int pane_height);
 
-  // Run a UI-thread Document-mutating edit on the writer thread (editor.canvas.single_writer):
-  // forwards to CanvasHost::apply_edit, which runs the mutation and then wakes EVERY live
-  // canvas. No lock against the off-thread render read — arbc v0.2.0 content bindings publish
-  // copy-on-write (#10/#11), so the render walk reads a stable snapshot while the edit
-  // rebinds. The replacement for "mutate the Document, then poke()" — the edit verbs
-  // (undo/redo via the gateway runner) funnel through here, synchronously on the caller.
+  // THE edit seam (D-writer_thread-11). POST `edit` to the document's one writer thread, block
+  // until it has run, run the writer-turn epilogue there too, and then wake EVERY live canvas.
+  // Synchronous by default because most call sites are result-carrying and capture by reference
+  // (`run_edit([&]{ moved = undo(...).moved; })`, insert returning the new id the UI selects) —
+  // making those async would be a silent lifetime bug, not a latency win (D-writer_thread-3).
+  //
+  // The render read takes no lock and needs none: the binding table publishes copy-on-write
+  // (arbc#10/#11), the DamageAccumulator carries its own mutex, and `step()` declines to publish
+  // off the writer thread (v0.3.0). What this call buys is IDENTITY, not exclusion — the whole
+  // point A4.1 makes and a mutex cannot deliver.
+  //
+  // Callable from any thread (the UI thread, and the ImGui Test Engine's coroutine thread in the
+  // e2e rig); re-entrant calls from inside a posted closure run inline rather than deadlocking.
   void apply_edit(const std::function<void()>& edit);
 
-  // Install the writer-turn epilogue run at the end of every apply_edit (arch A18):
-  // forwards to CanvasHost::set_post_edit_hook. The shell binds it to
-  // `commands::publish_history`, so EVERY document mutation — including this class's own
-  // manipulator commits and the camera inspector's bare `scene::` transactions, neither of
-  // which passes through a `commands` verb — republishes the History panel's snapshot.
+  // Run writer-thread work that is NOT an edit — the save path's `capture_snapshot`, which reads
+  // writer-owned state but publishes no revision (D-writer_thread-7). Same posting and blocking
+  // as `apply_edit`, WITHOUT the epilogue and the canvas wake, both of which would be pure cost.
+  void on_writer(const std::function<void()>& work);
+
+  // Install the writer-turn epilogue (arch A18): run at the end of every `apply_edit`, ON THE
+  // WRITER THREAD, so it may read writer-owned document structure the edit just changed
+  // (libarbc's `Journal::entry_at`, for one) and publish it for the UI thread. The shell binds it
+  // to `commands::publish_history`, so EVERY document mutation — including this class's own
+  // manipulator commits and the camera inspector's bare `scene::` transactions, neither of which
+  // passes through a `commands` verb — republishes the History panel's snapshot. It moved here
+  // from `CanvasHost` with the edit seam: `render` no longer owns the document write path.
+  // Set once at wiring time, before edits start.
   void set_post_edit_hook(std::function<void()> hook);
 
   // Wake the render thread to re-render EVERY live canvas after a UI-thread edit (the
@@ -244,9 +266,14 @@ private:
   ViewFraming framing_for(std::string_view focused) const;
 
   commands::AppState& state_;
+  // The document's one writer thread (borrowed; it outlives this view and the document).
+  writer::WriterThread& writer_;
   render::CanvasHost host_;
   platform::NativeThreads threads_;
   std::unique_ptr<platform::JoinHandle> render_thread_;
+  // The writer-turn epilogue (A18), run inside every posted edit closure. Set once at wiring
+  // time from the thread that wires; read on the writer thread.
+  std::function<void()> post_edit_hook_;
   std::map<std::string, Presenter, std::less<>> presenters_;
   // The sticky focused-canvas hint (D-mint_from_focused_canvas-1/-2): UI-thread session
   // state, written only in `draw_content`, cleared only in `reconcile` when that pane's

@@ -54,6 +54,7 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
 #include <GLES3/gl3.h>
 
 using ace::app::CanvasView;
@@ -175,17 +176,25 @@ struct E2EState {
 TEST_CASE("look_through e2e: pick a shot, live-update, toggle back, and GC-fallback") {
   ScratchDir scratch("main");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "lt");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  const arbc::ObjectId comp = seed_cells(state);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "lt");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  arbc::ObjectId comp;
+  session.on_writer([&] { comp = seed_cells(state); });
 
   // Seed the shot Hero on the MAIN (writer) thread, before the render thread starts: a
   // 174x174 shot framing the red raster region at (300,300) 1:1 (frame == the binding layer's
   // device->comp placement), so looking through it renders red where the free view shows green.
-  const arbc::ObjectId hero = ace::scene::add_camera(
-      state.document(), state.registry(), "Hero", ace::scene::Resolution{k_hero_res, k_hero_res},
-      arbc::Affine::translation(k_hero_at, k_hero_at));
+  arbc::ObjectId hero;
+  session.on_writer([&] {
+    hero = ace::scene::add_camera(state.document(), state.registry(), "Hero",
+                                  ace::scene::Resolution{k_hero_res, k_hero_res},
+                                  arbc::Affine::translation(k_hero_at, k_hero_at));
+  });
   REQUIRE(hero.valid());
   const std::vector<ace::scene::Camera> seeded = ace::scene::cameras(state.document());
   REQUIRE(seeded.size() == 1);
@@ -205,6 +214,9 @@ TEST_CASE("look_through e2e: pick a shot, live-update, toggle back, and GC-fallb
                                     seeded.front().resolution.height, k_hero_res, k_hero_res);
     REQUIRE(lt.out_w > 0);
     ace::render::CanvasHost host(arbc::WorkerPoolConfig{}, std::chrono::hours(1));
+    // Even this deterministic single-threaded host posts its WRITER-THREAD-ONLY slots (the
+    // per-document DamageRouter, each HostViewport ctor/dtor) to the document's one identity.
+    host.set_writer(&session.writer());
     host.add("look", state.document(), &state.registry());
     host.request_resize("look", lt.out_w, lt.out_h);
     host.request_camera("look", lt.camera);
@@ -235,7 +247,7 @@ TEST_CASE("look_through e2e: pick a shot, live-update, toggle back, and GC-fallb
   opts.height = 480;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));

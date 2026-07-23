@@ -22,16 +22,19 @@ ALLOWED = {
     "base": set(),
     "platform": {"base"},
     "gl": {"base"},
+    # The document's one writer thread (editor.canvas.writer_thread, D-writer_thread-1): a pure
+    # closure executor, deliberately holding no Document and naming no libarbc type.
+    "writer": {"base", "platform"},
     "project": {"base", "platform"},
     "scene": {"base", "project"},
     "interact": {"base", "scene"},
     "commands": {"base", "project", "scene"},
     "dockmodel": {"base", "platform"},
-    "render": {"base", "project", "scene", "gl"},
+    "render": {"base", "project", "scene", "gl", "writer"},
     "views": {"scene", "interact", "commands", "render", "dockmodel"},
     "dock": {"dockmodel", "views"},
     "app": {
-        "base", "platform", "gl", "project", "scene", "interact",
+        "base", "platform", "gl", "writer", "project", "scene", "interact",
         "commands", "dockmodel", "render", "views", "dock",
     },
 }

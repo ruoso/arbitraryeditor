@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <optional>
 #include <string>
@@ -78,7 +79,12 @@ arbc::Rect marquee_rect(arbc::Vec2 anchor, arbc::Vec2 pointer) {
 
 namespace ace::app {
 
-CanvasView::CanvasView(commands::AppState& state) : state_(state) {
+CanvasView::CanvasView(commands::AppState& state, writer::WriterThread& writer)
+    : state_(state), writer_(writer) {
+  // Bind the document's writer thread BEFORE the render thread exists: the host posts its own
+  // WRITER-THREAD-ONLY work there (the per-document DamageRouter, every HostViewport ctor/dtor —
+  // D-writer_thread-8), and the first of those happens on the render thread's first iteration.
+  host_.set_writer(&writer_);
   // Spawn the ONE render thread through the portable spawn seam (A3): it runs the host's
   // blocking drive loop off the UI thread for ALL canvases. The loop stops when
   // host_.stop() is called at teardown (destroy()), so the predicate is trivially false.
@@ -117,7 +123,10 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
     // save/load paths use, so custom kinds resolve identically across save/load/render (A14,
     // editor.canvas.nested_composition_binding). The L4 app owns both AppState and CanvasHost;
     // the Registry crosses as a libarbc const arbc::Registry* (no commands->render edge).
-    host_.add(std::string(view_id), state_.document(), &state_.registry());
+    // ...and the DOCUMENT-SCOPED KindBridge beside it (D-writer_thread-9): the document holds one
+    // external-load settler slot, so every canvas over it shares one writer-owned bridge rather
+    // than each renderer owning its own.
+    host_.add(std::string(view_id), state_.document(), &state_.registry(), &state_.kind_bridge());
   }
   Presenter& p = it->second;
 
@@ -558,10 +567,31 @@ std::optional<arbc::ObjectId> CanvasView::look_through(std::string_view view_id)
   return it == presenters_.end() ? std::nullopt : it->second.look_through;
 }
 
-void CanvasView::apply_edit(const std::function<void()>& edit) { host_.apply_edit(edit); }
+void CanvasView::apply_edit(const std::function<void()>& edit) {
+  // ONE unit of writer-thread work: the mutation plus the A18 epilogue, so the epilogue reads the
+  // writer-owned structure the edit just changed without a second round trip and without any
+  // window in which another submitter could interleave.
+  writer_.submit_sync([&] {
+    // The identity tripwire, at the ONE point every document mutation passes through
+    // (D-writer_thread-1): libarbc's own predicate, asserted rather than commented. It fires if
+    // the writer was bound by something other than the posted open — i.e. the exact bug this leaf
+    // removes, and the one a `SlotStore::allocate` assert would otherwise report much deeper in.
+    assert(state_.document().on_writer_thread() && "edits must run on the document's writer");
+    edit();
+    if (post_edit_hook_) {
+      post_edit_hook_();
+    }
+  });
+  // Then wake every live entry to re-render the damage (one writer, N observers — Constraint 4).
+  // A refused submission (the writer is stopping) ran nothing, and a poke on a stopping host is
+  // inert, so the unconditional wake is correct either way.
+  host_.poke();
+}
+
+void CanvasView::on_writer(const std::function<void()>& work) { writer_.submit_sync(work); }
 
 void CanvasView::set_post_edit_hook(std::function<void()> hook) {
-  host_.set_post_edit_hook(std::move(hook));
+  post_edit_hook_ = std::move(hook);
 }
 
 void CanvasView::poke() { host_.poke(); }

@@ -57,6 +57,8 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
+
 using ace::app::CameraInspector;
 using ace::app::CanvasView;
 using ace::app::Shell;
@@ -134,23 +136,30 @@ arbc::Rect covered(const ace::scene::Camera& camera) {
 TEST_CASE("frame_selection e2e: the rail action mints a camera fit to the selection") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "frame");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  state.document().add_composition(128.0, 128.0);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "frame");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { state.document().add_composition(128.0, 128.0); });
 
   // An OPAQUE (and unbounded, D-cells_model-3) backdrop so the composite is never blank — the
   // canvas's content gate withholds an all-transparent frame — plus the two BOUNDED cells the
   // mint actually frames. The backdrop is never selected, so it never enters a union.
-  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
-                               "0.15,0.2,0.25,1", arbc::Affine::identity())
-              .has_value());
-  const arbc::expected<arbc::ObjectId, std::string> cell_a =
-      ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster", "32x32",
-                           arbc::Affine::translation(k_a_x, k_a_y));
-  const arbc::expected<arbc::ObjectId, std::string> cell_b =
-      ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster", "32x32",
-                           arbc::Affine::translation(k_b_x, k_b_y));
+  arbc::expected<arbc::ObjectId, std::string> backdrop = arbc::unexpected<std::string>("unset");
+  arbc::expected<arbc::ObjectId, std::string> cell_a = arbc::unexpected<std::string>("unset");
+  arbc::expected<arbc::ObjectId, std::string> cell_b = arbc::unexpected<std::string>("unset");
+  session.on_writer([&] {
+    backdrop = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
+                                    "0.15,0.2,0.25,1", arbc::Affine::identity());
+    cell_a = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster", "32x32",
+                                  arbc::Affine::translation(k_a_x, k_a_y));
+    cell_b = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster", "32x32",
+                                  arbc::Affine::translation(k_b_x, k_b_y));
+  });
+  REQUIRE(backdrop.has_value());
   REQUIRE(cell_a.has_value());
   REQUIRE(cell_b.has_value());
   REQUIRE(ace::scene::cameras(state.document()).empty()); // the editor cannot make one yet
@@ -162,7 +171,7 @@ TEST_CASE("frame_selection e2e: the rail action mints a camera fit to the select
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   CameraInspector inspector(state, canvas);
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();

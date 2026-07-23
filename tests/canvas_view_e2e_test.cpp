@@ -54,6 +54,7 @@
 #include <utility>
 #include <vector>
 
+#include "writer_session.hpp"
 #include <GLES3/gl3.h>
 
 using ace::app::CanvasView;
@@ -151,10 +152,14 @@ TEST_CASE(
     "canvas_view e2e: canvas#1 shows the live document off-thread, docked and drivable by id") {
   ScratchDir scratch("show");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "canvas");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  seed_solid_fill(state);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "canvas");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { seed_solid_fill(state); });
 
   Shell shell;
   ShellOptions opts;
@@ -167,7 +172,7 @@ TEST_CASE(
   // shell uses. Constructing it spawns the render thread; it is joined by
   // canvas.destroy() at teardown. Cleared after the loop so the process-global seam
   // never outlives this CanvasView/AppState into a later test in the binary.
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
@@ -299,23 +304,30 @@ TEST_CASE(
     "canvas_view e2e: an edit through the gateway pokes the driver into a new off-thread frame") {
   ScratchDir scratch("poke");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "poke");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  const arbc::ObjectId comp = seed_solid_fill(state);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "poke");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  arbc::ObjectId comp;
+  session.on_writer([&] { comp = seed_solid_fill(state); });
 
   // A journal tip to navigate: a covering layer (one dispatched transaction). The
   // document now shows the covering colour; undo reverts it — a visible edit whose
   // re-render is what the poke drives.
-  ace::commands::dispatch(
-      state, ace::commands::Command{"cover", [comp](arbc::Document& doc) {
-                                      const arbc::ObjectId content =
-                                          doc.add_content(std::make_shared<arbc::SolidContent>(
-                                              arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}));
-                                      const arbc::ObjectId layer =
-                                          doc.add_layer(content, arbc::Affine::identity());
-                                      doc.attach_layer(comp, layer);
-                                    }});
+  session.on_writer([&] {
+    ace::commands::dispatch(
+        state, ace::commands::Command{"cover", [comp](arbc::Document& doc) {
+                                        const arbc::ObjectId content =
+                                            doc.add_content(std::make_shared<arbc::SolidContent>(
+                                                arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}));
+                                        const arbc::ObjectId layer =
+                                            doc.add_layer(content, arbc::Affine::identity());
+                                        doc.attach_layer(comp, layer);
+                                      }});
+  });
 
   Shell shell;
   ShellOptions opts;
@@ -324,7 +336,7 @@ TEST_CASE(
   opts.height = 480;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state); // spawns the render thread
+  CanvasView canvas(state, session.writer()); // spawns the render thread
 
   // The in-process gateway wired to the shell's edit runner (editor.canvas.single_writer):
   // a moved undo runs its Document mutation via CanvasHost::apply_edit on the writer thread —
@@ -451,12 +463,16 @@ TEST_CASE(
   // ImGui frame (draw_canvas_image issues an ImGui::Image, which needs a window).
   ScratchDir scratch("resize");
   ace::platform::NativeFileSystem fs;
-  auto created = ace::project::create_project(fs, scratch.root / "resize");
-  REQUIRE(created.has_value());
-  AppState state(std::move(*created));
-  seed_solid_fill(state);
+  // The writer identity, bound before the document exists and stopped after the canvas
+  // is gone (editor.canvas.writer_thread; see tests/writer_session.hpp).
+  ace::testing::WriterSession session(scratch.root / "resize");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  // Fixture seeding IS a document write: post it to the identity the open just bound
+  // (editor.canvas.writer_thread D-1). Assertions stay on this thread.
+  session.on_writer([&] { seed_solid_fill(state); });
 
-  CanvasView canvas(state);
+  CanvasView canvas(state, session.writer());
   bool published = false;
   for (int i = 0; i < 600 && !published; ++i) {
     shell.new_frame();

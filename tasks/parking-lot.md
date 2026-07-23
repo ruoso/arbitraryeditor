@@ -140,3 +140,27 @@ refinement. If, in practice, the always-on border reads as chrome noise when onl
 one canvas is open, the fix is a one-condition check in the draw block plus one
 e2e phase; the Catch2 rule matrix is unaffected. This is a product-taste call
 that warrants real use before deciding.
+
+---
+
+## HostViewport settler attach/detach split (upstream library ask)
+
+**Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — D-writer_thread-8 / Open questions #2.
+
+D-writer_thread-8 posts the `HostViewport` constructor and destructor to the writer thread (via `submit_sync` from the render thread) because the settler slot install (`Document::set_external_load_settler`) is writer-thread-only and lives in the `HostViewport` ctor/dtor. If upstream adds an explicit writer-thread `attach`/`detach` pair for the settler — decoupled from object construction — the render thread could manage the full viewport lifecycle itself, the posted ctor/dtor would retire, and D-8 would simplify substantially. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
+
+---
+
+## Sync-submit latency behind a deep async burst
+
+**Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — Open questions #3.
+
+`editor.canvas.writer_thread` ships all-sync for result-carrying verbs (D-3). A streamed gesture burst could build a queue depth that makes a subsequent sync `undo` wait. The coalescing key bounds the *commit* cost, not the queue depth. Whether this is observable in practice is unknown; if it bites, adding a bounded depth or a gesture-drop policy would be the fix. Measure on the real pool with a realistic workload before designing anything — this is a data-gated decision, not implementable work today. No WBS task until profiling data exists.
+
+---
+
+## Deferred-external nested child composites blank under real WorkerPool
+
+**Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — tech debt note.
+
+Under the inline degenerate `WriterThread` (headless fixtures) a deferred-external nested child composites correctly (byte-exact). Under the real interactive `WorkerPool`, a deferred-external nested child composites blank even pre-settled — a pre-existing behaviour not introduced by this change. The root cause is in libarbc's worker-pool dispatch path for nested child arrivals, not in the editor. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the library fix exists.

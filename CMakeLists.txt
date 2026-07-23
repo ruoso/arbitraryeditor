@@ -173,6 +173,10 @@ ace_component(platform DEPENDS base LIBS Threads::Threads)
 # it links libGLESv2; ImGui owns its own backend GL (docs A2/A3, refinement §2).
 ace_component(gl DEPENDS base LIBS ${ACE_GLES_LIBRARY})
 # L1 — the UI-agnostic core (project owns the libarbc Document)
+# `writer` is the document's one writer thread (editor.canvas.writer_thread): a pure closure
+# executor over base + platform — no libarbc type, no ImGui/GL/SDL — so it unit-tests headless
+# with no library fixture (D-writer_thread-1).
+ace_component(writer DEPENDS base platform)
 ace_component(project DEPENDS base platform LIBS arbc::arbc)
 # editor.project.save holds an `arbc::CodecTable` (builtin_codecs) to drive the
 # asset-sink save path; its definition (arbc/serialize/codec.hpp) names nlohmann::json,
@@ -185,8 +189,9 @@ ace_component(scene DEPENDS base project)
 ace_component(interact DEPENDS base scene)
 ace_component(commands DEPENDS base project scene)
 ace_component(dockmodel DEPENDS base platform)
-# L2
-ace_component(render DEPENDS base project scene gl)
+# L2 — render posts its HostViewport ctor/dtor (the document's WRITER-THREAD-ONLY settler and
+# damage-sink slots) to the writer thread, hence the L2 -> L1 `writer` edge (D-writer_thread-8).
+ace_component(render DEPENDS base project scene gl writer)
 # L3 — the ImGui layer. views draws the render_probe pane, so it links Dear ImGui
 # (the A8 seam already whitelists imgui in views, scripts/check_levels.py).
 ace_component(views DEPENDS scene interact commands render dockmodel LIBS imgui)
@@ -209,7 +214,7 @@ target_compile_features(ace_app PUBLIC cxx_std_20)
 # the project validate/compose helpers; dockmodel via ace::dock stays transitive but
 # is named too for the RecentProjects store.
 target_link_libraries(ace_app PUBLIC ace::dock ace::gl ace::platform ace::commands
-                                     ace::project ace::dockmodel imgui)
+                                     ace::project ace::dockmodel ace::writer imgui)
 
 add_executable(arbitraryeditor src/app/main.cpp)
 target_link_libraries(arbitraryeditor PRIVATE ace::app)
@@ -236,10 +241,11 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/frame_selection_test.cpp
                          tests/new_shot_from_view_test.cpp
                          tests/history_publish_test.cpp
+                         tests/writer_thread_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
-                                        ace::dockmodel ace::commands ace::scene arbc::arbc
-                                        Catch2::Catch2WithMain)
+                                        ace::dockmodel ace::commands ace::scene ace::writer
+                                        arbc::arbc Catch2::Catch2WithMain)
 # The render_offline golden compares against raw sRGB8 bytes under tests/goldens
 # (D-render_probe-6); the byte-compare helper resolves them by absolute path.
 target_compile_definitions(ace_tests PRIVATE

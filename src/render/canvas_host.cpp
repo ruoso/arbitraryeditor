@@ -1,10 +1,12 @@
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/canvas_renderer.hpp>
 #include <ace/render/render.hpp>
+#include <ace/writer/writer_thread.hpp>
 
 #include <arbc/base/transform.hpp>
 #include <arbc/runtime/damage_router.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/document_serialize.hpp> // settle_external_loads (the D-writer_thread-10 nudge)
 #include <arbc/runtime/interactive.hpp>
 #include <arbc/runtime/worker_pool.hpp>
 
@@ -15,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -38,10 +41,21 @@ constexpr std::chrono::milliseconds k_default_frame_budget{8};
 // mutex — the single-producer/single-consumer handoff.
 struct CanvasHost::Entry {
   Entry(arbc::Document& doc, arbc::WorkerPool& pool, arbc::DamageRouter& router,
-        std::chrono::steady_clock::duration budget, const arbc::Registry* registry)
-      : renderer(doc, pool, router, budget, registry) {}
+        std::chrono::steady_clock::duration budget, const arbc::Registry* reg,
+        arbc::KindBridge* kind_bridge, writer::WriterThread* writer)
+      : renderer(doc, pool, router, budget, reg, kind_bridge, writer), document(&doc),
+        registry(reg), bridge(kind_bridge) {}
 
   CanvasRenderer renderer;
+  // What the D-writer_thread-10 async settle nudge needs, and nothing more: the document, the
+  // document-scoped bridge and the registry. No render-thread state crosses into that closure.
+  arbc::Document* document = nullptr;
+  const arbc::Registry* registry = nullptr;
+  arbc::KindBridge* bridge = nullptr;
+  // One deduped wake in flight at a time: set before posting, cleared when the closure runs, so a
+  // still-unsettled arrival re-nudges on the next frame instead of queueing one settle per frame.
+  // shared_ptr because the entry may be removed and destroyed before the posted closure runs.
+  std::shared_ptr<std::atomic<bool>> settle_in_flight = std::make_shared<std::atomic<bool>>(false);
   Srgb8Image published;                     // front buffer the consumer reads (guarded)
   Srgb8Image back;                          // producer scratch (render thread, off-lock)
   std::uint64_t sequence = 0;               // published-frame sequence (guarded)
@@ -55,10 +69,13 @@ struct CanvasHost::Impl {
   Impl(arbc::WorkerPoolConfig pool_config, std::chrono::steady_clock::duration frame_budget)
       : budget(frame_budget), pool(std::move(pool_config)) {}
 
+  ~Impl();
+
   struct PendingAdd {
     std::string id;
     arbc::Document* document;
     const arbc::Registry* registry; // the app's persistent kind Registry (may be null)
+    arbc::KindBridge* bridge;       // the document-scoped bridge (D-writer_thread-9; may be null)
   };
 
   std::chrono::steady_clock::duration budget;
@@ -79,34 +96,25 @@ struct CanvasHost::Impl {
   bool stop = false;  // stop requested (UI thread -> render thread)
   bool dirty = false; // work pending: an add/remove/resize/poke/self-signal
 
-  // The document lease (editor.canvas.single_writer): exclusive, WRITER-PRIORITY access to
-  // every hosted Document, held by a UI-thread apply_edit for the duration of its mutation
-  // and by the render thread for the duration of a driven iteration.
-  //
-  // arbc v0.2.0's copy-on-write content bindings (arbc#10/#11) make the render walk's
-  // *binding* read snapshot-stable, but they do NOT cover the two other pieces of shared
-  // mutable state a commit and a step both touch:
-  //   - HostViewport::DamageAccumulator — the UI-thread commit push_backs into the same
-  //     std::vector<Damage> that the render thread's step() swaps out in drain(). arbc's
-  //     own note calls it "single-owner, drained on the driving thread"; a router flush
-  //     from a different thread is not a supported call pattern.
-  //   - Model::set_commit_sink — step()'s settle_external_loads hook opens a
-  //     JournalSuspension, which writes the very commit-sink pointer a concurrent
-  //     Transaction::commit reads (arbc#13; NOT inert — a document with deferred external
-  //     children settles on the render thread while the UI edits).
-  // Both are real TSan-reported races, so the exclusion is back. What is different from the
-  // pre-v0.2.0 doc_mu is the WRITER PRIORITY: a plain mutex let run()'s re-armed tight loop
-  // barge ahead of a queued edit (the render thread releases and immediately re-acquires),
-  // starving a burst of UI edits into an apparent hang. Here the render thread additionally
-  // waits for `doc_waiting_writers == 0`, so a queued edit always wins the next turn and a
-  // streamed burst runs at UI speed with the renderer catching up behind it.
-  //
-  // Only run() takes the render-side lease; drive_once() called directly (the deterministic
-  // single-threaded unit fixtures) is unsynchronized by construction and needs none.
-  std::mutex doc_mu;
-  std::condition_variable doc_cv;
-  bool doc_busy = false;               // a writer or a driven iteration holds the lease
-  std::size_t doc_waiting_writers = 0; // queued UI edits the render thread must yield to
+  // The document's ONE writer thread (borrowed, may be null == "the caller is the identity";
+  // D-writer_thread-8). The writer-priority document lease this host used to hold is GONE, not
+  // renamed (D-writer_thread-11 / Constraint 4): both races it guarded are fixed in libarbc
+  // v0.3.0 (the DamageAccumulator carries its own mutex; step() no longer publishes off the
+  // writer thread), and the remaining problem was identity, which a lock cannot fix. Reads stay
+  // lock-free; writes are posted here.
+  writer::WriterThread* writer = nullptr;
+
+  // Run `work` on the writer thread and BLOCK. Called from the render thread (and, at teardown,
+  // from the owner's thread) — NEVER while holding `mu`: the posted settle nudge calls back into
+  // poke(), which takes `mu`, so posting under it would deadlock. With no writer bound the caller
+  // IS the one identity and it runs inline. False == the writer refused (D-writer_thread-6).
+  bool on_writer(const std::function<void()>& work) {
+    if (writer == nullptr) {
+      work();
+      return true;
+    }
+    return writer->submit_sync(work);
+  }
 
   // UI-thread lifecycle requests, serviced on the render thread at the top of a drive
   // iteration so every cache stays render-thread-confined (Constraint 3).
@@ -117,45 +125,77 @@ struct CanvasHost::Impl {
 
   std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries;
 
-  // The writer-turn epilogue an L4 installs (A18): run at the end of every apply_edit,
-  // on the writer thread, inside the lease. UI-thread-only — set and read by the same
-  // thread that calls apply_edit, never touched by the render thread.
-  std::function<void()> post_edit_hook;
-
-  // RAII holder for the lease above. `writer == true` registers the holder as a queued
-  // writer BEFORE waiting, so the render thread's acquire (which additionally waits for a
-  // zero writer count) cannot barge past it — the fairness the plain-mutex doc_mu lacked.
-  class Lease {
-  public:
-    Lease(Impl& impl, bool writer) : impl_(impl) {
-      std::unique_lock<std::mutex> lock(impl_.doc_mu);
-      if (writer) {
-        ++impl_.doc_waiting_writers;
-        impl_.doc_cv.wait(lock, [&] { return !impl_.doc_busy; });
-        --impl_.doc_waiting_writers;
-      } else {
-        impl_.doc_cv.wait(lock, [&] { return !impl_.doc_busy && impl_.doc_waiting_writers == 0; });
-      }
-      impl_.doc_busy = true;
+  // Wake the render loop (the fan-out poke). Split out of CanvasHost::poke so the writer-thread
+  // settle nudge can call it without going through the public API.
+  void wake() {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      dirty = true;
     }
+    cv.notify_all();
+  }
 
-    ~Lease() {
-      {
-        std::lock_guard<std::mutex> lock(impl_.doc_mu);
-        impl_.doc_busy = false;
-      }
-      impl_.doc_cv.notify_all();
+  // The render thread's arrival NUDGE (D-writer_thread-10): the step saw arrivals it could not
+  // install (it is not the writer thread), so post ONE async settle. Async because the render
+  // thread must never block per frame on an arrival (Constraint 3); deduped by an in-flight flag
+  // so a still-unsettled arrival re-nudges next frame rather than queueing one settle per frame.
+  // This only SHORTENS latency to the observing frame — the writer's own idle poll and arbc's
+  // auto-settler at the next begin() reach the same install, and all three are idempotent (the
+  // settle drains the ready queue; re-entry is suppressed by arbc's InstallScope).
+  void nudge_settle(Entry& entry) {
+    if (writer == nullptr || entry.bridge == nullptr || entry.registry == nullptr) {
+      return; // the empty binding / single-threaded fixtures: the step settled it itself
     }
-
-    Lease(const Lease&) = delete;
-    Lease& operator=(const Lease&) = delete;
-
-  private:
-    Impl& impl_;
-  };
+    if (entry.settle_in_flight->exchange(true)) {
+      return; // one wake already queued
+    }
+    const std::shared_ptr<std::atomic<bool>> flag = entry.settle_in_flight;
+    arbc::Document* document = entry.document;
+    arbc::KindBridge* bridge = entry.bridge;
+    const arbc::Registry* reg = entry.registry;
+    if (!writer->submit([this, document, bridge, reg, flag] {
+          const std::size_t installed = arbc::settle_external_loads(*document, *bridge, *reg);
+          settles_installed.fetch_add(installed, std::memory_order_relaxed);
+          flag->store(false);
+          wake(); // the install publishes a revision and flushes damage — re-render it
+        })) {
+      flag->store(false); // the writer is stopped; nothing to settle for a dying document
+    }
+  }
 
   std::atomic<std::uint64_t> iterations{0};
+  // Arrivals the nudges above INSTALLED (behavioral counter): written on the writer thread, read
+  // from anywhere.
+  std::atomic<std::uint64_t> settles_installed{0};
 };
+
+CanvasHost::Impl::~Impl() {
+  // Runs on the owner's thread AFTER the render thread has been stopped and joined, so nothing
+  // posts here except us. Two obligations, in order:
+  //
+  //  1. FIFO barrier. A nudge posted by the last driven iteration may still be queued behind us;
+  //     one sync submission flushes everything ahead of it (D-writer_thread-2's total order), so
+  //     no closure capturing `this` outlives this object.
+  //  2. Tear down the WRITER-THREAD-ONLY state in dependency order: every entry (each renderer's
+  //     HostViewport releases the settler slot and unregisters from its router, posted inside
+  //     CanvasRenderer) and then the routers themselves (~DamageRouter clears the model's damage
+  //     slot and asserts an empty registrant list). A refused post means the writer is already
+  //     stopped AND joined, so the slots are quiescent — a destructor cannot skip, and running
+  //     inline against a joined writer cannot mint a live second identity.
+  if (writer != nullptr) {
+    writer->submit_sync([] {});
+  }
+  entries.clear();
+  for (auto& [document, router] : routers) {
+    if (!router) {
+      continue;
+    }
+    if (!on_writer([&router] { router.reset(); })) {
+      router.reset();
+    }
+  }
+  routers.clear();
+}
 
 CanvasHost::CanvasHost()
     : impl_(std::make_unique<Impl>(arbc::default_interactive_pool_config(),
@@ -167,10 +207,13 @@ CanvasHost::CanvasHost(arbc::WorkerPoolConfig pool_config,
 
 CanvasHost::~CanvasHost() = default;
 
-void CanvasHost::add(std::string id, arbc::Document& document, const arbc::Registry* registry) {
+void CanvasHost::set_writer(writer::WriterThread* writer) { impl_->writer = writer; }
+
+void CanvasHost::add(std::string id, arbc::Document& document, const arbc::Registry* registry,
+                     arbc::KindBridge* bridge) {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->pending_adds.push_back(Impl::PendingAdd{std::move(id), &document, registry});
+    impl_->pending_adds.push_back(Impl::PendingAdd{std::move(id), &document, registry, bridge});
     impl_->dirty = true;
   }
   impl_->cv.notify_all();
@@ -203,50 +246,7 @@ void CanvasHost::request_camera(std::string_view id, const arbc::Affine& camera)
   impl_->cv.notify_all();
 }
 
-void CanvasHost::apply_edit(const std::function<void()>& edit) {
-  // Run the mutation on the CALLING thread — the UI/writer thread. arbc's SlotStore binds
-  // the writer identity on first write, so the document's writer must stay one consistent
-  // thread; keeping every edit on the caller is exactly that. arbc v0.2.0's copy-on-write
-  // content bindings (arbc#10/#11) make the render walk's binding read snapshot-stable, but
-  // a commit ALSO push_backs into the render thread's DamageAccumulator and settle's
-  // JournalSuspension rewrites the commit sink a commit reads (arbc#13) — so the mutation
-  // still needs exclusion against a driven iteration. Take the writer-priority document
-  // lease for exactly the length of the edit (see Impl::doc_mu). This IS the
-  // edit-serializing seam the app's edit-runner binds to.
-  {
-    Impl::Lease lease(*impl_, /*writer=*/true);
-    edit();
-    // The writer-turn epilogue (A18), still under the lease and still on the writer
-    // thread — so it may read writer-owned document structure the edit just changed
-    // (libarbc's `Journal::entry_at`, for one) and publish it for the UI thread. Opaque
-    // by construction: `render` cannot see `commands`.
-    if (impl_->post_edit_hook) {
-      impl_->post_edit_hook();
-    }
-  }
-  // Then wake the loop to re-render every live entry over the mutated document (one writer,
-  // N observers — Constraint 4); the edit's damage already fanned out via the DamageRouter.
-  {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->dirty = true;
-  }
-  impl_->cv.notify_all();
-}
-
-void CanvasHost::set_post_edit_hook(std::function<void()> hook) {
-  // UI-thread-only state, like the pending-request maps' callers: it is read only by
-  // apply_edit, which the same thread drives. No lock, and the render thread never
-  // observes it.
-  impl_->post_edit_hook = std::move(hook);
-}
-
-void CanvasHost::poke() {
-  {
-    std::lock_guard<std::mutex> lock(impl_->mu);
-    impl_->dirty = true;
-  }
-  impl_->cv.notify_all();
-}
+void CanvasHost::poke() { impl_->wake(); }
 
 void CanvasHost::stop() {
   {
@@ -270,31 +270,51 @@ bool CanvasHost::drive_once() {
   // ~InteractiveRenderer drain into the shared pool can block; never hold `mu` for it).
   std::vector<std::unique_ptr<Entry>> dying;
 
-  // The document lease is NOT taken here — run() holds it around this whole call, and the
-  // deterministic single-threaded fixtures that call drive_once() directly need none. `mu`
-  // is still taken (below) for the pending-request snapshot and the publish swap; it is a
-  // strictly inner lock (lease -> mu, never the reverse). (The render-thread
-  // settle_external_loads write remains a writer-*identity* item for
-  // editor.canvas.single_writer — the lease makes it mutually exclusive, not same-thread.)
+  // No document lease any more (D-writer_thread-11): the render walk's read is lock-free, and
+  // the two races the lease guarded are library-fixed at the v0.3.0 pin. `mu` is still taken for
+  // the pending-request snapshot, the entry-map mutation and the publish swap.
+  //
+  // CRITICAL: nothing in this function posts to the writer thread while holding `mu`. The posted
+  // settle nudge calls back into wake(), which takes `mu`, so a sync post under it would
+  // deadlock. The DamageRouter creation (step 1) and the per-entry HostViewport rebuild/teardown
+  // (steps 2 and 4, inside CanvasRenderer) are therefore all done OFF the lock.
+
+  // 1. Service adds. `entries`/`routers` are mutated only here, on the render thread, so reading
+  //    them off-lock is sound (other threads only ever READ `entries`, under `mu`); the
+  //    entry-map INSERT is taken back under the lock at the end. The document's DamageRouter is
+  //    created on first use so every canvas over that document shares the one sink slot
+  //    (fan-out) rather than each viewport evicting the last — and its ctor occupies
+  //    `Model::set_damage_sink`, a WRITER-THREAD-ONLY slot, so it is POSTED (D-writer_thread-8).
+  std::vector<Impl::PendingAdd> adds;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    adds.swap(impl_->pending_adds);
+  }
+  std::vector<std::pair<std::string, std::unique_ptr<Entry>>> fresh;
+  for (Impl::PendingAdd& pending : adds) {
+    if (impl_->entries.find(pending.id) != impl_->entries.end()) {
+      continue; // idempotent: a second add with a live id is a no-op
+    }
+    std::unique_ptr<arbc::DamageRouter>& router = impl_->routers[pending.document];
+    if (!router) {
+      arbc::Document* document = pending.document;
+      std::unique_ptr<arbc::DamageRouter> made;
+      if (!impl_->on_writer([&] { made = std::make_unique<arbc::DamageRouter>(*document); })) {
+        continue; // the writer refused: the document is going away, so serve no new canvas
+      }
+      router = std::move(made);
+    }
+    fresh.emplace_back(pending.id, std::make_unique<Entry>(*pending.document, impl_->pool, *router,
+                                                           impl_->budget, pending.registry,
+                                                           pending.bridge, impl_->writer));
+  }
 
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
 
-    // 1. Service adds (construct the render-thread-confined cache here, Constraint 3). The
-    //    document's DamageRouter is created on first use so every canvas over that document
-    //    shares the one sink slot (fan-out), rather than each viewport evicting the last.
-    for (Impl::PendingAdd& pending : impl_->pending_adds) {
-      if (impl_->entries.find(pending.id) == impl_->entries.end()) {
-        std::unique_ptr<arbc::DamageRouter>& router = impl_->routers[pending.document];
-        if (!router) {
-          router = std::make_unique<arbc::DamageRouter>(*pending.document);
-        }
-        impl_->entries.emplace(pending.id,
-                               std::make_unique<Entry>(*pending.document, impl_->pool, *router,
-                                                       impl_->budget, pending.registry));
-      }
+    for (auto& [id, entry] : fresh) {
+      impl_->entries.emplace(id, std::move(entry));
     }
-    impl_->pending_adds.clear();
 
     // 2. Service removes (extract, erase, destruct off-lock below).
     for (const std::string& id : impl_->pending_removes) {
@@ -352,6 +372,11 @@ bool CanvasHost::drive_once() {
     if (entry->renderer.step()) {
       more_pending = true;
     }
+    // The step landed arrivals it declined to install, because it is not the writer thread
+    // (arbc#13): post one deduped async settle (D-writer_thread-10). Never blocks the frame.
+    if (entry->renderer.external_loads_ready() > 0) {
+      impl_->nudge_settle(*entry);
+    }
     // Snapshot deep-zoom anchor depth for the UI's lock-free observability read (D-nav-5).
     entry->anchor_depth.store(entry->renderer.anchor_depth(), std::memory_order_relaxed);
 
@@ -406,15 +431,12 @@ void CanvasHost::run(const std::function<bool()>& should_stop) {
       }
       impl_->dirty = false;
     }
-    // Hold the document lease across the whole iteration: step() drains the damage
-    // accumulator a UI-thread commit flushes into and settles external loads through a
-    // JournalSuspension, neither of which is copy-on-write. Acquiring it yields first to
-    // any queued apply_edit, so this re-armed loop cannot starve a burst of UI edits.
-    bool more_pending = false;
-    {
-      Impl::Lease lease(*impl_, /*writer=*/false);
-      more_pending = drive_once();
-    }
+    // No lease around the iteration any more (D-writer_thread-11): the render walk reads the
+    // document lock-free (`pin()` + the copy-on-write binding table), the DamageAccumulator
+    // carries its own mutex since the v0.3.0 pin, and `step()` declines to publish off the
+    // writer thread — so nothing here needs mutual exclusion against an edit. What the
+    // iteration DOES owe the writer, it posts (D-writer_thread-8/10).
+    const bool more_pending = drive_once();
     if (more_pending) {
       // A frame settled or an entry is unsettled under its bounded budget; re-arm so the
       // next iteration re-checks rather than sleeping through the tail (Constraint 4c /
@@ -461,6 +483,10 @@ std::size_t CanvasHost::live_count() const {
 
 std::uint64_t CanvasHost::iterations() const {
   return impl_->iterations.load(std::memory_order_relaxed);
+}
+
+std::uint64_t CanvasHost::settles_installed() const {
+  return impl_->settles_installed.load(std::memory_order_relaxed);
 }
 
 const arbc::WorkerPool& CanvasHost::worker_pool() const { return impl_->pool; }

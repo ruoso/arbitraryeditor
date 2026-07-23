@@ -113,14 +113,15 @@ shipped `CanvasHost`:
   `Transaction::commit` reads (arbc#13). Live, not latent: any document with deferred
   external children settles on the render thread while the UI edits.
 
-So `CanvasHost` holds a **writer-priority document lease** — exclusive for the length
+So `CanvasHost` held a **writer-priority document lease** — exclusive for the length
 of an `apply_edit` mutation and for the length of a `run()` iteration
-(`canvas_host.cpp`). It is a *mutual-exclusion* guard only; it makes neither race
-observable and makes no claim about writer identity, which stays exactly as A4.1
+(`canvas_host.cpp`). It was a *mutual-exclusion* guard only; it made neither race
+observable and made no claim about writer identity, which stays exactly as A4.1
 states (arbc#7/#13, upstream-owned). The one thing it must not repeat from the v0.1.0
 `doc_mu` is starvation: a plain mutex let `run()`'s re-armed loop barge ahead of a
-queued edit, freezing a streamed burst, so the render side additionally yields to any
-waiting writer.
+queued edit, freezing a streamed burst, so the render side additionally yielded to any
+waiting writer. **Retired by `editor.canvas.writer_thread`** (see A4.1b): the lease,
+`CanvasHost::apply_edit` and the edit seam itself are gone from `render`.
 
 **A4.1a (amended at the v0.3.0 pin) — both races are now library-fixed; the lease
 guards nothing and is retained only until the writer thread lands.** libarbc v0.3.0
@@ -152,6 +153,44 @@ unbound** ("the caller would become the writer"; binding happens in `Model::Tran
 ctor and `Model::navigate()`, nowhere else), so "the UI thread transacts before the
 render thread ever steps" is a load-bearing ordering rule, not an incidental one.
 Realized by `editor.canvas.arbc_v030`; superseded in part by `editor.canvas.writer_thread`.
+
+**A4.1b — the document owns ONE writer thread; the UI and render threads are pure
+submitters and readers.** A4.1's prescribed consequence is now the shipped shape.
+`ace::writer::WriterThread` (L1, over `base` + `platform` only — it holds no `Document`
+and names no libarbc type) owns one OS thread and a FIFO closure queue with two entries:
+`submit_sync` blocks until the closure has run, `submit` enqueues and returns. Both push
+onto the *same* queue, so submission order is total and cross-entry. Sync is the default —
+most call sites are result-carrying and capture by reference, where async would be a
+lifetime bug rather than a latency win; async is reserved for a gesture already coalescing
+into one undo step and for the render thread's arrival nudge, which must never block a
+frame. It is spawned through `platform::Threads` (the seam A3 reserves for the Emscripten
+port), and constructed *without* one it runs every submission inline on the caller — the
+degenerate mode that keeps the headless Catch2/golden fixtures thread-free AND is the WASM
+fallback, where a browser main thread may not block on `Atomics.wait`: still one identity,
+still correct, no blocking wait.
+
+The posting inventory is **everything libarbc documents WRITER-THREAD ONLY**, which is
+wider than "writes": every `transact`/commit, `journal().undo()/redo()`, `Document::
+checkpoint()`, `capture_snapshot` (a *read*, but it copies the writer-owned content
+side-map and unknown-field stash), `set_damage_sink` / `set_external_load_settler`, and —
+first and most load-bearing — `arbc::load_document`, because the first write BINDS the
+identity. The writer therefore starts **before** the `AppState` is built and stops
+**after** the last canvas is gone and before the document is released; stopping drains the
+queue rather than discarding it. Reads stay lock-free and unposted: `pin()`, `resolve()`,
+`for_each_content()`, `serialize_snapshot` over an already-captured snapshot,
+`external_loads_ready()`, `on_writer_thread()`, and (post-arbc#15) `can_undo()`/
+`can_redo()`. So save posts its cheap half and serializes off-thread.
+
+Two consequences reach further than the seam. The `KindBridge` an external arrival interns
+through is **document-scoped and writer-owned**, not per-renderer: the document holds ONE
+settler slot, so a per-canvas bridge would both split ownership across threads and intern
+into whichever viewport installed last. And the writer consumes the deferred settle
+**proactively** — it polls `Document::external_loads_ready()` (any-thread, one relaxed
+load) whenever its queue drains, staying armed only while a fetch is outstanding, so an
+arrival on a completely idle app is consumed with no submission from anywhere. The render
+thread's per-frame report and arbc's own auto-settler at the next `begin()` are two more
+idempotent paths to the same install; none is load-bearing alone, which is the point.
+Realized by `editor.canvas.writer_thread`.
 
 ## 5. Multi-canvas — N observers, one document
 
@@ -227,7 +266,7 @@ not a hope.
  L2  render                HostViewport/InteractiveRenderer glue · frame-sync · tile→GL
  L1  project · scene ·     ── the UI-agnostic CORE (no ImGui/GL/SDL) ──
      interact · commands ·    unit-tested headless
-     dockmodel
+     dockmodel · writer
  L0  base · platform · gl  value types · PlatformServices seam · GL abstraction
 ```
 
@@ -236,12 +275,13 @@ not a hope.
 | `base` | 0 | — | no |
 | `platform` | 0 | base | no |
 | `gl` | 0 | base | GL only |
+| `writer` | 1 | base, platform (**no libarbc**) | no |
 | `project` | 1 | base, platform, **libarbc** | no |
 | `scene` | 1 | base, project, libarbc | no |
 | `interact` | 1 | base, scene, libarbc | **no** |
 | `commands` | 1 | base, project, scene | no |
 | `dockmodel` | 1 | base, platform | **no** |
-| `render` | 2 | base, project, scene, gl, libarbc | GL, not ImGui |
+| `render` | 2 | base, project, scene, gl, writer, libarbc | GL, not ImGui |
 | `views` | 3 | scene, interact, commands, render, dockmodel, **imgui** | yes |
 | `dock` | 3 | dockmodel, views, imgui | yes |
 | `app` / `main` | 4 | everything | yes |

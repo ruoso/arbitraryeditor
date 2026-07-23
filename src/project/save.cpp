@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -95,7 +96,8 @@ FilesystemAssetSink::put(std::string_view resolved_uri, std::span<const std::byt
 
 platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
                                            const ProjectLayout& layout, const arbc::Document& doc,
-                                           const arbc::Registry& registry) {
+                                           const arbc::Registry& registry,
+                                           const WriterPost& post_writer) {
   // Ensure `assets/` (and, by extension, the root) exists before any blob or the
   // canonical publish. Save is a publish step; `make_directories` is idempotent
   // mkdir -p. The workspace and its checkpoints are deliberately untouched (D16/§9).
@@ -123,9 +125,23 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
   arbc::SaveContext ctx(layout.canonical.string());
   ctx.set_asset_sink(&sink);
 
-  // Capture on the writer thread (A4), then serialize off the pinned immutable
-  // snapshot — no new thread, no off-UI submit (that is editor.canvas.frame_sync).
-  const arbc::ContentSnapshot snapshot = arbc::capture_snapshot(doc, bridge);
+  // POST the capture, serialize off-thread (D-writer_thread-7). `capture_snapshot` is a READ,
+  // but it copies the writer-owned content side-map and unknown-field stash, so it belongs on the
+  // writer thread; everything past it runs over an immutable, off-thread-safe snapshot, which is
+  // exactly the split `document_serialize.hpp` designed. With no `post_writer` the caller is
+  // already the writer identity (the headless path) and it captures inline.
+  arbc::ContentSnapshot snapshot;
+  const std::function<void()> capture = [&] { snapshot = arbc::capture_snapshot(doc, bridge); };
+  if (post_writer) {
+    post_writer(capture);
+  } else {
+    capture();
+  }
+  if (!snapshot.state) {
+    // The post was refused (the writer is stopping) — nothing was captured, so publish nothing
+    // rather than dumping an empty document over a live `project.arbc`.
+    return make_error_code(SaveError::SerializeFailed);
+  }
   const std::uint64_t revision = snapshot.state->revision();
   const arbc::expected<std::string, arbc::SerializeError> bytes =
       arbc::serialize_snapshot(snapshot, codecs, ctx);
@@ -154,7 +170,8 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
 platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
                                               const std::filesystem::path& target_root,
                                               const arbc::Document& doc,
-                                              const arbc::Registry& registry) {
+                                              const arbc::Registry& registry,
+                                              const WriterPost& post_writer) {
   const ProjectLayout layout = project_layout(target_root);
 
   // Refuse to clobber an existing project (D-save_as-4): silently `atomic_replace`-ing
@@ -171,7 +188,7 @@ platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
   // target layout so `project.arbc` + the content-addressed `assets/` land under
   // `target_root`. Captures the current in-memory state; the source project is never
   // touched. `save_project` `make_directories`-es `assets/` (and thus the root).
-  platform::Result<SaveOutcome> published = save_project(fs, layout, doc, registry);
+  platform::Result<SaveOutcome> published = save_project(fs, layout, doc, registry, post_writer);
   if (!published.has_value()) {
     return published.error();
   }
