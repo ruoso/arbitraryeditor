@@ -251,6 +251,12 @@ task editor "Editor — host GUI over libarbc" {
       depends !arbc_v020
       note "arbc v0.2.0 (#10/#11) publishes the id->Content* bindings copy-on-write behind an atomic, so the render-thread for_each_content/resolve walk reads a stable snapshot while a UI-thread add_content rebinds — the d_contents read race edit_render_sync's doc_mu papered over is gone in the library. Retire doc_mu (declaration, the drive_once hold, the apply_edit wrap) and keep apply_edit as the writer-thread edit seam. Supersedes editor.canvas.edit_render_sync's D-edit_render_sync-1 (doc_mu now redundant on the read side). NOTE the residual: HostViewport::settle_external_loads is itself a render-thread writer-publish, a second writer *identity* (arbc#7) that doc_mu never fixed — inert on documents with no pending external loads (every path exercised today). It is a LIBRARY-owned contract violation — HostViewport::step() publishes the arrival on the render thread — filed upstream as ruoso/arbitrarycomposer#13; the host cannot fix it without a library change. Design: docs/01-architecture.md A4/A4.1. Refinement: tasks/refinements/editor/single_writer.md"
     }
+    task focused_canvas_indicator "Show which canvas the framing-derived verbs act on" {
+      effort 0.5d
+      allocate team
+      depends editor.cameras.mint_from_focused_canvas
+      note "editor.cameras.mint_from_focused_canvas makes window focus semantically load-bearing — the focused canvas decides what 'New Shot From View' promotes and where an inserted cell lands — but leaves it invisible: ImGui's own focus chrome is a title-bar tint that is easy to miss in a two-pane dock and is absent while the rail holds focus. Draw a passive marker on the pane CanvasView::focused_view_id() names (a one-pixel accent border inside the pane rect, or a small badge beside the existing camera-picker overlay at src/app/canvas_view.cpp:236-245), driven from the sticky hint rather than from live ImGui focus so it persists across the rail click — plus an e2e phase asserting the marker follows WindowFocus and survives a rail interaction. Nothing in dockmodel, nothing in dock (D18's 'no privileged editor area' is about layout, not about indicating where the pointer verb applies). Source-of-debt: tasks/refinements/cameras/mint_from_focused_canvas.md. Design: docs/00-design.md D23, D18."
+    }
   }
 
   # ---- Cameras (D2/D9/D14) ----
@@ -320,8 +326,9 @@ task editor "Editor — host GUI over libarbc" {
     task mint_from_focused_canvas "Promote the focused canvas's framing, not canvas#1's" {
       effort 0.5d
       allocate team
+      complete 100
       depends !new_shot_from_view
-      note "CanvasView::primary_framing() (src/app/canvas_view.cpp:523-534) always returns the lowest-id sized presenter, so with two canvases open 'New Shot From View' promotes canvas#1 even when the user works in canvas#2. Add focused-canvas view id to CanvasView (set from ImGui::IsWindowFocused at draw time, fallback to lowest-id), expose focused_framing(), bind the gateway's framing provider to it, move insert_cell's provisional placement to the same source, and add a multi_canvas e2e. Source-of-debt: tasks/refinements/cameras/new_shot_from_view.md. Design: docs/00-design.md D23, D18."
+      note "CanvasView::primary_framing() (src/app/canvas_view.cpp:523-534) always returns the lowest-id sized presenter, so with two canvases open 'New Shot From View' promotes canvas#1 even when the user works in canvas#2. Add focused-canvas view id to CanvasView (set from ImGui::IsWindowFocused at draw time, fallback to lowest-id), expose focused_framing(), bind the gateway's framing provider to it, move insert_cell's provisional placement to the same source, and add a multi_canvas e2e. Source-of-debt: tasks/refinements/cameras/new_shot_from_view.md. Design: docs/00-design.md D23, D18. Refinement: tasks/refinements/cameras/mint_from_focused_canvas.md"
     }
     task export "Export via cameras (render_offline); PNG; batch; contact sheet" {
       effort 3d

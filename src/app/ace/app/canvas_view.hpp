@@ -118,6 +118,20 @@ public:
   // nothing here mutates the Document, so it is a plain UI-thread session read.
   ViewFraming primary_framing() const;
 
+  // The framing of the canvas pane the user most recently WORKED IN — the source both
+  // framing-derived verbs read (D23's "which viewport", D-mint_from_focused_canvas-1/-4):
+  // the focused pane's framing when it is live and sized, else `primary_framing()`'s
+  // lowest-id fallback, else the zero "no live canvas" sentinel. With a single canvas open
+  // the two accessors are bit-identical.
+  ViewFraming focused_framing() const;
+
+  // The STICKY focused-canvas hint itself (empty when no canvas has held focus, or when the
+  // one that did was closed) — stamped in `draw_content` from `ImGui::IsWindowFocused`, not
+  // polled at query time: the rail `Selectable` that triggers a mint steals focus first, so a
+  // poll would see no focused canvas on every mint (D-mint_from_focused_canvas-1). Exposed so
+  // the e2e can pin the TRACKING separately from the selection rule.
+  std::string_view focused_view_id() const;
+
   // Stop + join the render thread and release every GL texture while the context is
   // still valid (before shutdown). Safe to call twice (the destructor also calls it).
   void destroy();
@@ -136,7 +150,15 @@ private:
     int tex_width = 0;
     int tex_height = 0;
     arbc::Affine camera = arbc::Affine::identity(); // the transient viewport camera
-    double scale_bar_units = 0.0;                   // last scale-bar length (composition units)
+    // The camera this pane is ACTUALLY SHOWING, refreshed once per frame: the shot's derived
+    // comp->device camera while looking through one, else `camera`. Paired with
+    // `requested_width/height` it is the pane's `ViewFraming` — and it exists because that
+    // pair is otherwise INCOHERENT in look-through mode, where the size is the shot's fitted
+    // crop (D-look_through-2) while `camera` is frozen at its last free value
+    // (D-look_through-6). Both framing accessors read this, never `camera`
+    // (D-mint_from_focused_canvas-5).
+    arbc::Affine framing_camera = arbc::Affine::identity();
+    double scale_bar_units = 0.0; // last scale-bar length (composition units)
     // The active-camera selection (editor.cameras.look_through, D-look_through-1): nullopt =
     // free viewport, an ObjectId = look through that shot. UI-thread-only session state.
     std::optional<arbc::ObjectId> look_through;
@@ -192,11 +214,22 @@ private:
                       const std::vector<interact::PickTarget>& targets,
                       const views::CanvasInput& in, float origin_x, float origin_y);
 
+  // Project `presenters_` (already view-id ordered) into `framing_for_focus`'s pure input and
+  // apply it with `focused` as the hint. Both public framing accessors are one call to this,
+  // which is what makes their single-canvas bit-identity structural rather than a claim about
+  // two hand-written loops (D-mint_from_focused_canvas-3).
+  ViewFraming framing_for(std::string_view focused) const;
+
   commands::AppState& state_;
   render::CanvasHost host_;
   platform::NativeThreads threads_;
   std::unique_ptr<platform::JoinHandle> render_thread_;
   std::map<std::string, Presenter, std::less<>> presenters_;
+  // The sticky focused-canvas hint (D-mint_from_focused_canvas-1/-2): UI-thread session
+  // state, written only in `draw_content`, cleared only in `reconcile` when that pane's
+  // presenter is dropped. Never serialized, never a transaction, never read by
+  // `commands`/`scene`/`project` (D15/D19).
+  std::string focused_view_id_;
 };
 
 } // namespace ace::app

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -77,6 +78,21 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
   if (pane_width <= 0 || pane_height <= 0) {
     return; // degenerate pane — render nothing until it has area (Constraint 7).
   }
+  // Remember which canvas the user last WORKED IN (D-mint_from_focused_canvas-1). The dock
+  // begins each pane's window with the view id AS the window name (src/dock/dock.cpp), and
+  // this body runs inside that Begin, so this answers "is THIS canvas focused?" with no id
+  // plumbing. RootAndChildWindows because the pane hosts the camera-picker overlay and popups
+  // — clicking one of those is working in this canvas (Constraint 11).
+  //
+  // STICKY: set on a focused frame, never cleared on an unfocused one. The rail item that
+  // triggers a mint is an ImGui::Selectable in the Tool Rail window, so by the time the verb
+  // runs NO canvas is focused; a per-frame poll would therefore fall back to canvas#1 on
+  // every single mint — i.e. reproduce the exact bug this hint exists to fix. A background
+  // dock tab does not draw at all, so a poll would also lose a focused-then-tabbed-behind
+  // pane. Cleared only in reconcile(), when this pane leaves the layout.
+  if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+    focused_view_id_ = view_id;
+  }
   // Lazily register this canvas#N on its first appearance: add the host entry (idempotent)
   // and its presenter (D-multi_canvas-5). The entry's cache is constructed on the render
   // thread; the first settled frame arrives asynchronously through the double-buffer.
@@ -120,6 +136,13 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       }
     }
   }
+
+  // The framing this pane OFFERS the framing-derived verbs, paired with the target size
+  // below: the shot's derived comp->device camera while looking through one, else the free
+  // transient camera (D-mint_from_focused_canvas-5). Set here so a pane whose first frame has
+  // not landed yet still reports a COHERENT (camera, size) pair, and refreshed after the nav
+  // gestures below so the pair never lags a frame behind what is on screen.
+  p.framing_camera = shot_camera ? *shot_camera : p.camera;
 
   // The target size drives this entry's viewport: post a resize REQUEST only on a genuine
   // change (Constraint 1/7). Sizing the viewport to the shot's crop is what clips it, so the
@@ -212,7 +235,8 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
     // transient camera — on a real change (D-nav-1: never a transact; the submit rides the
     // per-entry render-thread channel, Constraint 2). Dedup against the last submitted value,
     // which diverges from p.camera while a shot is selected.
-    const arbc::Affine want = shot_camera ? *shot_camera : p.camera;
+    p.framing_camera = shot_camera ? *shot_camera : p.camera;
+    const arbc::Affine want = p.framing_camera;
     if (!(want == p.submitted)) {
       p.submitted = want;
       host_.request_camera(view_id, want);
@@ -499,6 +523,14 @@ void CanvasView::reconcile(const std::vector<std::string>& live_view_ids) {
       if (it->second.texture != 0) {
         gl::destroy_texture(it->second.texture);
       }
+      // Drop the sticky focus hint with the pane it named (D-mint_from_focused_canvas-2).
+      // The rule already degrades a stale id to the lowest-id fallback, so this is hygiene
+      // rather than correctness — but view ids are minted from the layout and can be REUSED
+      // after a close, and without the clear a freshly-opened canvas#2 would inherit the
+      // previous canvas#2's focus without ever having been focused.
+      if (it->first == focused_view_id_) {
+        focused_view_id_.clear();
+      }
       host_.remove(it->first);
       it = presenters_.erase(it);
     } else {
@@ -520,18 +552,30 @@ double CanvasView::scale_bar_units(std::string_view view_id) const {
   return it == presenters_.end() ? 0.0 : it->second.scale_bar_units;
 }
 
-ViewFraming CanvasView::primary_framing() const {
-  // `presenters_` is id-ordered, so "canvas#1" wins over "canvas#2" — a deterministic
-  // choice, not the most-recently-drawn one. A pane that has never been sized carries
-  // no framing to read.
-  for (const auto& entry : presenters_) {
-    const Presenter& presenter = entry.second;
-    if (presenter.requested_width > 0 && presenter.requested_height > 0) {
-      return ViewFraming{presenter.camera, presenter.requested_width, presenter.requested_height};
-    }
+ViewFraming CanvasView::framing_for(std::string_view focused) const {
+  // `presenters_` is id-ordered, so the projection hands the rule its panes in view-id order
+  // and "canvas#1" wins the fallback over "canvas#2". The `string_view` keys borrow the map's
+  // own storage, which outlives this expression. This runs only on a user action (a mint or
+  // an insert), never per frame.
+  std::vector<PaneFraming> panes;
+  panes.reserve(presenters_.size());
+  for (const auto& [id, presenter] : presenters_) {
+    panes.push_back(PaneFraming{id, ViewFraming{presenter.framing_camera, presenter.requested_width,
+                                                presenter.requested_height}});
   }
-  return ViewFraming{};
+  return framing_for_focus(panes, focused);
 }
+
+ViewFraming CanvasView::primary_framing() const {
+  // The EMPTY-focus projection of the shared rule: the first (lowest-id) live, sized pane —
+  // a deterministic choice, not the most-recently-drawn one, and deliberately unchanged
+  // (D-mint_from_focused_canvas-6). A pane that has never been sized carries no framing.
+  return framing_for(std::string_view{});
+}
+
+ViewFraming CanvasView::focused_framing() const { return framing_for(focused_view_id_); }
+
+std::string_view CanvasView::focused_view_id() const { return focused_view_id_; }
 
 void CanvasView::destroy() {
   // Deterministic teardown (Constraint 5): stop the loop, wake it, and join BEFORE

@@ -2,6 +2,9 @@
 
 #include <arbc/base/transform.hpp>
 
+#include <span>
+#include <string_view>
+
 namespace ace::app {
 
 // A canvas pane's TRANSIENT viewport framing, taken by VALUE (editor.cells.model
@@ -19,5 +22,33 @@ struct ViewFraming {
   int pane_w = 0;
   int pane_h = 0;
 };
+
+// One live canvas pane's offered framing, keyed by its dock view id ("canvas#1", "canvas#2",
+// …) — the input row of the selection rule below. `view_id` is a NON-OWNING view into the
+// caller's own key storage (`CanvasView::presenters_`'s keys), so a `PaneFraming` must not
+// outlive it; every shipped caller builds the array and consumes it in one expression.
+struct PaneFraming {
+  std::string_view view_id;
+  ViewFraming framing;
+};
+
+// WHICH pane's framing the framing-derived verbs act on (D23's "which viewport, when more
+// than one canvas is open", D-mint_from_focused_canvas-3): the FOCUSED pane's framing when
+// that pane is present and sized, else the FIRST sized pane in `panes_by_id` order (the
+// caller passes them view-id ordered, so that is the lowest-id live pane), else the zero
+// `ViewFraming` — the "no live canvas" sentinel documented above, which
+// `AppProjectGateway::live_view_framing()` keys off to refuse a mint.
+//
+// The rule is TOTAL: a focused id naming no pane (a closed canvas, or one never focused) and
+// a focused pane that exists but has never been sized both DEGRADE to the fallback, never to
+// the sentinel — refusing a mint the user can plainly perform would be a regression wearing a
+// fix's clothes (D-mint_from_focused_canvas-2). An empty `focused_view_id` therefore
+// reproduces the historical lowest-id rule exactly, which is what keeps
+// `CanvasView::primary_framing()` bit-identical.
+//
+// Pure: no ImGui, no GL, no `CanvasView` — the whole branch matrix is headless-testable
+// (docs/01-architecture.md §8's "logic belongs where Catch2 can see it").
+ViewFraming framing_for_focus(std::span<const PaneFraming> panes_by_id,
+                              std::string_view focused_view_id);
 
 } // namespace ace::app

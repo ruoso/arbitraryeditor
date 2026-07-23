@@ -282,10 +282,13 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     // The gateway outlives the draw loop alongside `canvas`, so the capture is safe.
     app_gateway->set_edit_runner(
         [&canvas](const std::function<void()>& edit) { canvas.apply_edit(edit); });
-    // The provisional-placement framing source (editor.cells.model, Constraint 7):
-    // an inserted cell is centred in the region the live canvas is looking at, read
-    // by value at insert time. Same lifetime argument as the edit runner above.
-    app_gateway->set_view_framing([&canvas] { return canvas.primary_framing(); });
+    // The ONE framing source both framing-derived verbs read (D-mint_from_focused_canvas-4):
+    // `insert_cell`'s provisional placement (editor.cells.model, Constraint 7) and
+    // `new_shot_from_view`'s mint (D23) both go through this provider, so binding it to the
+    // FOCUSED canvas moves both at once — an inserted cell lands where the canvas the user is
+    // working in is looking, and a mint promotes that same pane rather than canvas#1. Read by
+    // value at verb time. Same lifetime argument as the edit runner above.
+    app_gateway->set_view_framing([&canvas] { return canvas.focused_framing(); });
     project_gateway = app_gateway.get();
   }
   dockspace.set_project_gateway(project_gateway);
