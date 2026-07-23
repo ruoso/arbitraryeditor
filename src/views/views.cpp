@@ -89,7 +89,13 @@ CanvasInput draw_canvas_interactive(unsigned int texture, int width, int height)
   in.shift = io.KeyShift;
   in.alt = io.KeyAlt;
   in.ctrl = io.KeyCtrl;
+  in.super = io.KeySuper; // D7's "Cmd/Ctrl" needs both halves (D-selection-10)
   in.rotate = ImGui::IsKeyDown(ImGuiKey_R);
+  // The press anchor a marquee drags from (D-selection-10). ImGui records the position of the
+  // last left-press, so this stays valid for the WHOLE drag rather than only on the activation
+  // frame — the L4 wiring reads it once at `pressed` and needs no anchor bookkeeping of its own.
+  in.press_x = io.MouseClickedPos[0].x - origin.x;
+  in.press_y = io.MouseClickedPos[0].y - origin.y;
   return in;
 }
 

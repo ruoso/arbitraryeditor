@@ -126,6 +126,14 @@ struct Cell {
   arbc::ObjectId layer;   // the layer that places it
   std::string kind_id;    // resolved through the `KindBridge`; EMPTY when unresolvable
   arbc::Affine placement; // the placing layer's `Affine`
+  // The live content's own extent in CONTENT space (`arbc::Content::bounds()`), read off the
+  // SAME pinned snapshot that produced `placement` (D-selection-11) — so a consumer never
+  // mixes an extent from one document generation with a placement from another. `nullopt`
+  // means UNBOUNDED: a factory-built `org.arbc.solid` genuinely covers the whole plane
+  // (D-cells_model-3), which `interact::pick` treats as a hit everywhere and the marquee
+  // excludes. `interact::pick_targets`, the inspector's "placed size", the Layers list, the
+  // Overview, and fit-to-cell all read this one number.
+  std::optional<arbc::Rect> content_bounds;
 };
 
 // Every cell in the root composition, in layer (z) order, over the lock-free `pin()`

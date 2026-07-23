@@ -64,6 +64,18 @@ struct CanvasInput {
   bool alt = false;      // Alt from center (D9)
   bool ctrl = false;     // Cmd/Ctrl bypass-snap (D9)
   bool rotate = false;   // the dutch-rotation gate held (R; D-manip-5, modifier-gated)
+  // --- selection input (editor.cells.selection; D7/D-selection-10) -------------
+  // The PRESS ANCHOR: the pointer at the activation edge, relative to the image top-left
+  // (device px) — a marquee needs where the drag BEGAN, and `focus_x/focus_y` report only
+  // where it is now. Stable for the whole drag (read from ImGui's recorded click position),
+  // so the L4 wiring stays stateless about the anchor.
+  float press_x = 0.0F;
+  float press_y = 0.0F;
+  // The Super/Cmd modifier, reported SEPARATELY from `ctrl`. D7 says "Cmd/Ctrl select-behind",
+  // and `ctrl` is `io.KeyCtrl` only — folding Super into it would silently change
+  // `editor.cameras.manip`'s bypass-snap gate, which is not this leaf's to change, while
+  // leaving it out would make select-behind unreachable on macOS. Consumers OR the two.
+  bool super = false;
 };
 
 // Draw the Canvas body AND read its navigation gestures: the `draw_canvas_image`

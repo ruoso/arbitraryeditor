@@ -90,3 +90,19 @@ record here for human review when profiling data is available.
 **Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-7. Also noted in `tasks/refinements/cameras/model.md`.
 
 `arbc::Document::add_content` self-commits (it is the only vtable-binding call), so every cell or camera create costs two journal entries: content first, then `transact` → `add_layer` → `attach_layer` → `commit`. The mirror verb `remove_content` (document.hpp:131) is atomic in one entry. A future `create_content_and_attach` on `Document` would collapse the two-entry create to one, making undo semantics uniform. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
+
+---
+
+## scene/ charter still lists "selection" but Selection lives in commands/
+
+**Source:** `tasks/refinements/editor.cells/selection.md` (cells.selection, 2026-07-23) — Open questions #1.
+
+`docs/01-architecture.md:167` charters `scene/` as "cells · cameras · **selection** · z-order", but the shipped `commands::Selection` lives in `src/commands/` (D-app_state-3). This leaf follows the shipped reality — `commands` is the better home (selection is app state that sits beside `AppState`, not a document projection) and moving the type across components for a one-line charter would be churn with no behavioural change. Whether to correct the §7 charter line is an editorial call for a human; A17 added in this commit documents where hit-testing lives.
+
+---
+
+## arbc::Content::bounds() thread-safety guarantee absent from contract
+
+**Source:** `tasks/refinements/editor.cells/selection.md` (cells.selection, 2026-07-23) — Open questions #2.
+
+`pick_targets` calls `arbc::Content::bounds()` from the UI thread while the render thread walks the same document. The lock-free `pin()` seam covers the record walk, and `bounds()` is an immutable property for every kind shipped today — but `contract/content.hpp:487` states no thread-safety guarantee. A future kind whose bounds change under an `Editable` edit (e.g. a growing raster, per `editor.cells.resolution`'s "resample to crisp") would make it a live read/write pair. The TSan case in `tests/canvas_host_test.cpp` is the tripwire. If it ever fires, the fix is a libarbc-side contract statement, not an editor-side lock — upstream-issue candidate for `ruoso/arbitrarycomposer`.

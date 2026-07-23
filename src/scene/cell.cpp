@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -344,10 +345,18 @@ std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& re
     if (named && id == CameraContent::kind_id) {
       return; // a camera is a scene object, but it is not a cell (A14)
     }
+    // The live extent, off the SAME pinned generation as the placement (D-selection-11).
+    // `Document::resolve` is a lock-free pinned read of the copy-on-write binding table, so
+    // this adds no lock and no second walk; an unbound id (or an unbounded kind) is `nullopt`,
+    // which is the honest "covers the whole plane" answer, not an error.
+    std::optional<arbc::Rect> bounds;
+    if (const arbc::Content* content = document.resolve(layer->content); content != nullptr) {
+      bounds = content->bounds();
+    }
     // An unresolvable token surfaces with an empty kind_id rather than vanishing —
     // an unknown-passthrough cell is still a cell (D-cells_model-8).
-    result.push_back(
-        Cell{layer->content, layer_id, named ? std::string(id) : std::string(), layer->transform});
+    result.push_back(Cell{layer->content, layer_id, named ? std::string(id) : std::string(),
+                          layer->transform, bounds});
   });
   return result;
 }

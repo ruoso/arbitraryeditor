@@ -3,6 +3,7 @@
 #include <arbc/base/ids.hpp>
 
 #include <cstddef>
+#include <span>
 #include <vector>
 
 namespace ace::commands {
@@ -36,6 +37,24 @@ public:
   void toggle(arbc::ObjectId id);
   // Empty the selection (primary := the invalid id).
   void clear();
+
+  // --- the marquee / select-all verbs (editor.cells.selection, D-selection-2) -----------
+  // Replace the whole selection with `ids`, in order, de-duplicated; primary := the LAST
+  // surviving id (the "most recently added" convention `add` already follows). An empty
+  // `ids` is `clear()`.
+  void replace_all(std::span<const arbc::ObjectId> ids);
+  // Add every id in `ids` not already present, preserving the existing order and appending
+  // the newcomers; primary := the last id in `ids` (or unchanged when `ids` is empty).
+  // Duplicate-safe both against the current members and within `ids`.
+  void add_all(std::span<const arbc::ObjectId> ids);
+
+  // Drop every selected id that is NOT in `live` (D-selection-7 / Constraint 10). The canvas
+  // calls this once per frame against the freshly-assembled pick-target list, so undo, GC, or
+  // a delete can never leave a consumer holding a dangling `ObjectId`. Surviving members keep
+  // their order; `primary()` is preserved when it survives and otherwise re-points to the last
+  // survivor (or the invalid id when none survive — pruning against an empty `live` is
+  // `clear()`). A redo that restores the same object does NOT restore the selection.
+  void prune(std::span<const arbc::ObjectId> live);
 
 private:
   std::vector<arbc::ObjectId> items_;

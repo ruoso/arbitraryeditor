@@ -10,6 +10,7 @@
 // WorkerPool (worker threads) through the full add->render->edit->remove->teardown
 // lifecycle on a spawned render thread — the escalated ASan/TSan concurrency target.
 #include <ace/interact/interact.hpp>
+#include <ace/interact/pick.hpp>
 #include <ace/platform/threads.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/canvas_host.hpp>
@@ -996,4 +997,69 @@ TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against th
   // Every insert landed exactly once: the probe's own untokened solid plus k_inserts.
   CHECK(ace::scene::cells(*probe.document, registry).size() ==
         static_cast<std::size_t>(k_inserts) + 1);
+}
+
+TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live render walk") {
+  // editor.cells.selection Acceptance (Threading): selection mutates NOTHING, so this leaf adds
+  // no writer path — but `interact::pick_targets` now calls a `Content` VIRTUAL
+  // (`arbc::Content::bounds()`, via `scene::cells`' pinned walk, D-selection-11) on the UI
+  // thread against a document a render thread is walking. The lock-free `pin()` seam covers the
+  // record walk; whether it also covers the `bounds()` call is the specific thing this case
+  // pins. Repeated pick_targets + pick on the UI thread against a LIVE rendering real-pool host
+  // (the D-edit_render_sync-3 anchor) while cell inserts stream through `apply_edit`. No new
+  // lock and no new thread; a TSan/ASan report here is the tripwire the refinement's parking-lot
+  // item names (the fix would be a libarbc-side contract statement, not an editor-side lock).
+  ProbeDocument probe = build_probe_document();
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  ace::platform::NativeThreads threads;
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // A camera in the mix so the merge half of the adapter (cells + cameras) is walked too.
+  host.apply_edit([&] {
+    REQUIRE(ace::scene::add_camera(*probe.document, registry, "Hero",
+                                   ace::scene::Resolution{16, 16},
+                                   arbc::Affine::translation(4.0, 4.0))
+                .valid());
+  });
+
+  constexpr int k_inserts = 24;
+  std::size_t last_targets = 0;
+  for (int i = 0; i < k_inserts; ++i) {
+    host.apply_edit([&] {
+      const bool solid = (i % 2) == 0;
+      const auto added = ace::scene::add_cell(
+          *probe.document, registry, solid ? "org.arbc.solid" : "org.arbc.raster",
+          solid ? "0.1,0.2,0.3,1" : "24x24",
+          arbc::Affine::translation(static_cast<double>(i), static_cast<double>(i)));
+      REQUIRE(added.has_value());
+    });
+    // The UI-thread read the canvas performs EVERY frame: assemble the stack (which resolves
+    // each Content and calls bounds()) and hit-test it, straight against the live render walk.
+    for (int r = 0; r < 4; ++r) {
+      const std::vector<ace::interact::PickTarget> targets =
+          ace::interact::pick_targets(*probe.document, registry);
+      last_targets = targets.size();
+      const ace::interact::PickHit hit =
+          ace::interact::pick(targets, arbc::Vec2{8.0, 8.0}, 2.0, 3.0);
+      REQUIRE(hit.hit); // the probe's own unbounded solid is always under the cursor
+      REQUIRE(ace::interact::marquee(targets, arbc::Rect{0.0, 0.0, 64.0, 64.0}).size() <=
+              targets.size());
+    }
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  host.stop();
+  handle->join();
+
+  // A stable final target count: the probe's own untokened solid + every insert + the camera.
+  CHECK(last_targets == static_cast<std::size_t>(k_inserts) + 2);
+  CHECK(ace::interact::pick_targets(*probe.document, registry).size() == last_targets);
 }

@@ -2,6 +2,7 @@
 #include <ace/commands/app_state.hpp>
 #include <ace/gl/gl.hpp>
 #include <ace/interact/interact.hpp>
+#include <ace/interact/pick.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
@@ -15,6 +16,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <optional>
 #include <string>
@@ -24,6 +26,40 @@ namespace {
 // The zoom factor per wheel notch (editor.canvas.nav): each notch multiplies the
 // composition→device scale by this, so a wheel of `w` notches zooms by k_zoom_base^w.
 constexpr double k_zoom_base = 1.2;
+
+// The four-arm switch that turns L1's `SelectionChange` VALUE into a mutation of the ONE
+// project-level selection (D-selection-2). `interact` may not see `commands` and does not: this
+// is the whole of the L4 side of the modifier policy, and every branch it dispatches to is a
+// shipped `commands::Selection` verb.
+void apply_selection_change(ace::commands::Selection& selection,
+                            const ace::interact::SelectionChange& change) {
+  switch (change.op) {
+  case ace::interact::SelectOp::None:
+    break; // a Shift-miss: leave the selection exactly as it is
+  case ace::interact::SelectOp::Replace:
+    selection.replace_all(change.ids);
+    break;
+  case ace::interact::SelectOp::Add:
+    selection.add_all(change.ids);
+    break;
+  case ace::interact::SelectOp::Toggle:
+    for (const arbc::ObjectId id : change.ids) {
+      selection.toggle(id);
+    }
+    break;
+  case ace::interact::SelectOp::Clear:
+    selection.clear();
+    break;
+  }
+}
+
+// The composition-space marquee rectangle spanned by two corners, normalised so x0<x1/y0<y1
+// regardless of the drag direction (a rect built backwards would be `empty()` and select
+// nothing).
+arbc::Rect marquee_rect(arbc::Vec2 anchor, arbc::Vec2 pointer) {
+  return arbc::Rect{std::min(anchor.x, pointer.x), std::min(anchor.y, pointer.y),
+                    std::max(anchor.x, pointer.x), std::max(anchor.y, pointer.y)};
+}
 } // namespace
 
 namespace ace::app {
@@ -161,6 +197,15 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       // picker (which is drawn last). Free viewport only — reframing a shot is a scene edit,
       // distinct from looking through one (D9).
       draw_frame_gizmos(view_id, p, cameras, in, pane_origin.x, pane_origin.y);
+
+      // The project-level selection over the SAME press (editor.cells.selection; D7's ONE
+      // select tool): a press over a camera border both selects that camera and starts the
+      // grab above — one gesture, not two (Constraint 11). The pick stack is assembled in L1
+      // (A17) as a plain lock-free `pin()` read; it opens no transaction and takes no lease,
+      // so this deliberately does NOT go through apply_edit (Constraint 2/12).
+      const std::vector<interact::PickTarget> targets =
+          interact::pick_targets(state_.document(), state_.registry());
+      draw_selection(view_id, p, targets, in, pane_origin.x, pane_origin.y);
     }
 
     // Submit the resolved camera — the shot's affine while looking through, else the free
@@ -299,7 +344,11 @@ void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,
   interact::FrameHandle hover_handle = interact::FrameHandle::None;
   const scene::Camera* hover_cam = nullptr;
   for (const scene::Camera& cam : cameras) {
-    draw_frame(cam.frame, cam.resolution.width, cam.resolution.height, /*active=*/false);
+    // A SELECTED camera reuses the existing `active` frame style — the whole of its selection
+    // chrome (D-selection-8): the handles are `editor.cells.gizmo`'s / this leaf's frame grab,
+    // and the selection itself justifies exactly an outline.
+    draw_frame(cam.frame, cam.resolution.width, cam.resolution.height,
+               /*active=*/state_.selection().contains(cam.id));
     if (hover_cam == nullptr) {
       const interact::FrameHandle h =
           interact::hit_frame(cam.frame, cam.resolution.width, cam.resolution.height, pointer_comp,
@@ -321,6 +370,107 @@ void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,
     p.gizmo_grab_comp = pointer_comp;
     p.gizmo_res_w = hover_cam->resolution.width;
     p.gizmo_res_h = hover_cam->resolution.height;
+  }
+}
+
+void CanvasView::draw_selection(std::string_view view_id, Presenter& p,
+                                const std::vector<interact::PickTarget>& targets,
+                                const views::CanvasInput& in, float origin_x, float origin_y) {
+  (void)view_id;
+  // The ONE project-level selection (D19/A5/A7): read fresh off AppState and written through
+  // the same reference. The Presenter holds no copy — only the in-progress marquee gesture.
+  commands::Selection& selection = state_.selection();
+
+  // Prune stale ids once per frame, at the one place the live set is already computed
+  // (D-selection-7 / Constraint 10): undo, GC, or a delete can drop a selected object, and every
+  // consumer this leaf unblocks resolves selected ids against the document. A redo that restores
+  // the same object does NOT restore the selection — documented, not a bug.
+  const std::vector<arbc::ObjectId> live = interact::all_ids(targets);
+  selection.prune(live);
+
+  const std::optional<arbc::Affine> view_inv = p.camera.inverse();
+  if (!view_inv) {
+    p.marquee_active = false;
+    return; // degenerate viewport camera: no picking and no chrome this frame
+  }
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  auto to_screen = [&](arbc::Vec2 comp) {
+    const arbc::Vec2 dev = p.camera.apply(comp);
+    return ImVec2(origin_x + static_cast<float>(dev.x), origin_y + static_cast<float>(dev.y));
+  };
+  const arbc::Vec2 pointer_comp = view_inv->apply(arbc::Vec2{in.focus_x, in.focus_y});
+  // Tolerances in COMPOSITION units, converted from screen px through the view scale — the same
+  // recipe the frame gizmo uses, so a camera border stays equally grabbable at every zoom
+  // (Constraint 4). A cell body takes none: it is a filled region, not an outline.
+  const double scale = p.camera.max_scale();
+  const double edge_tol = scale > 0.0 ? 6.0 / scale : 0.0;
+  const double corner_tol = scale > 0.0 ? 9.0 / scale : 0.0;
+  // Space held ⇒ the drag is a nav pan of the VIEW, inert on objects (Constraint 11).
+  const bool space = ImGui::IsKeyDown(ImGuiKey_Space);
+  const bool cmd = in.ctrl || in.super; // D7's "Cmd/Ctrl" needs both halves (D-selection-10)
+
+  if (in.pressed && !space) {
+    const interact::SelectionChange change =
+        interact::click_selection(targets, pointer_comp, edge_tol, corner_tol,
+                                  interact::PickModifiers{in.shift, cmd}, selection.primary());
+    apply_selection_change(selection, change);
+    // The policy returns Clear/None only on a MISS (a hit is always Replace/Toggle), so this is
+    // exactly "the press landed on empty canvas" — which starts a marquee, unless the same press
+    // just started a camera frame grab.
+    const bool missed =
+        change.op == interact::SelectOp::Clear || change.op == interact::SelectOp::None;
+    if (missed && !p.gizmo_camera) {
+      p.marquee_active = true;
+      p.marquee_anchor = view_inv->apply(arbc::Vec2{in.press_x, in.press_y});
+    }
+  }
+
+  if (p.marquee_active) {
+    const arbc::Rect rect = marquee_rect(p.marquee_anchor, pointer_comp);
+    if (in.released) {
+      // Commit on the release edge. A press-and-release with no movement leaves a degenerate
+      // rect, so a plain click on empty canvas resolves to Clear and a Shift-click to None —
+      // the same answer `click_selection` already gave on the press.
+      apply_selection_change(selection, interact::marquee_selection(targets, rect, in.shift));
+      p.marquee_active = false;
+    } else if (!in.down || space) {
+      p.marquee_active = false; // lost activation, or Space took the drag: drop the gesture
+    } else {
+      // The rubber band, mapped through the view camera as a QUAD so it stays correct under any
+      // viewport affine.
+      const ImVec2 a = to_screen(arbc::Vec2{rect.x0, rect.y0});
+      const ImVec2 b = to_screen(arbc::Vec2{rect.x1, rect.y0});
+      const ImVec2 c = to_screen(arbc::Vec2{rect.x1, rect.y1});
+      const ImVec2 d = to_screen(arbc::Vec2{rect.x0, rect.y1});
+      draw_list->AddQuadFilled(a, b, c, d, IM_COL32(120, 200, 255, 40));
+      draw_list->AddQuad(a, b, c, d, IM_COL32(120, 200, 255, 220), 1.0F);
+    }
+  }
+
+  // Select-All / Deselect, scoped to the HOVERED pane (D-selection-9) — matching how the `F`
+  // reset-to-fit chord already works, and keeping Escape out of a modal's way. "All" means all:
+  // cells, cameras, and unbounded content alike, because D7/D20 make them one shape.
+  if (in.hovered) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, /*repeat=*/false)) {
+      selection.clear();
+    } else if (cmd && ImGui::IsKeyPressed(ImGuiKey_A, /*repeat=*/false)) {
+      selection.replace_all(live);
+    }
+  }
+
+  // Selection chrome: a stroked quad along each selected CELL's placed outline (D-selection-8).
+  // Selected cameras are drawn by draw_frame_gizmos in its existing `active` style, and
+  // unbounded content has no outline to draw — it covers the plane, which is the honest picture.
+  for (const interact::PickTarget& target : targets) {
+    if (target.kind != interact::PickKind::Cell || !selection.contains(target.id)) {
+      continue;
+    }
+    const std::optional<std::array<arbc::Vec2, 4>> quad = interact::placed_quad(target);
+    if (!quad) {
+      continue;
+    }
+    draw_list->AddQuad(to_screen((*quad)[0]), to_screen((*quad)[1]), to_screen((*quad)[2]),
+                       to_screen((*quad)[3]), IM_COL32(120, 200, 255, 255), 2.0F);
   }
 }
 

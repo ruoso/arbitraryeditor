@@ -2,6 +2,7 @@
 
 #include <ace/app/view_framing.hpp>
 #include <ace/interact/interact.hpp>
+#include <ace/interact/pick.hpp>
 #include <ace/platform/threads.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
@@ -155,6 +156,13 @@ private:
     arbc::Vec2 gizmo_grab_comp{};                              // pointer in composition at grab
     int gizmo_res_w = 0;
     int gizmo_res_h = 0;
+    // --- marquee gesture (editor.cells.selection; Constraint 1) -----------------
+    // The ONLY selection-adjacent per-pane state this leaf adds — and it is a GESTURE, not a
+    // selection: the one project-level `commands::Selection` lives on `AppState` (D19/A5/A7)
+    // and the canvas holds no copy of it. Armed by a press that hit nothing, cleared on
+    // release / lost activation.
+    bool marquee_active = false;
+    arbc::Vec2 marquee_anchor{}; // the press anchor in COMPOSITION units
   };
 
   // Draw THIS canvas's camera picker (Viewport | shots from scene::cameras) as a compact
@@ -172,6 +180,17 @@ private:
   void draw_frame_gizmos(std::string_view view_id, Presenter& p,
                          const std::vector<scene::Camera>& cameras, const views::CanvasInput& in,
                          float origin_x, float origin_y);
+
+  // Drive the project-level selection over this pane and draw its chrome (editor.cells.selection;
+  // D7/D19). Prunes stale ids against `targets` (Constraint 10), applies the L1 pick/modifier
+  // policy's `SelectionChange` onto the ONE `commands::Selection` on `AppState` — the canvas
+  // keeps no copy (Constraint 1) — and draws a stroked outline per selected cell plus the
+  // in-progress marquee rectangle (D-selection-8; handles are `editor.cells.gizmo`'s). Selecting
+  // is never a transaction (Constraint 2): nothing here opens a `transact` or calls `apply_edit`.
+  // `origin_x`/`origin_y` are the pane's top-left in screen pixels.
+  void draw_selection(std::string_view view_id, Presenter& p,
+                      const std::vector<interact::PickTarget>& targets,
+                      const views::CanvasInput& in, float origin_x, float origin_y);
 
   commands::AppState& state_;
   render::CanvasHost host_;

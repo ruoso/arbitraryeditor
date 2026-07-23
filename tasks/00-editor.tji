@@ -303,6 +303,12 @@ task editor "Editor — host GUI over libarbc" {
       depends !model, editor.canvas.multi_canvas
       note "Make a shot the active camera of a canvas ('look through Hero'); a second canvas can look through a shot for a live export preview beside the editing Viewport. Design: D18. Refinement: tasks/refinements/editor/look_through.md"
     }
+    task frame_selection "Mint a camera fit to the current selection's placed extent" {
+      effort 1d
+      allocate team
+      depends editor.cells.selection, !model
+      note "Implement docs/00-design.md:262-263 'frame selection' command: compute the union of the selected targets' placed extents (arbc::Affine::map_rect over interact::PickTarget, a pure L1 helper beside pick), derive a frame + resolution from it, and dispatch scene::add_camera as one commands::Command, with a rail/inspector affordance and an e2e. Source-of-debt: tasks/refinements/editor.cells/selection.md. Design: docs/00-design.md:262-263 §6."
+    }
     task export "Export via cameras (render_offline); PNG; batch; contact sheet" {
       effort 3d
       allocate team
@@ -323,8 +329,9 @@ task editor "Editor — host GUI over libarbc" {
     task selection "Project-level selection; hit-test; marquee; select-behind" {
       effort 2.5d
       allocate team
+      complete 100
       depends !model, editor.cameras.model
-      note "One project-level selection (canvases are only cameras): click a cell BODY, a camera BORDER/label (interior click-through); marquee multi-select; Cmd/Ctrl-click select-behind. Shared across canvas/list/overview. Design: D7/D19. Refinement: tasks/refinements/selection.md"
+      note "One project-level selection (canvases are only cameras): click a cell BODY, a camera BORDER/label (interior click-through); marquee multi-select; Cmd/Ctrl-click select-behind. Shared across canvas/list/overview. Design: D7/D19. Refinement: tasks/refinements/editor.cells/selection.md"
     }
     task gizmo "Transform gizmo: move / scale / rotate / shear; pivot; snapping" {
       effort 3d
