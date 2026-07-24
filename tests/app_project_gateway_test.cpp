@@ -64,6 +64,20 @@ public:
   }
 };
 
+// A launcher that reports a launch FAILURE — the tests/save_as_test.cpp:108-116 pattern,
+// copied here to drive the `spawn_failed` half of the A24 outcome seam. The target was
+// accepted and the sibling `exec` is what did not happen (a broken install, a missing
+// executable, an exhausted process table).
+class FailingLauncher final : public ace::platform::ProcessLauncher {
+public:
+  mutable bool invoked = false;
+  std::error_code spawn_detached(const std::filesystem::path&,
+                                 const std::vector<std::string>&) const override {
+    invoked = true;
+    return std::make_error_code(std::errc::no_such_file_or_directory);
+  }
+};
+
 // Scripts a folder pick; delivers synchronously, or holds the callback for a
 // manual (later-frame) delivery to model the async lifecycle.
 class ScriptedFolderDialog final : public ace::app::FolderDialog {
@@ -128,9 +142,18 @@ ace::commands::AppState make_degraded_session(const ace::platform::FileSystem& f
 // unchanged, and that makes an unwired session report no loss instead of failing to link.
 class InertGateway final : public ace::dock::ProjectGateway {
 public:
-  bool open_project(const std::filesystem::path&) override { return false; }
-  bool new_project(const std::filesystem::path&, const std::string&) override { return false; }
-  bool open_recent(const std::filesystem::path&) override { return false; }
+  // `refused_target` is the honest inert answer on the A24 seam: this gateway launches
+  // nothing, so it can never report a failed spawn.
+  ace::dock::ProjectEntryOutcome open_project(const std::filesystem::path&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
+  ace::dock::ProjectEntryOutcome new_project(const std::filesystem::path&,
+                                             const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
+  ace::dock::ProjectEntryOutcome open_recent(const std::filesystem::path&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
   void pick_folder(std::function<void(std::optional<std::filesystem::path>)>) override {}
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return false; }
@@ -147,6 +170,7 @@ public:
 
 using ace::app::AppProjectGateway;
 using ace::app::ProjectEntryGateway;
+using ace::dock::ProjectEntryOutcome;
 using ace::dockmodel::RecentProjects;
 
 // --- editor.project.welcome — the session-free base (A22 / D-welcome-6) -------------
@@ -169,7 +193,7 @@ TEST_CASE("a session-free ProjectEntryGateway validates, records and spawns",
 
   // (i) An existing project: spawns a sibling on the canonical path and MRU-fronts it.
   const std::filesystem::path project = make_project(scratch.root, "proj");
-  REQUIRE(gateway.open_project(project));
+  REQUIRE(gateway.open_project(project) == ProjectEntryOutcome::succeeded);
   REQUIRE(launcher.invoked);
   CHECK(launcher.exe == k_exe);
   REQUIRE(launcher.args.size() == 1);
@@ -183,13 +207,13 @@ TEST_CASE("a session-free ProjectEntryGateway validates, records and spawns",
   const std::filesystem::path plain = scratch.root / "plain";
   std::error_code ec;
   std::filesystem::create_directories(plain, ec);
-  CHECK_FALSE(gateway.open_project(plain));
+  CHECK(gateway.open_project(plain) == ProjectEntryOutcome::refused_target);
   CHECK_FALSE(launcher.invoked);
   CHECK(gateway.recent_projects().size() == 1); // still just the one real project
 
   // (iii) New composes an ABSOLUTE, not-yet-existing target from parent + name and
   //       spawns the sibling whose bootstrap create-branch scaffolds it (D-open_ui-4).
-  REQUIRE(gateway.new_project(scratch.root, "Fresh"));
+  REQUIRE(gateway.new_project(scratch.root, "Fresh") == ProjectEntryOutcome::succeeded);
   REQUIRE(launcher.invoked);
   const std::filesystem::path target = scratch.root / "Fresh";
   REQUIRE(launcher.args.size() == 1);
@@ -197,19 +221,21 @@ TEST_CASE("a session-free ProjectEntryGateway validates, records and spawns",
   CHECK_FALSE(std::filesystem::exists(target)); // the create signal to the child
   CHECK(gateway.recent_projects().size() == 1); // New records nothing
   launcher.invoked = false;
-  CHECK_FALSE(gateway.new_project(scratch.root, "bad/name"));
+  CHECK(gateway.new_project(scratch.root, "bad/name") == ProjectEntryOutcome::refused_target);
   CHECK_FALSE(launcher.invoked);
 
   // (iv) Replay re-orders MRU-front and spawns; a vanished entry is refused.
   const std::filesystem::path second = make_project(scratch.root, "two");
-  REQUIRE(gateway.open_project(second)); // two is MRU-front now
-  REQUIRE(gateway.open_recent(project)); // replay pulls the first one back to the front
+  REQUIRE(gateway.open_project(second) == ProjectEntryOutcome::succeeded); // two is MRU-front now
+  // replay pulls the first one back to the front
+  REQUIRE(gateway.open_recent(project) == ProjectEntryOutcome::succeeded);
   CHECK(launcher.args.front() == std::filesystem::weakly_canonical(project).string());
   listed = gateway.recent_projects();
   REQUIRE(listed.size() == 2);
   CHECK(listed.front() == std::filesystem::weakly_canonical(project));
   launcher.invoked = false;
-  CHECK_FALSE(gateway.open_recent(scratch.root / "never_a_project"));
+  CHECK(gateway.open_recent(scratch.root / "never_a_project") ==
+        ProjectEntryOutcome::refused_target);
   CHECK_FALSE(launcher.invoked);
 
   // (v) The async pick forwards to the injected dialog, exactly as the derived class's.
@@ -267,6 +293,140 @@ TEST_CASE("a session-free gateway answers every session verb inertly", "[app_pro
   CHECK_FALSE(launcher.invoked);
 }
 
+// --- editor.project.entry_outcome — the three-outcome entry seam (A24) ---------------
+// The verbs used to return one `bool` meaning "validated AND spawned", so `dock` could not
+// tell a refused target from a failed launch and inferred it from MRU membership. These three
+// cases pin the outcome the seam now reports directly — one case per enumerator, driven
+// through the SESSION-FREE base so no `AppState` is involved, with `launcher.invoked` as the
+// independent witness of whether anything was ever spawned.
+
+TEST_CASE("ProjectEntryGateway reports refused_target for every pre-launch refusal",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  ProjectEntryGateway gateway(recent, fs, dialog, launcher, k_exe);
+
+  // Four causes, ONE outcome (D-entry_outcome-2): the split is by corrective act — every one
+  // of these is answered by the user choosing a different target — not by cause.
+  SECTION("open_project on a directory with no project.arbc") {
+    const std::filesystem::path plain = scratch.root / "plain";
+    std::error_code ec;
+    std::filesystem::create_directories(plain, ec);
+    CHECK(gateway.open_project(plain) == ProjectEntryOutcome::refused_target);
+  }
+
+  SECTION("open_recent on a directory pruned since the list was rendered") {
+    CHECK(gateway.open_recent(scratch.root / "never_a_project") ==
+          ProjectEntryOutcome::refused_target);
+  }
+
+  SECTION("new_project with an empty, blank or traversing name") {
+    for (const std::string& bad :
+         {std::string(""), std::string("  "), std::string("bad/name"), std::string("..")}) {
+      CHECK(gateway.new_project(scratch.root, bad) == ProjectEntryOutcome::refused_target);
+    }
+  }
+
+  SECTION("new_project on a target that already exists (D-dir_is_project-3)") {
+    const std::filesystem::path taken = scratch.root / "Taken";
+    std::error_code ec;
+    std::filesystem::create_directories(taken, ec);
+    CHECK(gateway.new_project(scratch.root, "Taken") == ProjectEntryOutcome::refused_target);
+  }
+
+  // A refusal must still spawn NOTHING — the property that makes `refused_target` and
+  // `spawn_failed` disjoint rather than merely differently worded.
+  CHECK_FALSE(launcher.invoked);
+  CHECK(gateway.recent_projects().empty()); // …and record nothing either
+}
+
+TEST_CASE("ProjectEntryGateway reports spawn_failed when the sibling exec fails",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  FailingLauncher launcher; // the target is accepted; the `exec` is what fails
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  ProjectEntryGateway gateway(recent, fs, dialog, launcher, k_exe);
+
+  SECTION("open_project on a valid project") {
+    const std::filesystem::path project = make_project(scratch.root, "proj");
+    CHECK(gateway.open_project(project) == ProjectEntryOutcome::spawn_failed);
+    CHECK(launcher.invoked);
+    // The record-then-spawn ordering is UNCHANGED (Constraint 8) — it is simply no longer
+    // load-bearing for the message. This is the exact configuration the deleted MRU inference
+    // read as "still listed, so the spawn failed"; the outcome now says so on its own.
+    const std::vector<std::filesystem::path> listed = gateway.recent_projects();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed.front() == std::filesystem::weakly_canonical(project));
+  }
+
+  SECTION("open_recent on a valid project") {
+    const std::filesystem::path project = make_project(scratch.root, "proj");
+    CHECK(gateway.open_recent(project) == ProjectEntryOutcome::spawn_failed);
+    CHECK(launcher.invoked);
+    const std::vector<std::filesystem::path> listed = gateway.recent_projects();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed.front() == std::filesystem::weakly_canonical(project));
+  }
+
+  SECTION("new_project on a valid not-yet-existing target") {
+    CHECK(gateway.new_project(scratch.root, "Fresh") == ProjectEntryOutcome::spawn_failed);
+    CHECK(launcher.invoked);
+    CHECK_FALSE(std::filesystem::exists(scratch.root / "Fresh")); // the child never ran
+    CHECK(gateway.recent_projects().empty());                     // New records nothing
+  }
+}
+
+TEST_CASE("ProjectEntryGateway reports succeeded only when it validated AND spawned",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  ProjectEntryGateway gateway(recent, fs, dialog, launcher, k_exe);
+
+  // `succeeded` keeps the D-welcome-8 meaning of the old `true` exactly: both halves happened.
+  // Each verb is driven in ISOLATION here (the sequenced walk lives in the case above), so a
+  // verb cannot borrow another's MRU state or launcher args.
+  SECTION("open_project validates, records MRU-front and spawns the canonical path") {
+    const std::filesystem::path project = make_project(scratch.root, "proj");
+    CHECK(gateway.open_project(project) == ProjectEntryOutcome::succeeded);
+    REQUIRE(launcher.invoked);
+    CHECK(launcher.exe == k_exe);
+    REQUIRE(launcher.args.size() == 1);
+    CHECK(launcher.args.front() == std::filesystem::weakly_canonical(project).string());
+    const std::vector<std::filesystem::path> listed = gateway.recent_projects();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed.front() == std::filesystem::weakly_canonical(project));
+  }
+
+  SECTION("open_recent replays a still-valid entry MRU-front and spawns") {
+    const std::filesystem::path project = make_project(scratch.root, "proj");
+    REQUIRE(gateway.open_project(project) == ProjectEntryOutcome::succeeded);
+    CHECK(gateway.open_recent(project) == ProjectEntryOutcome::succeeded);
+    REQUIRE(launcher.args.size() == 1);
+    CHECK(launcher.args.front() == std::filesystem::weakly_canonical(project).string());
+    const std::vector<std::filesystem::path> listed = gateway.recent_projects();
+    REQUIRE(listed.size() == 1);
+    CHECK(listed.front() == std::filesystem::weakly_canonical(project));
+  }
+
+  SECTION("new_project spawns on the composed, not-yet-existing target and records nothing") {
+    CHECK(gateway.new_project(scratch.root, "Fresh") == ProjectEntryOutcome::succeeded);
+    REQUIRE(launcher.invoked);
+    REQUIRE(launcher.args.size() == 1);
+    const std::filesystem::path target = scratch.root / "Fresh";
+    CHECK(launcher.args.front() == std::filesystem::weakly_canonical(target).string());
+    CHECK_FALSE(std::filesystem::exists(target)); // the create signal to the child
+    CHECK(gateway.recent_projects().empty());     // New records nothing
+  }
+}
+
 TEST_CASE("AppProjectGateway::open_project validates, records MRU-front, spawns",
           "[app_project_gateway]") {
   ScratchDir scratch;
@@ -278,7 +438,7 @@ TEST_CASE("AppProjectGateway::open_project validates, records MRU-front, spawns"
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
   const std::filesystem::path project = make_project(scratch.root, "proj");
-  REQUIRE(gateway.open_project(project));
+  REQUIRE(gateway.open_project(project) == ProjectEntryOutcome::succeeded);
   REQUIRE(launcher.invoked);
   REQUIRE(launcher.exe == k_exe);
   REQUIRE(launcher.args.size() == 1);
@@ -302,7 +462,7 @@ TEST_CASE("AppProjectGateway::open_project rejects a non-project, spawning nothi
   const std::filesystem::path plain = scratch.root / "plain";
   std::error_code ec;
   std::filesystem::create_directories(plain, ec);
-  REQUIRE_FALSE(gateway.open_project(plain));
+  REQUIRE(gateway.open_project(plain) == ProjectEntryOutcome::refused_target);
   REQUIRE_FALSE(launcher.invoked);
   REQUIRE(gateway.recent_projects().empty());
 }
@@ -317,7 +477,7 @@ TEST_CASE("AppProjectGateway::new_project composes a non-existent target and spa
   auto session = make_session(fs, scratch.root / "session");
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
-  REQUIRE(gateway.new_project(scratch.root, "Fresh"));
+  REQUIRE(gateway.new_project(scratch.root, "Fresh") == ProjectEntryOutcome::succeeded);
   REQUIRE(launcher.invoked);
   REQUIRE(launcher.args.size() == 1);
   const std::filesystem::path target = scratch.root / "Fresh";
@@ -329,7 +489,7 @@ TEST_CASE("AppProjectGateway::new_project composes a non-existent target and spa
 
   // An invalid name spawns nothing.
   launcher.invoked = false;
-  REQUIRE_FALSE(gateway.new_project(scratch.root, "bad/name"));
+  REQUIRE(gateway.new_project(scratch.root, "bad/name") == ProjectEntryOutcome::refused_target);
   REQUIRE_FALSE(launcher.invoked);
 }
 
@@ -352,7 +512,7 @@ TEST_CASE("AppProjectGateway::new_project refuses an existing target without spa
   std::filesystem::create_directories(taken, ec);
   std::ofstream(taken / "someones_file.txt") << "unrelated";
 
-  REQUIRE_FALSE(gateway.new_project(scratch.root, "Taken"));
+  REQUIRE(gateway.new_project(scratch.root, "Taken") == ProjectEntryOutcome::refused_target);
   CHECK_FALSE(launcher.invoked);            // zero launches: no process burned on a mistake
   CHECK(gateway.recent_projects().empty()); // the MRU is not touched on a refusal
   CHECK(std::filesystem::exists(taken / "someones_file.txt")); // the directory is untouched
@@ -362,7 +522,7 @@ TEST_CASE("AppProjectGateway::new_project refuses an existing target without spa
   // fine" exception (D-dir_is_project-1).
   const std::filesystem::path empty_dir = scratch.root / "Empty";
   std::filesystem::create_directories(empty_dir, ec);
-  REQUIRE_FALSE(gateway.new_project(scratch.root, "Empty"));
+  REQUIRE(gateway.new_project(scratch.root, "Empty") == ProjectEntryOutcome::refused_target);
   CHECK_FALSE(launcher.invoked);
 }
 
@@ -378,10 +538,11 @@ TEST_CASE("AppProjectGateway::open_recent re-orders MRU-front and spawns",
 
   const std::filesystem::path one = make_project(scratch.root, "one");
   const std::filesystem::path two = make_project(scratch.root, "two");
-  REQUIRE(gateway.open_project(one));
-  REQUIRE(gateway.open_project(two)); // two is MRU-front now
+  REQUIRE(gateway.open_project(one) == ProjectEntryOutcome::succeeded);
+  REQUIRE(gateway.open_project(two) == ProjectEntryOutcome::succeeded); // two is MRU-front now
 
-  REQUIRE(gateway.open_recent(one)); // replay re-orders one to the front
+  // replay re-orders one to the front
+  REQUIRE(gateway.open_recent(one) == ProjectEntryOutcome::succeeded);
   REQUIRE(launcher.args.front() == std::filesystem::weakly_canonical(one).string());
   const std::vector<std::filesystem::path> listed = gateway.recent_projects();
   REQUIRE(listed.size() == 2);
@@ -389,7 +550,8 @@ TEST_CASE("AppProjectGateway::open_recent re-orders MRU-front and spawns",
 
   // A recent entry that is no longer a project is rejected (no spawn).
   launcher.invoked = false;
-  REQUIRE_FALSE(gateway.open_recent(scratch.root / "never_a_project"));
+  REQUIRE(gateway.open_recent(scratch.root / "never_a_project") ==
+          ProjectEntryOutcome::refused_target);
   REQUIRE_FALSE(launcher.invoked);
 }
 

@@ -54,12 +54,17 @@ public:
   // the sibling exists before the launcher goes away — or once the user dismissed
   // (the OS window close, or `Esc` with the compose modal not open). A cancelled
   // pick, a refused target and a failed spawn all leave it false with the welcome
-  // up and feedback on screen.
+  // up and feedback on screen. Unchanged by A24 — the last two of those three are
+  // now VALUES the seam returns (`ProjectEntryOutcome`) rather than vocabulary this
+  // comment alone knew, so the predicate is spelled `== succeeded` and means what it
+  // always said it meant.
   bool exit_requested() const { return exit_requested_; }
 
   // Inline feedback for the last verb (a non-project pick, a vanished recent, a
-  // failed spawn, an invalid New name), rendered with TextWrapped. Empty means
-  // "no message" — the rail's `project_feedback()` by another name.
+  // failed spawn, an invalid New name), rendered with TextWrapped. Written through
+  // the shared `entry_feedback` mapper, so it is the SAME string the rail would show
+  // for the same outcome (A24). Empty means "no message" — the rail's
+  // `project_feedback()` by another name.
   std::string& feedback() { return feedback_; }
   const std::string& feedback() const { return feedback_; }
 

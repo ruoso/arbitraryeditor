@@ -8,7 +8,6 @@
 #include <imgui_te_context.h>
 #include <imgui_te_engine.h>
 
-#include <algorithm>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
@@ -38,20 +37,20 @@ namespace {
 // Records every gateway call and scripts the async folder pick (delivered
 // synchronously — determinism for the driven frames).
 //
-// Unlike the open_ui fake this one models the MRU store, because the welcome's
-// refusal STRINGS are resolved against it: the real gateway validates, then records
-// MRU-front, then spawns (src/app/project_gateway.cpp:46-71), and `recent_projects()`
-// re-prunes on every load — so "still listed after a refusal" means the spawn failed
-// and "gone from the list" means the target never validated. `vanished` models the
-// second, `spawn_ok` the first.
+// It models NO MRU bookkeeping. It used to (a `vanished`/`spawn_ok` pair plus a
+// record-front/forget store), for one reason only: the welcome resolved its refusal STRINGS
+// against MRU membership, so the fake had to reproduce the real gateway's record-then-spawn
+// ordering for the inference to be exercised at all. Since A24 the seam reports the outcome
+// directly, so the fake scripts an outcome and the store is nothing but the list the launcher
+// renders — which is what lets the spawn-failure step below run with the store EMPTY.
 class FakeGateway final : public ace::dock::ProjectGateway {
 public:
   std::optional<std::filesystem::path> next; // the scripted pick result
   bool cancel_next = false;                  // deliver nullopt (a cancelled pick)
-  bool vanished = false;                     // the target is not (or is no longer) a project
-  bool spawn_ok = true;                      // the sibling exec succeeds
+  // What the three entry verbs report (A24), scripted rather than inferred.
+  ace::dock::ProjectEntryOutcome entry_outcome = ace::dock::ProjectEntryOutcome::succeeded;
 
-  std::vector<std::filesystem::path> store; // the MRU list, most-recent-first
+  std::vector<std::filesystem::path> store; // the MRU list the launcher renders
 
   std::vector<std::filesystem::path> opened;
   std::vector<std::pair<std::filesystem::path, std::string>> created;
@@ -59,30 +58,22 @@ public:
   int picks = 0;
   mutable int recent_queries = 0;
 
-  bool open_project(const std::filesystem::path& dir) override {
+  ace::dock::ProjectEntryOutcome open_project(const std::filesystem::path& dir) override {
     opened.push_back(dir);
-    if (vanished) {
-      forget(dir); // never validated, so never recorded — and a re-load would prune it
-      return false;
-    }
-    record_front(dir); // validated: recorded BEFORE the spawn is attempted
-    return spawn_ok;
+    return entry_outcome;
   }
-  bool new_project(const std::filesystem::path& parent, const std::string& name) override {
+  ace::dock::ProjectEntryOutcome new_project(const std::filesystem::path& parent,
+                                             const std::string& name) override {
     if (name.empty()) {
-      return false; // mirror the real reject so the modal shows feedback + stays open
+      // Mirror the real reject so the modal shows feedback + stays open.
+      return ace::dock::ProjectEntryOutcome::refused_target;
     }
     created.emplace_back(parent, name);
-    return spawn_ok; // New records nothing: the target does not exist yet
+    return entry_outcome;
   }
-  bool open_recent(const std::filesystem::path& dir) override {
+  ace::dock::ProjectEntryOutcome open_recent(const std::filesystem::path& dir) override {
     replayed.push_back(dir);
-    if (vanished) {
-      forget(dir);
-      return false;
-    }
-    record_front(dir);
-    return spawn_ok;
+    return entry_outcome;
   }
   void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) override {
     ++picks;
@@ -102,15 +93,6 @@ public:
   bool redo() override { return false; }
   bool can_undo() const override { return false; }
   bool can_redo() const override { return false; }
-
-private:
-  void forget(const std::filesystem::path& dir) {
-    store.erase(std::remove(store.begin(), store.end(), dir), store.end());
-  }
-  void record_front(const std::filesystem::path& dir) {
-    forget(dir);
-    store.insert(store.begin(), dir);
-  }
 };
 
 struct E2EState {
@@ -204,28 +186,32 @@ TEST_CASE("welcome e2e: the three verbs drive the gateway and surface every refu
     // 3. A non-project pick: the rail's exact string, and no exit.
     gateway.cancel_next = false;
     gateway.next = project_dir;
-    gateway.vanished = true;
+    gateway.entry_outcome = ace::dock::ProjectEntryOutcome::refused_target;
     ctx->ItemClick(welcome_ref("###welcome_open").c_str());
     ctx->Yield(2);
     IM_CHECK(gateway.opened.size() == 1);
     IM_CHECK(welcome.feedback() == "That folder is not a project.");
     IM_CHECK(!welcome.exit_requested());
 
-    // 4. A VALIDATED target whose spawn failed: the target was recorded MRU-front, so
-    //    the welcome can tell this apart from a refused target and says so.
-    gateway.vanished = false;
-    gateway.spawn_ok = false;
+    // 4. A VALIDATED target whose spawn failed. THE REGRESSION PIN (A24): the store is
+    //    EMPTY here — the exact configuration the deleted `refusal_feedback` read as "not
+    //    in the list, so it never validated" and reported as "That folder is not a
+    //    project.". A discarded `RecentProjects::add` failure or a re-prune between the
+    //    record and the redraw both reach it, so the inference was wrong in a reachable
+    //    case; the outcome now says which half failed and no query can contradict it.
+    gateway.entry_outcome = ace::dock::ProjectEntryOutcome::spawn_failed;
+    gateway.store.clear();
+    ctx->Yield(2);
+    IM_CHECK(gateway.recent_projects().empty());
     ctx->ItemClick(welcome_ref("###welcome_open").c_str());
     ctx->Yield(2);
     IM_CHECK(gateway.opened.size() == 2);
     IM_CHECK(welcome.feedback() == "Could not start the editor.");
     IM_CHECK(!welcome.exit_requested());
 
-    // 5. A recent entry that vanished since the list was rendered: refused, pruned, and
-    //    reported with the rail's second string. Re-seed the store first — step 4's
-    //    failed spawn left its own entry MRU-front.
-    gateway.spawn_ok = true;
-    gateway.vanished = true;
+    // 5. A recent entry that vanished since the list was rendered: refused and reported
+    //    with the rail's second string. Re-seed the store first — step 4 emptied it.
+    gateway.entry_outcome = ace::dock::ProjectEntryOutcome::refused_target;
     gateway.store = {recent_dir};
     ctx->Yield(2);
     ctx->ItemClick(welcome_ref("###welcome_recent0").c_str());
@@ -238,7 +224,7 @@ TEST_CASE("welcome e2e: the three verbs drive the gateway and surface every refu
     // 6. New: pick a parent, then the SHARED compose modal (D-welcome-7) — same popup
     //    id and same three refs the rail drives. An empty name is refused, the modal
     //    stays open, and nothing exits.
-    gateway.vanished = false;
+    gateway.entry_outcome = ace::dock::ProjectEntryOutcome::succeeded;
     gateway.next = new_parent;
     ctx->ItemClick(welcome_ref("###welcome_new").c_str());
     ctx->Yield(2); // the modal opens once the pick resolves the parent
@@ -394,6 +380,43 @@ TEST_CASE("welcome: run_welcome_launcher drives a no-arg launch without a Docume
   // …and the welcome really drew: the injected gateway was queried for recents on the
   // driven frames, through the same injection branch run_editor offers.
   CHECK(gateway.recent_queries > 0);
+}
+
+TEST_CASE("entry_outcome: entry_feedback maps each outcome to one inline string") {
+  // The ONE mapper both hosts of the entry seam route through (A24 / D-entry_outcome-4),
+  // asserted as a full table. Pure — no ImGui context, no host object, no gateway — which is
+  // exactly what returning `const char*` off a free function buys, and what makes "the rail
+  // and the welcome say the same thing" checkable without standing up either of them.
+  using ace::dock::entry_feedback;
+  using ace::dock::ProjectEntryOutcome;
+
+  // The two per-verb refusal wordings D22/D26 specify, verbatim. They are CALLER context —
+  // Open says one, Recent the other — so the mapper never invents them.
+  const char* const not_a_project = "That folder is not a project.";
+  const char* const no_longer_available = "That project is no longer available.";
+
+  // succeeded -> the empty string, standing in for the hosts' old `.clear()`, for BOTH.
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::succeeded, not_a_project)) ==
+        std::string{});
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::succeeded, no_longer_available)) ==
+        std::string{});
+
+  // refused_target -> the caller's string, echoed unchanged.
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::refused_target, not_a_project)) ==
+        std::string(not_a_project));
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::refused_target, no_longer_available)) ==
+        std::string(no_longer_available));
+
+  // spawn_failed -> the launch-failure literal REGARDLESS of the refusal string passed. This
+  // row is the pin: the message is a property of the OUTCOME, not of the call site, which is
+  // what makes the two hosts structurally incapable of disagreeing about it.
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed, not_a_project)) ==
+        std::string("Could not start the editor."));
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed, no_longer_available)) ==
+        std::string("Could not start the editor."));
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed,
+                                   "Enter a project name that does not already exist here.")) ==
+        std::string("Could not start the editor."));
 }
 
 TEST_CASE("welcome: wants_welcome_launcher picks launcher mode only for an interactive no-arg "

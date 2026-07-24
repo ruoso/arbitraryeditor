@@ -359,9 +359,18 @@ TEST_CASE("cells remove gateway: can_delete gates, delete_selected removes and c
   // existing fakes inherit unchanged.
   class BareGateway final : public ace::dock::ProjectGateway {
   public:
-    bool open_project(const std::filesystem::path&) override { return false; }
-    bool new_project(const std::filesystem::path&, const std::string&) override { return false; }
-    bool open_recent(const std::filesystem::path&) override { return false; }
+    // The three entry verbs on the A24 outcome seam (dock::ProjectEntryOutcome): still
+    // inert here — this suite drives neither New nor Open nor Recent.
+    ace::dock::ProjectEntryOutcome open_project(const std::filesystem::path&) override {
+      return ace::dock::ProjectEntryOutcome::refused_target;
+    }
+    ace::dock::ProjectEntryOutcome new_project(const std::filesystem::path&,
+                                               const std::string&) override {
+      return ace::dock::ProjectEntryOutcome::refused_target;
+    }
+    ace::dock::ProjectEntryOutcome open_recent(const std::filesystem::path&) override {
+      return ace::dock::ProjectEntryOutcome::refused_target;
+    }
     void pick_folder(std::function<void(std::optional<std::filesystem::path>)>) override {}
     std::vector<std::filesystem::path> recent_projects() const override { return {}; }
     bool save() override { return false; }

@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <optional>
 #include <string>
-#include <system_error>
 #include <vector>
 
 // editor.project.welcome — the pre-project launcher's chrome (D26 / A22). A second
@@ -15,34 +14,17 @@
 // mirrors `draw_project_section`'s exactly (dock.cpp) — same async pick, same
 // compose modal, same MRU query per frame, same feedback strings — because both
 // surfaces must refuse the same targets and list the same recents.
+//
+// The "same feedback strings" clause is true BY CONSTRUCTION since A24, and was not
+// before: both hosts now route every entry outcome through the one shared
+// `entry_feedback` mapper, so neither can drift from the other. What stood here until
+// then was a file-local `refusal_feedback` that reconstructed "refused target vs failed
+// spawn" from MRU membership — sound about the code it cited, unsound as a
+// discriminator (a discarded `RecentProjects::add` failure or a re-prune between the
+// record and the redraw each flip it), and unavailable to the rail at all. The seam
+// carries the answer now, so the inference is gone (D-entry_outcome-5).
 
 namespace ace::dock {
-namespace {
-
-// Which refusal the user is looking at. The seam reports ONE bool per entry verb —
-// "validated AND spawned" (D-welcome-8) — so a bare `false` cannot say which half
-// failed, and `dock` may include neither `ace/project` nor `ace/platform` to ask
-// again. The MRU is the discriminator, and it is one the seam already offers: both
-// `open_project` and `open_recent` record the directory MRU-front AFTER validating
-// and BEFORE spawning (src/app/project_gateway.cpp:46-71), while `recent_projects()`
-// prunes through the same validity predicate. So a directory STILL LISTED after a
-// refusal did validate and it was the spawn that failed; one absent from the list
-// never validated at all. No new virtual, no new DAG edge.
-const char* refusal_feedback(ProjectGateway& gateway, const std::filesystem::path& dir,
-                             const char* invalid_target) {
-  // The store canonicalizes what it records, so compare against the canonical form
-  // as well as the literal one (a relative pick still matches).
-  std::error_code ec;
-  const std::filesystem::path canonical = std::filesystem::weakly_canonical(dir, ec);
-  for (const std::filesystem::path& listed : gateway.recent_projects()) {
-    if (listed == dir || (!ec && listed == canonical)) {
-      return "Could not start the editor.";
-    }
-  }
-  return invalid_target;
-}
-
-} // namespace
 
 const char* welcome_window_title() { return "Welcome"; }
 
@@ -83,11 +65,10 @@ void WelcomeWindow::draw() {
         if (!picked.has_value()) {
           return; // a cancelled pick spawns nothing and dismisses nothing
         }
-        if (gateway->open_project(*picked)) {
-          self->feedback_.clear();
+        const ProjectEntryOutcome outcome = gateway->open_project(*picked);
+        self->feedback_ = entry_feedback(outcome, "That folder is not a project.");
+        if (outcome == ProjectEntryOutcome::succeeded) {
           self->exit_requested_ = true; // the sibling exists; this process is done
-        } else {
-          self->feedback_ = refusal_feedback(*gateway, *picked, "That folder is not a project.");
         }
       });
     }
@@ -102,11 +83,10 @@ void WelcomeWindow::draw() {
         label += "###welcome_recent";
         label += std::to_string(i);
         if (ImGui::Selectable(label.c_str())) {
-          if (gateway->open_recent(dir)) {
-            feedback_.clear();
+          const ProjectEntryOutcome outcome = gateway->open_recent(dir);
+          feedback_ = entry_feedback(outcome, "That project is no longer available.");
+          if (outcome == ProjectEntryOutcome::succeeded) {
             exit_requested_ = true;
-          } else {
-            feedback_ = refusal_feedback(*gateway, dir, "That project is no longer available.");
           }
         }
       }

@@ -41,27 +41,37 @@ ProjectEntryGateway::ProjectEntryGateway(ace::dockmodel::RecentProjects& recent,
     : recent_(recent), filesystem_(filesystem), dialog_(dialog), launcher_(launcher),
       executable_(std::move(executable)) {}
 
-bool ProjectEntryGateway::spawn(const std::filesystem::path& dir) {
+ace::dock::ProjectEntryOutcome ProjectEntryGateway::spawn(const std::filesystem::path& dir) {
   // Empty error_code == a successful launch (D-open-6); a non-empty one means the
   // sibling `exec` failed. open_another_project canonicalizes `dir` to an absolute
-  // path before handing it to the launcher (D-exec_new-4).
-  return !static_cast<bool>(ace::commands::open_another_project(launcher_, executable_, dir));
+  // path before handing it to the launcher (D-exec_new-4). This is the ONE place the
+  // `error_code` becomes `spawn_failed` (A24 / D-entry_outcome-6) — the mapping cannot
+  // drift because all three verbs terminate here.
+  if (ace::commands::open_another_project(launcher_, executable_, dir)) {
+    return ace::dock::ProjectEntryOutcome::spawn_failed;
+  }
+  return ace::dock::ProjectEntryOutcome::succeeded;
 }
 
-bool ProjectEntryGateway::open_project(const std::filesystem::path& dir) {
+ace::dock::ProjectEntryOutcome ProjectEntryGateway::open_project(const std::filesystem::path& dir) {
   if (!ace::project::is_project_directory(filesystem_, dir)) {
-    return false; // a non-project selection surfaces an error and spawns nothing
+    // A non-project selection surfaces an error and spawns nothing — the user picks a
+    // different folder, which is what makes it a `refused_target` rather than a failure.
+    return ace::dock::ProjectEntryOutcome::refused_target;
   }
+  // Recorded AFTER validating and BEFORE spawning, unchanged (A24 / Constraint 8): a failed
+  // prefs write is no longer load-bearing for what the user is told, so it degrades to "the
+  // entry is missing from the list" instead of "your project is not a project".
   recent_.add(dir);
   return spawn(dir);
 }
 
-bool ProjectEntryGateway::new_project(const std::filesystem::path& parent,
-                                      const std::string& name) {
+ace::dock::ProjectEntryOutcome ProjectEntryGateway::new_project(const std::filesystem::path& parent,
+                                                                const std::string& name) {
   const std::optional<std::filesystem::path> target =
       ace::project::compose_new_project_target(parent, name);
   if (!target.has_value()) {
-    return false; // empty / invalid / traversing name
+    return ace::dock::ProjectEntryOutcome::refused_target; // empty / invalid / traversing name
   }
   // Pre-check the target HERE, before the spawn (D27 / D-dir_is_project-3). `project::
   // create_project` refuses an existing target too, and that L1 guard is the invariant — but
@@ -73,16 +83,19 @@ bool ProjectEntryGateway::new_project(const std::filesystem::path& parent,
   // behind it: between this check and the child's create the directory can appear, and L1 is
   // what guarantees nothing is written into it.
   if (filesystem_.exists(*target)) {
-    return false;
+    // Same outcome as an invalid name, deliberately (D-entry_outcome-2 / D-dir_is_project-6):
+    // the split is by corrective act, and both are answered by typing a different name.
+    return ace::dock::ProjectEntryOutcome::refused_target;
   }
   // Do NOT record: the target does not exist yet — the child's create-branch
   // scaffolds it (D-open_ui-4), and it lands in the recent list on its own open.
   return spawn(*target);
 }
 
-bool ProjectEntryGateway::open_recent(const std::filesystem::path& dir) {
+ace::dock::ProjectEntryOutcome ProjectEntryGateway::open_recent(const std::filesystem::path& dir) {
   if (!ace::project::is_project_directory(filesystem_, dir)) {
-    return false; // pruned away since the list was last rendered
+    // Pruned away since the list was last rendered.
+    return ace::dock::ProjectEntryOutcome::refused_target;
   }
   recent_.add(dir); // replay re-orders the entry MRU-front
   return spawn(dir);

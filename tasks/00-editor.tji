@@ -157,8 +157,15 @@ task editor "Editor — host GUI over libarbc" {
     task entry_outcome "Distinguish refused-target from failed-spawn at the ProjectGateway seam" {
       effort 0.5d
       allocate team
+      complete 100
       depends !welcome
-      note "Replace the entry verbs' single bool return with a small dock-local outcome POD (e.g. ProjectEntryOutcome: succeeded / refused_target / spawn_failed) so dock::WelcomeWindow and dock::Dockspace can surface 'That folder is not a project.' vs 'Could not start the editor.' without inferring spawn failure from MRU state. Source-of-debt: tasks/refinements/editor/welcome.md (D-welcome deviation: Constraint 6 inference). Design: D22, arch A12."
+      note "Replace the entry verbs' single bool return with a small dock-local outcome POD (e.g. ProjectEntryOutcome: succeeded / refused_target / spawn_failed) so dock::WelcomeWindow and dock::Dockspace can surface 'That folder is not a project.' vs 'Could not start the editor.' without inferring spawn failure from MRU state. Source-of-debt: tasks/refinements/editor/welcome.md (D-welcome deviation: Constraint 6 inference). Design: D22, arch A12. Refinement: tasks/refinements/editor/entry_outcome.md"
+    }
+    task save_as_outcome "Widen save_as to the outcome seam so a failed publish or exec stops reporting a name refusal" {
+      effort 0.5d
+      allocate team
+      depends !entry_outcome
+      note "AppProjectGateway::save_as (project_gateway.cpp:194-218) has four documented failure modes (dock.hpp:128-130: invalid name · target exists · failed publish · failed exec) collapsed into one bool; the entry_outcome leaf's adapter maps all four onto refused_target, preserving today's exact string. Resolving honestly needs a fourth enumerator (publish_failed) and a richer result from commands::save_project_as, which is L1 work outside the entry-verbs scope. Source-of-debt: tasks/refinements/editor/entry_outcome.md. Design: D22/D27, arch A12/A13."
     }
     task dir_is_project "Project = directory: New and Save As refuse any existing target" {
       effort 1d

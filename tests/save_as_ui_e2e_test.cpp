@@ -46,9 +46,18 @@ public:
   int picks = 0;
   std::vector<std::pair<std::filesystem::path, std::string>> save_as_calls;
 
-  bool open_project(const std::filesystem::path&) override { return true; }
-  bool new_project(const std::filesystem::path&, const std::string&) override { return true; }
-  bool open_recent(const std::filesystem::path&) override { return true; }
+  // The three entry verbs on the A24 outcome seam (dock::ProjectEntryOutcome): still
+  // inert here — this suite drives neither New nor Open nor Recent.
+  ace::dock::ProjectEntryOutcome open_project(const std::filesystem::path&) override {
+    return ace::dock::ProjectEntryOutcome::succeeded;
+  }
+  ace::dock::ProjectEntryOutcome new_project(const std::filesystem::path&,
+                                             const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::succeeded;
+  }
+  ace::dock::ProjectEntryOutcome open_recent(const std::filesystem::path&) override {
+    return ace::dock::ProjectEntryOutcome::succeeded;
+  }
   void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) override {
     ++picks;
     on_pick(cancel_next ? std::nullopt : next);

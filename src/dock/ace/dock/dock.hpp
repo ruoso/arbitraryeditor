@@ -63,6 +63,41 @@ struct InsertKindSpec {
 // The user's answers, keyed by `InsertFieldSpec::id`.
 using InsertValues = std::vector<std::pair<std::string, std::string>>;
 
+// What ONE project-entry verb did (docs/01-architecture.md A24 / D-entry_outcome-1), in the
+// dock's OWN vocabulary — a scoped enum in the `GcSummary`/`InsertKindSpec`/`ComposeModalSpec`
+// family, naming no `project`, `platform`, `commands` or `arbc` type and adding no include.
+//
+// It replaces the `bool` these verbs used to return, which conflated the two failures D22's
+// spawn model makes structurally distinct — and which A12's own inversion makes impossible to
+// tell apart after the fact, because `dock` may include neither `<ace/project/...>` nor
+// `<ace/platform/...>` to ask a second question. The answer has to arrive WITH the refusal.
+//
+// Exactly three enumerators, split by CORRECTIVE ACT rather than by cause: every pre-launch
+// refusal is answered by the user choosing a different target, and nothing the user does in a
+// folder picker fixes a failed `exec`. That is also what keeps D-dir_is_project-6's
+// one-string-for-both-of-New's-refusals decision intact — `refused_target` deliberately does
+// not split an invalid name from a taken one.
+enum class ProjectEntryOutcome {
+  succeeded,      // validated AND spawned: the sibling editor exists
+  refused_target, // declined before launching anything (not a project / no longer a project /
+                  // an invalid name / a target that already exists) — nothing was spawned
+  spawn_failed,   // the target was accepted and the sibling `exec` failed
+};
+
+// The ONE mapping from an outcome to the inline feedback a host renders (D-entry_outcome-4).
+// Both hosts of the seam — the rail's Project section and the pre-project launcher's welcome —
+// route through this, which is what makes them disagreeing about what a failure means
+// impossible rather than merely fixed: `"Could not start the editor."` exists in exactly one
+// place, while the REFUSAL wording stays a caller parameter, because it is per-verb context
+// (Open says one thing, Recent another) rather than implementation knowledge.
+//
+// Returns `""` for `succeeded` (so each call site collapses from an if/else into one
+// assignment, with the empty string standing in for the old `.clear()`), `refused_message`
+// verbatim for `refused_target`, and the single launch-failure literal for `spawn_failed` —
+// regardless of what refusal string the caller passed. Takes no ImGui state, so it is
+// unit-testable with no context and no host object.
+const char* entry_feedback(ProjectEntryOutcome outcome, const char* refused_message);
+
 // The project-entry seam (docs/01-architecture.md A12, docs/00-design.md D22).
 // The tool rail's New / Open / Recent affordances drive this ABSTRACT interface,
 // which `dock` (L3) declares and owns; the concrete AppProjectGateway lives in L4
@@ -75,24 +110,30 @@ using InsertValues = std::vector<std::pair<std::string, std::string>>;
 //
 // Every action spawns a NEW sibling editor process (process-per-project, D19/A7)
 // and NEVER swaps the current process's one Document — the current window stays up
-// (D19's tab analog). Errors are values: the mutating actions return success/
-// failure the rail renders as inline feedback (Constraint 7).
+// (D19's tab analog). Errors are values: the THREE ENTRY verbs return a
+// `ProjectEntryOutcome` — succeeded / refused_target / spawn_failed — which the two hosts
+// render as inline feedback through `entry_feedback` (A24 / Constraint 7); the session verbs
+// (A13) still return a plain success/failure `bool`.
 class ProjectGateway {
 public:
   virtual ~ProjectGateway() = default;
 
   // Validate `dir` as an existing project, record it MRU-front, and spawn a
-  // sibling editor on it. Returns false (no spawn) when `dir` is not a project.
-  virtual bool open_project(const std::filesystem::path& dir) = 0;
+  // sibling editor on it. `refused_target` (nothing spawned) when `dir` is not a
+  // project; `spawn_failed` when it is one and the sibling `exec` failed.
+  virtual ProjectEntryOutcome open_project(const std::filesystem::path& dir) = 0;
 
   // Compose `parent / name` (a not-yet-existing target) and spawn a sibling whose
   // bootstrap create-branch scaffolds it — no second Document is minted here.
-  // Returns false on an invalid name; records nothing (the directory is absent).
-  virtual bool new_project(const std::filesystem::path& parent, const std::string& name) = 0;
+  // `refused_target` on an invalid name OR a target that already exists
+  // (D-dir_is_project-3); records nothing either way (the directory is absent).
+  virtual ProjectEntryOutcome new_project(const std::filesystem::path& parent,
+                                          const std::string& name) = 0;
 
-  // Replay a recent project directory: re-order it MRU-front and spawn. Returns
-  // false when the directory is no longer a project.
-  virtual bool open_recent(const std::filesystem::path& dir) = 0;
+  // Replay a recent project directory: re-order it MRU-front and spawn.
+  // `refused_target` when the directory is no longer a project, `spawn_failed`
+  // when it still is one and the sibling `exec` failed.
+  virtual ProjectEntryOutcome open_recent(const std::filesystem::path& dir) = 0;
 
   // Open the OS-native folder picker (Constraint 5). Returns IMMEDIATELY; the OS
   // dialog is async, so `on_pick` is invoked on a later frame with the chosen
@@ -291,7 +332,14 @@ private:
 struct ComposeModalSpec {
   const char* popup_id = "New Project"; // the BeginPopupModal title AND the e2e's ref prefix
   const char* submit_label = "Create";  // the submit button's visible label
-  std::function<bool(const std::filesystem::path&, const std::string&)> submit; // parent + name
+  // What submitting does, in the entry seam's three-outcome vocabulary (A24 / D-entry_outcome-7):
+  // New binds `new_project` directly; Save As — a SESSION verb (A13) still returning `bool` —
+  // binds a two-token adapter at its call site rather than widening the seam.
+  std::function<ProjectEntryOutcome(const std::filesystem::path&, const std::string&)> submit;
+  // The ONE string a refused submit renders (D-dir_is_project-6), handed to `entry_feedback`
+  // exactly as the flat Open/Recent verbs hand it theirs. A launch failure is NOT this string:
+  // the mapper answers `spawn_failed` with its own literal.
+  const char* refused_message = "Enter a project name that does not already exist here.";
 };
 
 // Draw one frame of a parent-plus-typed-name compose modal against `modal`'s state,
@@ -299,10 +347,11 @@ struct ComposeModalSpec {
 // "one implementation of 'parent + typed name'", now with two submits: New spawns the sibling
 // whose bootstrap create-branch scaffolds the target, Save As publishes a copy there and
 // spawns on it). Must be called EVERY frame by its host so BeginPopupModal stays balanced.
-// Refusals are values: a refused submit leaves the modal open and writes the ONE refusal
-// string, "Enter a project name that does not already exist here.", into `feedback` — one
-// string for both causes, because an invalid name and a taken name call for the identical
-// corrective act (D-dir_is_project-6).
+// Outcomes are values, mapped through the SAME `entry_feedback` the flat Open/Recent verbs use
+// (A24): anything short of `succeeded` leaves the modal open with a message in `feedback` —
+// `spec.refused_message` for a refused target, one string for both of its causes because an
+// invalid name and a taken name call for the identical corrective act (D-dir_is_project-6),
+// and the launch-failure literal for a `spawn_failed`, which no amount of retyping fixes.
 //
 // Returns whether the submit succeeded this frame — the rail ignores it (the project window
 // stays up), the welcome latches its exit on it (D-welcome-8).
@@ -470,8 +519,10 @@ public:
   const std::string& insert_error() const { return insert_error_; }
 
   // Inline feedback the rail renders for the last project action (a non-project
-  // Open selection, an unavailable recent, an invalid New name). The rail reads
-  // and writes it; empty means "no message".
+  // Open selection, an unavailable recent, an invalid New name, a failed sibling
+  // launch). The rail reads and writes it — through the shared `entry_feedback`
+  // mapper for every entry verb (A24), so it and the welcome can never disagree
+  // about what a failure means; empty means "no message".
   std::string& project_feedback() { return project_feedback_; }
 
 private:

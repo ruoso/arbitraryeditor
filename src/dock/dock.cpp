@@ -307,11 +307,10 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
       if (!picked.has_value()) {
         return; // a cancelled pick spawns nothing (Constraint 5)
       }
-      if (gw->open_project(*picked)) {
-        dockspace.project_feedback().clear();
-      } else {
-        dockspace.project_feedback() = "That folder is not a project.";
-      }
+      // One assignment, not a two-way branch (A24): the shipped rail mapped EVERY failure
+      // onto "That folder is not a project.", so a broken install reported a bad folder.
+      dockspace.project_feedback() =
+          entry_feedback(gw->open_project(*picked), "That folder is not a project.");
     });
   }
   const std::vector<std::filesystem::path> recent = gateway.recent_projects();
@@ -323,11 +322,8 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
       label += "###recent";
       label += std::to_string(i);
       if (ImGui::Selectable(label.c_str())) {
-        if (gateway.open_recent(dir)) {
-          dockspace.project_feedback().clear();
-        } else {
-          dockspace.project_feedback() = "That project is no longer available.";
-        }
+        dockspace.project_feedback() =
+            entry_feedback(gateway.open_recent(dir), "That project is no longer available.");
       }
     }
   }
@@ -341,17 +337,26 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   (void)draw_new_project_modal(dockspace.new_project_modal(), gateway,
                                dockspace.project_feedback());
   // Save As's compose modal: the SAME draw routine and the same value type, differing only in
-  // its spec (D-dir_is_project-5). Its `false` writes the same refusal string into the same
-  // inline `project_feedback_` channel Save/Open/Recent write — feedback on an action the user
-  // just took, which is exactly the split dock.cpp:83-97 draws against the one-shot notice.
-  // Also drawn every frame so BeginPopupModal stays balanced.
+  // its spec (D-dir_is_project-5). Its refusal writes the same string into the same inline
+  // `project_feedback_` channel Save/Open/Recent write — feedback on an action the user just
+  // took, which is exactly the split dock.cpp:83-97 draws against the one-shot notice. Also
+  // drawn every frame so BeginPopupModal stays balanced.
+  //
+  // Save As is a SESSION verb (A13) and keeps its `bool`, so the widening is adapted HERE, at
+  // the one binding, rather than at the seam (D-entry_outcome-7). Observably a no-op today:
+  // all four of `save_as`'s documented failure modes (dock.hpp — invalid name · target exists ·
+  // failed publish · failed exec) already collapse into this one string, so mapping them all
+  // to `refused_target` reproduces the shipped UI exactly. Telling a failed publish or a failed
+  // exec apart needs a fourth enumerator and a richer result out of `commands::save_project_as`
+  // — L1 work outside "the entry verbs", deferred to `editor.project.save_as_outcome`.
   {
     ProjectGateway* gw = &gateway;
     (void)draw_compose_target_modal(
         dockspace.save_as_modal(), dockspace.project_feedback(),
         ComposeModalSpec{"Save Project As", "Save Copy",
                          [gw](const std::filesystem::path& parent, const std::string& name) {
-                           return gw->save_as(parent, name);
+                           return gw->save_as(parent, name) ? ProjectEntryOutcome::succeeded
+                                                            : ProjectEntryOutcome::refused_target;
                          }});
   }
   draw_gc_modal(dockspace, gateway);
@@ -410,6 +415,32 @@ void handle_delete_shortcut(ProjectGateway& gateway) {
 
 const char* name() { return "dock"; }
 
+// The ONE outcome -> inline-string mapping both hosts of the entry seam route through
+// (A24 / D-entry_outcome-4). The bug this repays was that two hosts of one seam disagreed
+// about what a `false` meant: the welcome reconstructed the discriminant from MRU membership
+// — unsound, because `RecentProjects::add`'s failure is discarded and `recent_projects()`
+// re-prunes on every query — while the rail did not discriminate at all and reported a failed
+// `exec` as a bad folder. A shared pure function is the smallest construct that makes that
+// disagreement impossible rather than merely fixed.
+//
+// The launch-failure literal lives here and nowhere else; the refusal wording stays the
+// caller's, because which target was refused is per-verb context the mapper has no way to
+// know. No ImGui state, no host object — a table-testable pure function.
+const char* entry_feedback(ProjectEntryOutcome outcome, const char* refused_message) {
+  switch (outcome) {
+  case ProjectEntryOutcome::succeeded:
+    return ""; // the empty string standing in for the hosts' old `.clear()`
+  case ProjectEntryOutcome::refused_target:
+    return refused_message;
+  case ProjectEntryOutcome::spawn_failed:
+    break;
+  }
+  // Nothing the user does in a folder picker helps: the target was fine and the sibling
+  // process could not be started (a broken install, a missing executable, an exhausted
+  // process table). D26's shipped copy, reused verbatim rather than re-opened.
+  return "Could not start the editor.";
+}
+
 // The compose-target modal (D-open_ui-4 / D27): opened once a folder pick resolves a parent
 // location, it collects a project name and, on submit, composes the NOT-YET-EXISTING target
 // through `spec.submit`. Drawn every frame by its host so BeginPopupModal stays balanced; the
@@ -436,19 +467,25 @@ bool draw_compose_target_modal(NewProjectModal& modal, std::string& feedback,
                      static_cast<std::size_t>(modal.name_buffer_size()));
     const std::string name(modal.name_buffer());
     if (ImGui::Button(spec.submit_label)) {
-      if (spec.submit && spec.submit(modal.parent(), name)) {
-        feedback.clear();
+      // An unbound spec cannot compose anything, which is a refusal of the target and not a
+      // failed launch — the same answer `dock`'s inert gateway defaults give.
+      const ProjectEntryOutcome outcome =
+          spec.submit ? spec.submit(modal.parent(), name) : ProjectEntryOutcome::refused_target;
+      // The SAME mapper the flat Open/Recent verbs use (A24), so the modal now CAN tell a
+      // refused target from a failed launch — and still deliberately does not tell an invalid
+      // name from a taken one: both call for the identical corrective act, so they share one
+      // string (D-dir_is_project-6). The shipped "Enter a valid project name." would be
+      // actively misleading, because after D27 the DOMINANT refusal is a perfectly valid name
+      // that is already taken.
+      feedback = entry_feedback(outcome, spec.refused_message);
+      if (outcome == ProjectEntryOutcome::succeeded) {
         modal.close();
         submitted = true;
         ImGui::CloseCurrentPopup();
-      } else {
-        // ONE string for both refusals (D-dir_is_project-6): an invalid name and a name whose
-        // directory already exists call for the identical corrective act — type a different
-        // name — and the seam is a `bool`, so there is nothing here to tell them apart. The
-        // shipped "Enter a valid project name." would now be actively misleading, because
-        // after D27 the DOMINANT refusal is a perfectly valid name that is already taken.
-        feedback = "Enter a project name that does not already exist here.";
       }
+      // Anything else leaves the modal open with the message on screen — including a
+      // `spawn_failed`, where retyping the name is not the fix but closing the modal would
+      // throw away the parent the async pick resolved.
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) {

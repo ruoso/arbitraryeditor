@@ -35,7 +35,9 @@ class FakeGateway final : public ace::dock::ProjectGateway {
 public:
   std::optional<std::filesystem::path> next; // the scripted pick result
   bool cancel_next = false;                  // deliver nullopt (a cancelled pick)
-  bool open_ok = true;                       // when false, open/recent report failure
+  // What the entry verbs report (A24). Scripted directly rather than inferred: the whole
+  // point of the outcome seam is that a host cannot reconstruct which half failed.
+  ace::dock::ProjectEntryOutcome entry_outcome = ace::dock::ProjectEntryOutcome::succeeded;
   std::vector<std::filesystem::path> recent; // seeded MRU list
 
   std::vector<std::filesystem::path> opened;
@@ -44,20 +46,22 @@ public:
   int picks = 0;
   mutable int recent_queries = 0;
 
-  bool open_project(const std::filesystem::path& dir) override {
+  ace::dock::ProjectEntryOutcome open_project(const std::filesystem::path& dir) override {
     opened.push_back(dir);
-    return open_ok; // false models a non-project selection surfacing inline feedback
+    return entry_outcome;
   }
-  bool new_project(const std::filesystem::path& parent, const std::string& name) override {
+  ace::dock::ProjectEntryOutcome new_project(const std::filesystem::path& parent,
+                                             const std::string& name) override {
     if (name.empty()) {
-      return false; // mirror the real reject so the modal shows feedback + stays
+      // Mirror the real reject so the modal shows feedback + stays open.
+      return ace::dock::ProjectEntryOutcome::refused_target;
     }
     created.emplace_back(parent, name);
-    return true;
+    return entry_outcome;
   }
-  bool open_recent(const std::filesystem::path& dir) override {
+  ace::dock::ProjectEntryOutcome open_recent(const std::filesystem::path& dir) override {
     replayed.push_back(dir);
-    return open_ok;
+    return entry_outcome;
   }
   void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) override {
     ++picks;
@@ -170,18 +174,36 @@ TEST_CASE("open_ui e2e: rail New / Open / Recent drive the gateway; cancel spawn
 
     // 5. A non-project Open selection surfaces inline feedback (no doomed spawn in
     //    the real gateway; here the fake reports failure).
-    gateway.open_ok = false;
+    gateway.entry_outcome = ace::dock::ProjectEntryOutcome::refused_target;
     gateway.cancel_next = false;
     gateway.next = project_dir;
     ctx->ItemClick(rail_ref("###open_project").c_str());
     ctx->Yield(2);
     IM_CHECK(!state->dockspace->project_feedback().empty());
+    IM_CHECK(state->dockspace->project_feedback() == std::string("That folder is not a project."));
 
     // 6. An unavailable recent entry also surfaces feedback.
     ctx->ItemClick(rail_ref("###recent0").c_str());
     ctx->Yield(2);
     IM_CHECK(!state->dockspace->project_feedback().empty());
-    gateway.open_ok = true;
+    IM_CHECK(state->dockspace->project_feedback() ==
+             std::string("That project is no longer available."));
+
+    // 6b. A FAILED SIBLING EXEC is not a bad folder (A24 / D-entry_outcome-5). The shipped
+    //     rail mapped every `false` onto the refusal string, so a broken install told the
+    //     user their project folder was not a project and sent them back to the picker.
+    //     Both flat verbs must now report the launch failure instead. Feedback is cleared
+    //     before each click so neither assertion can pass on the previous step's string.
+    gateway.entry_outcome = ace::dock::ProjectEntryOutcome::spawn_failed;
+    state->dockspace->project_feedback().clear();
+    ctx->ItemClick(rail_ref("###open_project").c_str());
+    ctx->Yield(2);
+    IM_CHECK(state->dockspace->project_feedback() == std::string("Could not start the editor."));
+    state->dockspace->project_feedback().clear();
+    ctx->ItemClick(rail_ref("###recent0").c_str());
+    ctx->Yield(2);
+    IM_CHECK(state->dockspace->project_feedback() == std::string("Could not start the editor."));
+    gateway.entry_outcome = ace::dock::ProjectEntryOutcome::succeeded;
 
     // 7. The New modal rejects an empty name (stays open with feedback), and
     //    Cancel dismisses it without recording a new_project.

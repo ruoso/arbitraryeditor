@@ -39,10 +39,12 @@ public:
                       std::filesystem::path executable);
 
   // The five entry verbs: validate -> record MRU-front -> spawn a detached SIBLING
-  // (D19/A7). One implementation, shared by the launcher and every project window.
-  bool open_project(const std::filesystem::path& dir) override;
-  bool new_project(const std::filesystem::path& parent, const std::string& name) override;
-  bool open_recent(const std::filesystem::path& dir) override;
+  // (D19/A7). One implementation, shared by the launcher and every project window, so both
+  // process modes inherit the three-outcome vocabulary (A24) from one place.
+  ace::dock::ProjectEntryOutcome open_project(const std::filesystem::path& dir) override;
+  ace::dock::ProjectEntryOutcome new_project(const std::filesystem::path& parent,
+                                             const std::string& name) override;
+  ace::dock::ProjectEntryOutcome open_recent(const std::filesystem::path& dir) override;
   void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) override;
   std::vector<std::filesystem::path> recent_projects() const override;
 
@@ -67,7 +69,10 @@ protected:
   std::filesystem::path executable_;
 
 private:
-  bool spawn(const std::filesystem::path& dir);
+  // The one place `spawn_failed` is produced — the place that holds
+  // `commands::open_another_project`'s `error_code` (D-entry_outcome-6). Yields `succeeded` or
+  // `spawn_failed` and nothing else, so each verb body ends in a bare `return spawn(...)`.
+  ace::dock::ProjectEntryOutcome spawn(const std::filesystem::path& dir);
 };
 
 // The L4 concrete project-entry gateway (docs/01-architecture.md A12, D22). It is

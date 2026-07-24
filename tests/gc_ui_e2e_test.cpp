@@ -39,9 +39,18 @@ public:
   int commit_calls = 0;
   ace::dock::GcSummary scripted{3, 4096, true}; // reclaimed_files, reclaimed_bytes, ran
 
-  bool open_project(const std::filesystem::path&) override { return true; }
-  bool new_project(const std::filesystem::path&, const std::string&) override { return true; }
-  bool open_recent(const std::filesystem::path&) override { return true; }
+  // The three entry verbs on the A24 outcome seam (dock::ProjectEntryOutcome): still
+  // inert here — this suite drives neither New nor Open nor Recent.
+  ace::dock::ProjectEntryOutcome open_project(const std::filesystem::path&) override {
+    return ace::dock::ProjectEntryOutcome::succeeded;
+  }
+  ace::dock::ProjectEntryOutcome new_project(const std::filesystem::path&,
+                                             const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::succeeded;
+  }
+  ace::dock::ProjectEntryOutcome open_recent(const std::filesystem::path&) override {
+    return ace::dock::ProjectEntryOutcome::succeeded;
+  }
   void pick_folder(std::function<void(std::optional<std::filesystem::path>)>) override {}
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return true; }
