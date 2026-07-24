@@ -45,6 +45,11 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override;
   bool save() override;
   bool is_dirty() const override;
+  // The A19 reopen-degradation count (D25), a session QUERY like `is_dirty()` above and
+  // the same L3->L4 inversion: `dock` asks the seam, this impl answers off the one owned
+  // `AppState`, which carried the count off the bootstrap `OpenedProject`. Nothing is
+  // recomputed and nothing is cached — the number never changes for the life of a session.
+  std::size_t reopen_unbindable_count() const override;
   void save_as() override;
   ace::dock::GcSummary clean_up(bool preview) override;
   bool undo() override;

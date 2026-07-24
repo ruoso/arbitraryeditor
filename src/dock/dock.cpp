@@ -116,6 +116,47 @@ void draw_gc_modal(Dockspace& dockspace, ProjectGateway& gateway) {
   }
 }
 
+// The reopen-degradation notice (D25 / A19): the one-shot report that this session's
+// project opened with objects it could not recover. Structurally the Clean up confirm
+// with the confirm/cancel pair collapsed to a single Dismiss — there is nothing to
+// confirm, the loss already happened (D-reopen_degradation_notice-3). It is a modal
+// rather than the rail's inline `project_feedback_` because a data-loss report deserves
+// a deliberate acknowledgement and because that channel is for feedback on actions the
+// user just TOOK; this is a passive condition of the session at startup.
+//
+// The open is self-driven and latched: the first frame the gateway reports a non-zero
+// count and the seen-flag is unset, `open_reopen_notice()` fires and sets the latch, so
+// dismissing it ends the notice for the session even though the gateway keeps reporting
+// the same number forever. A zero count never opens it at all — a clean map reopen, a
+// rebuild-from-canonical, and a fresh `create_project` all report 0, and a phantom
+// "nothing was lost" notice would be worse than silence. Drawn every frame from the rail
+// so BeginPopupModal stays balanced. Stable slash-free `###` ids for the e2e.
+void draw_reopen_notice_modal(Dockspace& dockspace, ProjectGateway& gateway) {
+  const std::size_t unbindable = gateway.reopen_unbindable_count();
+  if (!dockspace.reopen_notice_seen() && unbindable > 0) {
+    dockspace.open_reopen_notice();
+  }
+  const char* popup_id = "Project Reopened Incomplete";
+  if (dockspace.reopen_notice_open() && !ImGui::IsPopupOpen(popup_id)) {
+    ImGui::OpenPopup(popup_id);
+  }
+  const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  if (ImGui::BeginPopupModal(popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    // Name the count. An emptied project that says nothing reads as work the user never
+    // did, not as work the tool could not recover — naming N is the whole point of A19
+    // having computed it.
+    ImGui::Text("This project's unsaved workspace held %llu object(s) that could not be "
+                "recovered.",
+                static_cast<unsigned long long>(unbindable));
+    if (ImGui::Button("Dismiss###reopen_notice_dismiss")) {
+      dockspace.close_reopen_notice();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+}
+
 // The Insert Cell modal (editor.cells.model / A16): pick a KIND, fill in whatever
 // fields that kind's factory needs, confirm. The kind list is whatever the gateway
 // handed over — one entry per `arbc::Registry::ids()` entry — and this code neither
@@ -322,6 +363,7 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   }
   draw_new_project_modal(dockspace, gateway);
   draw_gc_modal(dockspace, gateway);
+  draw_reopen_notice_modal(dockspace, gateway);
 }
 
 // The canonical undo affordance (Decision D-undo-3): the keyboard chords Ctrl+Z

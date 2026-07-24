@@ -51,6 +51,11 @@ UndoOutcome redo_step(AppState& state) {
 AppState::AppState(project::OpenedProject opened)
     : document_(std::move(opened.document)), layout_(std::move(opened.layout)),
       rebuilt_from_canonical_(opened.rebuilt_from_canonical),
+      // The A19 degradation count, ferried not recomputed (D-reopen_degradation_notice-1):
+      // `project::open_project` produces it once at bootstrap and this is the only place
+      // the UI can reach it — the dock's open verbs spawn SIBLING processes and never see
+      // an `OpenedProject`, so the in-process session owns the fact for its own window.
+      unbindable_content_records_(opened.unbindable_content_records),
       history_(std::make_unique<HistoryPublisher>()) {
   // The persistent, lifetime-scoped kind Registry (D-open-7): seeded once here,
   // not rebuilt per open. `save`/export and the future A6 plugin seam reuse it.

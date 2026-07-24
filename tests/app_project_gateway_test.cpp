@@ -108,6 +108,41 @@ ace::commands::AppState make_session(const ace::platform::FileSystem& fs,
   return ace::commands::AppState(std::move(*created));
 }
 
+// The same minimal session, but with the A19 reopen-degradation count scripted onto the
+// `OpenedProject` before it is consumed — standing in for the never-saved lossy reopen,
+// the one path `project::open_project` reports a non-zero count from. Producing that count
+// is pinned in tests/project_open_test.cpp; what this file owns is the seam that carries it
+// out to the rail.
+ace::commands::AppState make_degraded_session(const ace::platform::FileSystem& fs,
+                                              const std::filesystem::path& root,
+                                              std::size_t unbindable) {
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  created.value().unbindable_content_records = unbindable;
+  return ace::commands::AppState(std::move(*created));
+}
+
+// An entirely unwired gateway: every pure verb stubbed inert, nothing overridden beyond
+// them. Its purpose is to pin that `reopen_unbindable_count()` has a `0` DEFAULT rather
+// than being pure — the property that lets the gateway fakes of unrelated suites stay
+// unchanged, and that makes an unwired session report no loss instead of failing to link.
+class InertGateway final : public ace::dock::ProjectGateway {
+public:
+  bool open_project(const std::filesystem::path&) override { return false; }
+  bool new_project(const std::filesystem::path&, const std::string&) override { return false; }
+  bool open_recent(const std::filesystem::path&) override { return false; }
+  void pick_folder(std::function<void(std::optional<std::filesystem::path>)>) override {}
+  std::vector<std::filesystem::path> recent_projects() const override { return {}; }
+  bool save() override { return false; }
+  bool is_dirty() const override { return false; }
+  void save_as() override {}
+  ace::dock::GcSummary clean_up(bool) override { return {}; }
+  bool undo() override { return false; }
+  bool redo() override { return false; }
+  bool can_undo() const override { return false; }
+  bool can_redo() const override { return false; }
+};
+
 } // namespace
 
 using ace::app::AppProjectGateway;
@@ -222,6 +257,41 @@ TEST_CASE("AppProjectGateway::save publishes the in-process session; is_dirty tr
   CHECK_FALSE(gateway.is_dirty());
   CHECK(fs.exists(session.layout().canonical));
   REQUIRE_FALSE(launcher.invoked);
+}
+
+// editor.project.reopen_degradation_notice — the A19 count crossing the L3→L4 inversion
+// (A12/A13), asserted headless exactly as `is_dirty()` above is. `dock` may include neither
+// `ace/commands` nor `ace/scene`, so the rail can only learn the session's degradation by
+// asking this seam; these cases pin that the number it gets back is the session's own.
+TEST_CASE("AppProjectGateway::reopen_unbindable_count reports the session's carried count",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+
+  SECTION("a degraded session's count round-trips through the seam") {
+    auto session = make_degraded_session(fs, scratch.root / "degraded", 5);
+    AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+    CHECK(gateway.reopen_unbindable_count() == 5);
+    // A pure REPORTER (D-reopen_degradation_notice-5): re-querying never consumes the fact,
+    // because the one-shot latch lives on the Dockspace, not here.
+    CHECK(gateway.reopen_unbindable_count() == 5);
+    REQUIRE_FALSE(launcher.invoked); // a session query, never a sibling exec
+  }
+
+  SECTION("an undegraded session reports zero") {
+    auto session = make_session(fs, scratch.root / "clean");
+    AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+    CHECK(gateway.reopen_unbindable_count() == 0);
+  }
+
+  SECTION("the base-class default is an inert zero for an unwired gateway") {
+    InertGateway inert;
+    const ace::dock::ProjectGateway& seam = inert;
+    CHECK(seam.reopen_unbindable_count() == 0);
+  }
 }
 
 TEST_CASE("AppProjectGateway::save_as picks a target, publishes a copy, and execs a sibling",

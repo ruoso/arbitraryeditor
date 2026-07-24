@@ -95,6 +95,10 @@ bool AppProjectGateway::save() {
 
 bool AppProjectGateway::is_dirty() const { return app_state_.is_dirty(); }
 
+std::size_t AppProjectGateway::reopen_unbindable_count() const {
+  return app_state_.unbindable_content_records();
+}
+
 bool AppProjectGateway::undo() {
   // Navigate the in-process session's journal (D15 / A13), not a sibling exec.
   // `commands::undo` drives `journal().undo()` as a forward publish and reports whether

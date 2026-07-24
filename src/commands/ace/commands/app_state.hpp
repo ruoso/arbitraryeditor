@@ -106,6 +106,20 @@ public:
   // `create_project`).
   bool rebuilt_from_canonical() const { return rebuilt_from_canonical_; }
 
+  // How many layer-bound content records this session's open could not bind (A19),
+  // ferried verbatim off the bootstrap `OpenedProject` — a VALUE, not an error. It is
+  // non-zero only on the one lossy path the editor can produce: a NEVER-SAVED project
+  // (no canonical `project.arbc` to rebuild from) whose crash-durable `workspace/` held
+  // cells or cameras, which reopens successfully but empty because `Document::open`
+  // runs no factory. Zero for a rebuild-from-canonical open, a content-free map, and a
+  // fresh `create_project`. The UI reads it through `dock::ProjectGateway` to announce
+  // the loss once (D25) instead of presenting an emptied project silently.
+  //
+  // Immutable after construction — unlike `saved_revision_`, nothing ever writes it
+  // again, so it is a plain scalar with no synchronization: the bootstrap thread stores
+  // it once, the UI thread reads it thereafter, and the two never interleave.
+  std::size_t unbindable_content_records() const { return unbindable_content_records_; }
+
   // The dirty indicator (D16/A13/D-save-4): workspace-vs-snapshot drift, modelled as
   // session revision-drift and CONSERVATIVE toward "dirty" — it never reports a
   // false clean (telling the user unpublished edits are safely in `project.arbc`
@@ -150,6 +164,9 @@ private:
   arbc::KindBridge kind_bridge_;
   Selection selection_;
   bool rebuilt_from_canonical_ = false;
+  // The A19 reopen-degradation count, carried off `OpenedProject` and never written
+  // again. Plain (non-atomic) on purpose — see the accessor above.
+  std::size_t unbindable_content_records_ = 0;
   // The last-published revision this session, or `SavedRevision::k_none` when none is known.
   SavedRevision saved_revision_;
   // The next gesture-coalescing key (D-undo-2): monotonic, seeded at 1 so it never

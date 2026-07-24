@@ -91,6 +91,45 @@ TEST_CASE("AppState owns one workspace-backed Document, a seeded Registry, and t
   CHECK(moved.document().workspace_backed());
 }
 
+// editor.project.reopen_degradation_notice — the A19 count is FERRIED onto the session,
+// not recomputed (Constraint 1). `open_project` produces it once at bootstrap; the values
+// it produces across the open paths (0 on a rebuild, 0 on a content-free map, non-zero
+// only on the never-saved lossy reopen) are pinned upstream in tests/project_open_test.cpp
+// and deliberately not re-asserted here. What this pins is the ferry itself and, just as
+// importantly, that a session with nothing to report never reports a phantom loss — a
+// notice on a clean project would be worse than the silence it replaces.
+TEST_CASE("AppState carries the reopen unbindable-content count off the OpenedProject") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+
+  SECTION("a lossy open's count arrives verbatim on the session") {
+    auto created = ace::project::create_project(fs, scratch.root / "lossy");
+    REQUIRE(created.has_value());
+    // Stand in for the never-saved workspace-mapped reopen: the only path that yields a
+    // non-zero count. This unit owns the CARRY, so the count is scripted rather than
+    // re-derived from a hand-built lossy workspace.
+    created.value().unbindable_content_records = 7;
+    AppState state(std::move(*created));
+    CHECK(state.unbindable_content_records() == 7);
+  }
+
+  SECTION("a rebuild-from-canonical session reports no loss") {
+    auto created = ace::project::create_project(fs, scratch.root / "rebuilt");
+    REQUIRE(created.has_value());
+    created.value().rebuilt_from_canonical = true;
+    AppState state(std::move(*created));
+    CHECK(state.rebuilt_from_canonical());
+    CHECK(state.unbindable_content_records() == 0);
+  }
+
+  SECTION("a fresh create_project session reports no loss") {
+    auto created = ace::project::create_project(fs, scratch.root / "fresh");
+    REQUIRE(created.has_value());
+    AppState state(std::move(*created));
+    CHECK(state.unbindable_content_records() == 0);
+  }
+}
+
 TEST_CASE("Selection is transient project-level state — never a transaction") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;

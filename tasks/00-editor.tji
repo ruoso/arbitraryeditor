@@ -168,8 +168,9 @@ task editor "Editor — host GUI over libarbc" {
     task reopen_degradation_notice "Surface unbindable-content count as a one-shot open notice" {
       effort 0.5d
       allocate team
+      complete 100
       depends editor.cameras.reopen_slab_adopt
-      note "Read OpenedProject::unbindable_content_records through the existing dock::ProjectGateway POD seam and show a one-shot notice on open naming how many objects the unsaved workspace could not recover, with an ImGui Test Engine e2e driving it headless by widget id. Source-of-debt: tasks/refinements/cameras/reopen_slab_adopt.md. Design: docs/01-architecture.md A19."
+      note "Read OpenedProject::unbindable_content_records through the existing dock::ProjectGateway POD seam and show a one-shot notice on open naming how many objects the unsaved workspace could not recover, with an ImGui Test Engine e2e driving it headless by widget id. Source-of-debt: tasks/refinements/cameras/reopen_slab_adopt.md. Design: docs/01-architecture.md A19. Refinement: tasks/refinements/editor/reopen_degradation_notice.md"
     }
   }
 

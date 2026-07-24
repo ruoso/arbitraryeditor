@@ -225,6 +225,25 @@ public:
   // reuses this same pair.
   virtual bool can_new_shot_from_view() const { return false; }
   virtual bool new_shot_from_view() { return false; }
+
+  // How many objects THIS session's open could not recover (A19 / D25) — a
+  // session-QUERY verb in the `is_dirty()` family, not an action: it reports a
+  // bootstrap-time fact of this process's own project and mutates nothing. The L4 impl
+  // returns the count `commands::AppState` carried off the bootstrap `OpenedProject`;
+  // it is non-zero only on the one lossy reopen the editor can produce (a never-saved
+  // project whose crash-durable `workspace/` held content, which reopens successfully
+  // but empty because `Document::open` binds no `Content`).
+  //
+  // A lone `std::size_t` carries everything the rail and the e2e need, so like
+  // `can_delete`/`delete_selected` this needs not even a dock-local POD
+  // (D-cells_remove-6 / D-reopen_degradation_notice-2) and adds no `dock -> commands`
+  // include. Non-pure with an inert `0` default, so the gateway fakes of unrelated
+  // suites need no churn — an unwired gateway reports no loss and the notice never
+  // fires. Deciding whether the notice has ALREADY been shown is not this seam's job:
+  // that latch is ephemeral presentation state on `Dockspace`
+  // (D-reopen_degradation_notice-5), which keeps this a pure reporter that always
+  // returns the same number.
+  virtual std::size_t reopen_unbindable_count() const { return 0; }
 };
 
 // The default starter arrangement (the eight-type catalog is opened lazily by
@@ -322,6 +341,23 @@ public:
   }
   void close_gc_modal() { gc_modal_open_ = false; }
 
+  // The reopen-degradation notice state (D25 / A19). Unlike every other modal here,
+  // nothing in the rail OPENS this one: it fires passively from the draw routine on
+  // the first frame the gateway reports a non-zero `reopen_unbindable_count()`, because
+  // the condition is a startup fact of the session and the user took no action to
+  // provoke it. `reopen_notice_seen()` is the ONE-SHOT latch — ephemeral presentation
+  // state that belongs here rather than on the session or the gateway
+  // (D-reopen_degradation_notice-5), which keeps the gateway a pure reporter that always
+  // returns the same count while "have I already said this?" stays with the layer that
+  // owns presentation. Dismiss latches it, so the notice never reappears this session.
+  bool reopen_notice_open() const { return reopen_notice_open_; }
+  bool reopen_notice_seen() const { return reopen_notice_seen_; }
+  void open_reopen_notice() {
+    reopen_notice_open_ = true;
+    reopen_notice_seen_ = true;
+  }
+  void close_reopen_notice() { reopen_notice_open_ = false; }
+
   // --- Insert Cell modal state (editor.cells.model / A16) --------------------
   // The kind list is SNAPSHOT from the gateway when the modal opens, so the modal
   // renders a stable list every frame (the BeginPopupModal balance rule) without
@@ -376,10 +412,12 @@ private:
   std::size_t insert_selected_ = 0;                            // index into insert_kinds_
   bool insert_modal_open_ = false;                             // the Insert Cell modal is showing
   bool new_project_modal_open_ = false;                        // the New Project modal is showing
-  bool gc_modal_open_ = false;    // the Clean up confirm modal is showing
-  bool built_ = false;            // DockBuilder seeded at least once
-  bool rebuild_ = false;          // a programmatic open/reopen needs a re-seed
-  unsigned int dockspace_id_ = 0; // ImGuiID; assigned on first draw()
+  bool gc_modal_open_ = false;      // the Clean up confirm modal is showing
+  bool reopen_notice_open_ = false; // the reopen-degradation notice is showing
+  bool reopen_notice_seen_ = false; // the one-shot latch: the notice already fired
+  bool built_ = false;              // DockBuilder seeded at least once
+  bool rebuild_ = false;            // a programmatic open/reopen needs a re-seed
+  unsigned int dockspace_id_ = 0;   // ImGuiID; assigned on first draw()
 };
 
 // The stable ImGui window id of the fixed tool rail — exposed so the e2e can
