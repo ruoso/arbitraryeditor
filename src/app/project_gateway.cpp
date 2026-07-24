@@ -27,23 +27,28 @@
 
 namespace ace::app {
 
-AppProjectGateway::AppProjectGateway(ace::dockmodel::RecentProjects& recent,
-                                     const ace::platform::FileSystem& filesystem,
-                                     FolderDialog& dialog,
-                                     const ace::platform::ProcessLauncher& launcher,
-                                     std::filesystem::path executable,
-                                     ace::commands::AppState& app_state)
-    : recent_(recent), filesystem_(filesystem), dialog_(dialog), launcher_(launcher),
-      executable_(std::move(executable)), app_state_(app_state) {}
+// --- ProjectEntryGateway: the session-free entry verbs (A22 / D-welcome-6) --------
+// Moved here verbatim from AppProjectGateway once the pre-project launcher needed a
+// gateway with no `AppState` behind it. ONE implementation of validate -> MRU-front ->
+// spawn, so a launcher and a project window can never diverge on which targets they
+// refuse or on whether a replay re-orders the MRU.
 
-bool AppProjectGateway::spawn(const std::filesystem::path& dir) {
+ProjectEntryGateway::ProjectEntryGateway(ace::dockmodel::RecentProjects& recent,
+                                         const ace::platform::FileSystem& filesystem,
+                                         FolderDialog& dialog,
+                                         const ace::platform::ProcessLauncher& launcher,
+                                         std::filesystem::path executable)
+    : recent_(recent), filesystem_(filesystem), dialog_(dialog), launcher_(launcher),
+      executable_(std::move(executable)) {}
+
+bool ProjectEntryGateway::spawn(const std::filesystem::path& dir) {
   // Empty error_code == a successful launch (D-open-6); a non-empty one means the
   // sibling `exec` failed. open_another_project canonicalizes `dir` to an absolute
   // path before handing it to the launcher (D-exec_new-4).
   return !static_cast<bool>(ace::commands::open_another_project(launcher_, executable_, dir));
 }
 
-bool AppProjectGateway::open_project(const std::filesystem::path& dir) {
+bool ProjectEntryGateway::open_project(const std::filesystem::path& dir) {
   if (!ace::project::is_project_directory(filesystem_, dir)) {
     return false; // a non-project selection surfaces an error and spawns nothing
   }
@@ -51,7 +56,8 @@ bool AppProjectGateway::open_project(const std::filesystem::path& dir) {
   return spawn(dir);
 }
 
-bool AppProjectGateway::new_project(const std::filesystem::path& parent, const std::string& name) {
+bool ProjectEntryGateway::new_project(const std::filesystem::path& parent,
+                                      const std::string& name) {
   const std::optional<std::filesystem::path> target =
       ace::project::compose_new_project_target(parent, name);
   if (!target.has_value()) {
@@ -62,7 +68,7 @@ bool AppProjectGateway::new_project(const std::filesystem::path& parent, const s
   return spawn(*target);
 }
 
-bool AppProjectGateway::open_recent(const std::filesystem::path& dir) {
+bool ProjectEntryGateway::open_recent(const std::filesystem::path& dir) {
   if (!ace::project::is_project_directory(filesystem_, dir)) {
     return false; // pruned away since the list was last rendered
   }
@@ -70,18 +76,29 @@ bool AppProjectGateway::open_recent(const std::filesystem::path& dir) {
   return spawn(dir);
 }
 
-void AppProjectGateway::pick_folder(
+void ProjectEntryGateway::pick_folder(
     std::function<void(std::optional<std::filesystem::path>)> on_pick) {
   dialog_.show(std::move(on_pick));
 }
 
-std::vector<std::filesystem::path> AppProjectGateway::recent_projects() const {
+std::vector<std::filesystem::path> ProjectEntryGateway::recent_projects() const {
   // Prune through the L1 predicate, bound to our FileSystem — dockmodel may not
   // depend on `project`, so the validity check is injected here (A12 / §8).
   return recent_.load([this](const std::filesystem::path& dir) {
     return ace::project::is_project_directory(filesystem_, dir);
   });
 }
+
+// --- AppProjectGateway: the session-owning half (A13) -----------------------------
+
+AppProjectGateway::AppProjectGateway(ace::dockmodel::RecentProjects& recent,
+                                     const ace::platform::FileSystem& filesystem,
+                                     FolderDialog& dialog,
+                                     const ace::platform::ProcessLauncher& launcher,
+                                     std::filesystem::path executable,
+                                     ace::commands::AppState& app_state)
+    : ProjectEntryGateway(recent, filesystem, dialog, launcher, std::move(executable)),
+      app_state_(app_state) {}
 
 bool AppProjectGateway::save() {
   // Publish the in-process session (A13), not a sibling exec. `commands::save_project`

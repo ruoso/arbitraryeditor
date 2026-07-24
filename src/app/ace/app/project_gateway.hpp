@@ -18,6 +18,56 @@ namespace ace::app {
 
 class FolderDialog;
 
+// The SESSION-FREE half of the L4 project-entry gateway (docs/01-architecture.md A22,
+// D-welcome-6). Exactly five of `dock::ProjectGateway`'s virtuals never touch an
+// `AppState` — open_project / new_project / open_recent / pick_folder /
+// recent_projects, plus the private `spawn` they all terminate in — and every other
+// one does, so the split is a seam the code already had; making it a TYPE is what
+// keeps A22 absolute: a launcher's gateway CANNOT reach a `Document`, because it does
+// not hold one. That is what lets the pre-project launcher (`run_welcome_launcher`)
+// host exactly the same three entry verbs the rail hosts with no session behind them.
+//
+// The nine session virtuals are answered inertly here (false / {} / no-op) rather
+// than being demoted to non-pure defaults on the `dock` seam: the compile-time
+// obligation on the REAL session gateway is load-bearing — a forgotten override there
+// would silently no-op Save (D-welcome-6's rejected alternative).
+class ProjectEntryGateway : public ace::dock::ProjectGateway {
+public:
+  ProjectEntryGateway(ace::dockmodel::RecentProjects& recent,
+                      const ace::platform::FileSystem& filesystem, FolderDialog& dialog,
+                      const ace::platform::ProcessLauncher& launcher,
+                      std::filesystem::path executable);
+
+  // The five entry verbs: validate -> record MRU-front -> spawn a detached SIBLING
+  // (D19/A7). One implementation, shared by the launcher and every project window.
+  bool open_project(const std::filesystem::path& dir) override;
+  bool new_project(const std::filesystem::path& parent, const std::string& name) override;
+  bool open_recent(const std::filesystem::path& dir) override;
+  void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) override;
+  std::vector<std::filesystem::path> recent_projects() const override;
+
+  // The session verbs, answered inertly — the type-level statement of A22's
+  // zero-`Document` invariant. `AppProjectGateway` overrides every one of them.
+  bool save() override { return false; }
+  bool is_dirty() const override { return false; }
+  void save_as() override {}
+  ace::dock::GcSummary clean_up(bool /*preview*/) override { return {}; }
+  bool undo() override { return false; }
+  bool redo() override { return false; }
+  bool can_undo() const override { return false; }
+  bool can_redo() const override { return false; }
+
+protected:
+  ace::dockmodel::RecentProjects& recent_;
+  const ace::platform::FileSystem& filesystem_;
+  FolderDialog& dialog_;
+  const ace::platform::ProcessLauncher& launcher_;
+  std::filesystem::path executable_;
+
+private:
+  bool spawn(const std::filesystem::path& dir);
+};
+
 // The L4 concrete project-entry gateway (docs/01-architecture.md A12, D22). It is
 // the sole holder of the native folder dialog seam, the dockmodel::RecentProjects
 // prefs store, the platform::ProcessLauncher + current-executable path, and the
@@ -31,18 +81,18 @@ class FolderDialog;
 // `is_dirty()` -> `AppState::is_dirty()`), not a sibling process. The same seam,
 // same dependency inversion — the L3 rail reaches the L4 session through it without
 // an illegal `dock -> commands` edge.
-class AppProjectGateway final : public ace::dock::ProjectGateway {
+//
+// The five entry verbs and the private `spawn` live in the session-free
+// `ProjectEntryGateway` base above (A22 / D-welcome-6); this derived class adds the
+// one in-process `AppState` and overrides every session verb. The constructor
+// signature is unchanged, so no existing call site moved.
+class AppProjectGateway final : public ProjectEntryGateway {
 public:
   AppProjectGateway(ace::dockmodel::RecentProjects& recent,
                     const ace::platform::FileSystem& filesystem, FolderDialog& dialog,
                     const ace::platform::ProcessLauncher& launcher,
                     std::filesystem::path executable, ace::commands::AppState& app_state);
 
-  bool open_project(const std::filesystem::path& dir) override;
-  bool new_project(const std::filesystem::path& parent, const std::string& name) override;
-  bool open_recent(const std::filesystem::path& dir) override;
-  void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) override;
-  std::vector<std::filesystem::path> recent_projects() const override;
   bool save() override;
   bool is_dirty() const override;
   // The A19 reopen-degradation count (D25), a session QUERY like `is_dirty()` above and
@@ -136,7 +186,6 @@ public:
   void set_view_framing(std::function<ViewFraming()> framing);
 
 private:
-  bool spawn(const std::filesystem::path& dir);
   // The LIVE canvas framing, and only that: the installed provider's value when it reports a
   // positive pane, else `nullopt`. "No live, sized canvas pane" is a reachable product state
   // (D18 closes every canvas), and `new_shot_from_view` must see it as a refusal rather than
@@ -149,11 +198,6 @@ private:
   // thread via CanvasView::apply_edit), or directly when none is installed.
   void run_edit(const std::function<void()>& edit);
 
-  ace::dockmodel::RecentProjects& recent_;
-  const ace::platform::FileSystem& filesystem_;
-  FolderDialog& dialog_;
-  const ace::platform::ProcessLauncher& launcher_;
-  std::filesystem::path executable_;
   ace::commands::AppState& app_state_; // the one in-process session (A7) Save/dirty drive
   // Posts a UI-thread edit onto the document's one writer thread (bound to
   // CanvasView::apply_edit by the shell); null in headless tests -> run directly.

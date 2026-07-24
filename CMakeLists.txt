@@ -291,7 +291,8 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/export_destination_reseed_e2e_test.cpp
                               tests/contact_sheet_e2e_test.cpp
                               tests/view_id_natural_order_e2e_test.cpp
-                              tests/reopen_degradation_notice_e2e_test.cpp)
+                              tests/reopen_degradation_notice_e2e_test.cpp
+                              tests/welcome_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy

@@ -47,42 +47,6 @@ void build_node(ImGuiID node_id, const ace::dockmodel::DockNode& node) {
   build_node(second_id, node.children[1]);
 }
 
-// The New Project modal (D-open_ui-4): opened once a folder pick resolves a parent
-// location, it collects a project name and, on Create, composes the not-yet-
-// existing target through the gateway — which spawns the sibling whose bootstrap
-// create-branch scaffolds it (no second Document minted here, D19/A7). Drawn every
-// frame from the rail so BeginPopupModal stays balanced; the name buffer + parent
-// live on the Dockspace so the state survives the async pick.
-void draw_new_project_modal(Dockspace& dockspace, ProjectGateway& gateway) {
-  const char* popup_id = "New Project";
-  if (dockspace.new_project_modal_open() && !ImGui::IsPopupOpen(popup_id)) {
-    ImGui::OpenPopup(popup_id);
-  }
-  const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-  if (ImGui::BeginPopupModal(popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::TextWrapped("Location: %s", dockspace.new_project_parent().string().c_str());
-    ImGui::InputText("Name", dockspace.new_project_name_buffer(),
-                     static_cast<std::size_t>(dockspace.new_project_name_buffer_size()));
-    const std::string name(dockspace.new_project_name_buffer());
-    if (ImGui::Button("Create")) {
-      if (gateway.new_project(dockspace.new_project_parent(), name)) {
-        dockspace.project_feedback().clear();
-        dockspace.close_new_project_modal();
-        ImGui::CloseCurrentPopup();
-      } else {
-        dockspace.project_feedback() = "Enter a valid project name.";
-      }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
-      dockspace.close_new_project_modal();
-      ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndPopup();
-  }
-}
-
 // The Clean up (GC) confirm modal (D-gc-3 / D15 "GC is a confirmed op, not
 // undoable"): opened once the rail's dry-run preview resolves the reclaim counts,
 // it surfaces them and, on Clean up, commits a real (`preview=false`) sweep — an
@@ -361,7 +325,12 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   if (!dockspace.project_feedback().empty()) {
     ImGui::TextWrapped("%s", dockspace.project_feedback().c_str());
   }
-  draw_new_project_modal(dockspace, gateway);
+  // The compose modal is now the SHARED one (D-welcome-7): the same value + the same
+  // draw routine the pre-project launcher's welcome hosts, so New composes identically
+  // from either surface. The rail ignores the created-this-frame return — a project
+  // window stays up after spawning a sibling (D19); only the launcher exits on it.
+  (void)draw_new_project_modal(dockspace.new_project_modal(), gateway,
+                               dockspace.project_feedback());
   draw_gc_modal(dockspace, gateway);
   draw_reopen_notice_modal(dockspace, gateway);
 }
@@ -417,6 +386,51 @@ void handle_delete_shortcut(ProjectGateway& gateway) {
 } // namespace
 
 const char* name() { return "dock"; }
+
+// The New Project modal (D-open_ui-4): opened once a folder pick resolves a parent
+// location, it collects a project name and, on Create, composes the not-yet-existing
+// target through the gateway — which spawns the sibling whose bootstrap create-branch
+// scaffolds it (no second Document minted here, D19/A7). Drawn every frame by its host
+// so BeginPopupModal stays balanced; the name buffer + parent live in the caller's
+// `NewProjectModal` so the state survives the async pick.
+//
+// Extracted verbatim from the Dockspace-bound version (D-welcome-7) once the welcome
+// became a second host: one implementation, so `editor.project.dir_is_project` tightens
+// the parent-plus-name flow once. The popup id, its three refs and its behaviour are
+// unchanged, which is why no shipped test churns.
+bool draw_new_project_modal(NewProjectModal& modal, ProjectGateway& gateway,
+                            std::string& feedback) {
+  const char* popup_id = "New Project";
+  if (modal.open() && !ImGui::IsPopupOpen(popup_id)) {
+    ImGui::OpenPopup(popup_id);
+  }
+  bool created = false;
+  const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  if (ImGui::BeginPopupModal(popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("Location: %s", modal.parent().string().c_str());
+    ImGui::InputText("Name", modal.name_buffer(),
+                     static_cast<std::size_t>(modal.name_buffer_size()));
+    const std::string name(modal.name_buffer());
+    if (ImGui::Button("Create")) {
+      if (gateway.new_project(modal.parent(), name)) {
+        feedback.clear();
+        modal.close();
+        created = true;
+        ImGui::CloseCurrentPopup();
+      } else {
+        feedback = "Enter a valid project name.";
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      modal.close();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+  return created;
+}
 
 std::vector<ViewType> default_initial_views() {
   return {ViewType::Canvas, ViewType::Inspector, ViewType::Layers, ViewType::Overview};

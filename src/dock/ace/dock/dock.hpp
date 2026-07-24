@@ -246,6 +246,46 @@ public:
   virtual std::size_t reopen_unbindable_count() const { return 0; }
 };
 
+// The New Project compose modal's state, extracted from `Dockspace` now that TWO
+// hosts compose New identically (D-welcome-7 / A22): the tool rail's Project
+// section inside a project window, and the pre-project launcher's welcome
+// (`WelcomeWindow`, ace/dock/welcome.hpp). One value + one draw routine means
+// `editor.project.dir_is_project` tightens the parent-plus-name flow in exactly
+// ONE place and both hosts inherit it. The modal opens only after `pick_folder`
+// resolves a parent location (D-open_ui-4), so the buffers live here rather than
+// on the stack — the state has to survive the async pick.
+class NewProjectModal {
+public:
+  // A plain char buffer, not a std::string — this build ships no imgui_stdlib
+  // std::string InputText overload (the save-name buffer's precedent).
+  char* name_buffer() { return name_.data(); }
+  int name_buffer_size() const { return static_cast<int>(name_.size()); }
+  bool open() const { return open_; }
+  const std::filesystem::path& parent() const { return parent_; }
+  void open_on(std::filesystem::path parent) {
+    parent_ = std::move(parent);
+    name_.fill('\0');
+    open_ = true;
+  }
+  void close() { open_ = false; }
+
+private:
+  std::array<char, 128> name_{}; // the typed project name
+  std::filesystem::path parent_; // the parent the folder pick seeded
+  bool open_ = false;            // the modal is showing
+};
+
+// Draw one frame of the New Project compose modal against `modal`'s state,
+// composing the not-yet-existing target through `gateway.new_project` on Create —
+// which spawns the sibling whose bootstrap create-branch scaffolds it (no second
+// Document minted here, D19/A7). Must be called EVERY frame by its host so
+// BeginPopupModal stays balanced. Refusals are values: an invalid name leaves the
+// modal open and writes "Enter a valid project name." into `feedback`.
+//
+// Returns whether a project was actually created this frame — the rail ignores it
+// (the project window stays up), the welcome latches its exit on it (D-welcome-8).
+bool draw_new_project_modal(NewProjectModal& modal, ProjectGateway& gateway, std::string& feedback);
+
 // The default starter arrangement (the eight-type catalog is opened lazily by
 // the launcher — tool_rail): a Canvas fills one side; Inspector / Layers /
 // Overview share the other side as a tab-group. Deterministic — the "rebuild the
@@ -317,17 +357,21 @@ public:
 
   // The New Project modal state the rail drives (a name buffer mirroring the
   // save-name buffer, plus the chosen parent the folder pick seeded). The modal
-  // opens only after pick_folder resolves a parent location (D-open_ui-4).
-  char* new_project_name_buffer() { return new_project_name_.data(); }
-  int new_project_name_buffer_size() const { return static_cast<int>(new_project_name_.size()); }
-  bool new_project_modal_open() const { return new_project_modal_open_; }
-  const std::filesystem::path& new_project_parent() const { return new_project_parent_; }
+  // opens only after pick_folder resolves a parent location (D-open_ui-4). The
+  // state itself moved to the shared `NewProjectModal` value once the welcome
+  // became a second host (D-welcome-7); these six stay as FORWARDERS, so the
+  // extraction is invisible to every existing caller and test.
+  char* new_project_name_buffer() { return new_project_.name_buffer(); }
+  int new_project_name_buffer_size() const { return new_project_.name_buffer_size(); }
+  bool new_project_modal_open() const { return new_project_.open(); }
+  const std::filesystem::path& new_project_parent() const { return new_project_.parent(); }
   void open_new_project_modal(std::filesystem::path parent) {
-    new_project_parent_ = std::move(parent);
-    new_project_name_.fill('\0');
-    new_project_modal_open_ = true;
+    new_project_.open_on(std::move(parent));
   }
-  void close_new_project_modal() { new_project_modal_open_ = false; }
+  void close_new_project_modal() { new_project_.close(); }
+  // The shared modal value itself, for the rail's per-frame draw_new_project_modal
+  // call (the welcome holds its own instance).
+  NewProjectModal& new_project_modal() { return new_project_; }
 
   // The Clean up (GC) confirm-modal state the rail drives (D-gc-3 / D15). Opened
   // once a dry-run preview resolves the reclaim counts; the modal shows them and
@@ -400,8 +444,7 @@ private:
       nullptr;                                // preset store (app-wired, may be null)
   ProjectGateway* project_gateway_ = nullptr; // project-entry seam (app-wired, may be null)
   std::array<char, 64> save_name_{};          // "Save current as…" name buffer
-  std::array<char, 128> new_project_name_{};  // New Project modal name buffer
-  std::filesystem::path new_project_parent_;  // parent the folder pick seeded
+  NewProjectModal new_project_;               // the shared New Project compose modal
   std::string project_feedback_;              // inline feedback for the last action
   GcSummary gc_preview_;                      // the last Clean up dry-run reclaim counts
   std::vector<InsertKindSpec> insert_kinds_;  // the Insert Cell kind list, snapshot at open
@@ -411,7 +454,6 @@ private:
   std::string insert_error_;                                   // the last refused insert's message
   std::size_t insert_selected_ = 0;                            // index into insert_kinds_
   bool insert_modal_open_ = false;                             // the Insert Cell modal is showing
-  bool new_project_modal_open_ = false;                        // the New Project modal is showing
   bool gc_modal_open_ = false;      // the Clean up confirm modal is showing
   bool reopen_notice_open_ = false; // the reopen-degradation notice is showing
   bool reopen_notice_seen_ = false; // the one-shot latch: the notice already fired

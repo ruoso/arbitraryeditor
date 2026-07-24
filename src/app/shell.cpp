@@ -6,6 +6,7 @@
 #include <ace/commands/app_state.hpp>
 #include <ace/commands/export.hpp>
 #include <ace/dock/dock.hpp>
+#include <ace/dock/welcome.hpp>
 #include <ace/dockmodel/recent_projects.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/dockmodel/workspaces.hpp>
@@ -62,11 +63,13 @@ std::filesystem::path workspace_prefs_root() {
   return base / "arbitraryeditor" / "workspaces";
 }
 
-// A unique scratch project directory for a no-path launch (D-app_state-6): the
-// bootstrap create_projects one here so the single-`Document`-for-lifetime
-// invariant always holds even before the in-app New/Open picker
-// (editor.project.open_ui) exists. Under the OS temp dir with a random suffix so
-// repeated headless runs in one process never collide on a live workspace file.
+// A unique scratch project directory for a no-path HEADLESS launch (D-app_state-6 as
+// refined by A22/D26): the bootstrap creates one here so a driven run — which has no
+// user to answer a welcome — always holds a `Document`. An INTERACTIVE no-path launch
+// no longer comes through here at all: it takes launcher mode (`run_welcome_launcher`)
+// and offers New / Open / Recent instead of minting a throwaway project. Under the OS
+// temp dir with a random suffix so repeated headless runs in one process never collide
+// on a live workspace file.
 std::filesystem::path scratch_project_dir() {
   std::random_device rd;
   return std::filesystem::temp_directory_path() /
@@ -189,7 +192,82 @@ void Shell::shutdown() {
   }
 }
 
+bool wants_welcome_launcher(const ShellOptions& opts) {
+  // Exactly D26's two facts, and nothing environmental: `headless` is the caller's
+  // STATED intent and is already `Shell::init`'s windowed-vs-offscreen switch, so
+  // probing for an attached display here would answer a different question
+  // (D-welcome-2's rejected alternative).
+  return opts.project_dir.empty() && !opts.headless;
+}
+
+int run_welcome_launcher(const ShellOptions& opts) {
+  Shell shell;
+  if (!shell.init(opts)) {
+    return 1;
+  }
+  // Everything the launcher owns lives in THIS block, which closes before
+  // `shell.shutdown()` below (Constraint 12): a launcher can be dismissed seconds
+  // after it starts, so a folder-dialog request may still be in flight at teardown —
+  // `~SdlFolderDialog` detaches those by nulling `owner`, and it must run while SDL is
+  // still up. There is deliberately nothing else to tear down: no AppState, no
+  // WriterThread, no CanvasView, no Dockspace, no ExportService, no view bodies and no
+  // on-close gc_project, because launcher mode never mints a Document (A22).
+  {
+    ace::platform::NativeFileSystem filesystem;
+    ace::platform::NativeProcessLauncher launcher;
+    std::unique_ptr<ace::dockmodel::RecentProjects> recent_projects;
+    std::unique_ptr<ace::app::SdlFolderDialog> folder_dialog;
+    std::unique_ptr<ace::app::ProjectEntryGateway> entry_gateway;
+    // The same injection branch run_editor uses: a test may inject a fake gateway
+    // through ShellOptions; otherwise wire the session-free L4 gateway (A22 /
+    // D-welcome-6) over the same FileSystem, ProcessLauncher and recent-projects prefs
+    // store a project window would use — so the launcher lists the same recents and
+    // refuses the same targets as the rail (D26).
+    ace::dock::ProjectGateway* project_gateway = opts.project_gateway;
+    if (project_gateway == nullptr) {
+      std::filesystem::path executable;
+      if (const platform::Result<std::filesystem::path> exe =
+              ace::platform::current_executable_path()) {
+        executable = *exe;
+      }
+      recent_projects = std::make_unique<ace::dockmodel::RecentProjects>(
+          workspace_prefs_root().parent_path(), filesystem);
+      folder_dialog = std::make_unique<ace::app::SdlFolderDialog>();
+      entry_gateway = std::make_unique<ace::app::ProjectEntryGateway>(
+          *recent_projects, filesystem, *folder_dialog, launcher, executable);
+      project_gateway = entry_gateway.get();
+    }
+    // The launcher window's ENTIRE content (D-welcome-3): one `dock` chrome type
+    // hosting the same ProjectGateway the rail hosts. Declared last so it is destroyed
+    // first — before the gateway and dialog it borrows.
+    ace::dock::WelcomeWindow welcome;
+    welcome.set_project_gateway(project_gateway);
+    shell.set_draw_content([&welcome]() { welcome.draw(); });
+    // The exit latch joins the OS window close in the loop condition: a verb that
+    // actually spawned, or an explicit dismissal, ends the run (D-welcome-8).
+    while (should_continue_loop(shell.frames_rendered(), opts.max_frames,
+                                shell.quit_requested() || welcome.exit_requested())) {
+      shell.new_frame();
+      shell.draw_ui();
+      shell.render();
+    }
+    // Drop the draw-content before `welcome` goes out of scope: the shell outlives this
+    // block, and a stale capture must never be reachable from shutdown().
+    shell.set_draw_content({});
+  }
+  shell.shutdown();
+  return 0;
+}
+
 int run_editor(const ShellOptions& opts, const std::function<void(commands::AppState&)>& on_ready) {
+  // The mode branch (A22 / D-welcome-1), the FIRST statement of the run: ahead of
+  // Shell::init, the NativeFileSystem, scratch_project_dir() and the WriterThread, so
+  // launcher mode is a subtraction rather than a parallel bring-up and "zero Documents"
+  // is structural. Headless no-arg falls through to D-app_state-6's scratch bootstrap
+  // verbatim (D-welcome-2), which is why no shipped test changes behaviour.
+  if (wants_welcome_launcher(opts)) {
+    return run_welcome_launcher(opts);
+  }
   Shell shell;
   if (!shell.init(opts)) {
     return 1;

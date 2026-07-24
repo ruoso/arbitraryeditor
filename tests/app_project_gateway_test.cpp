@@ -146,7 +146,124 @@ public:
 } // namespace
 
 using ace::app::AppProjectGateway;
+using ace::app::ProjectEntryGateway;
 using ace::dockmodel::RecentProjects;
+
+// --- editor.project.welcome — the session-free base (A22 / D-welcome-6) -------------
+// The pre-project launcher constructs THIS type, not AppProjectGateway: it holds no
+// `commands::AppState`, so it structurally cannot reach a `Document`. These two cases
+// are the type-level statement of A22's zero-`Document` invariant — the entry half
+// behaves identically to the shipped derived class (same validate -> MRU-front -> spawn
+// implementation, because the bodies MOVED rather than being copied), and the session
+// half is inert.
+
+TEST_CASE("a session-free ProjectEntryGateway validates, records and spawns",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  // No `make_session` and no AppState& argument: the whole point of the split.
+  ProjectEntryGateway gateway(recent, fs, dialog, launcher, k_exe);
+
+  // (i) An existing project: spawns a sibling on the canonical path and MRU-fronts it.
+  const std::filesystem::path project = make_project(scratch.root, "proj");
+  REQUIRE(gateway.open_project(project));
+  REQUIRE(launcher.invoked);
+  CHECK(launcher.exe == k_exe);
+  REQUIRE(launcher.args.size() == 1);
+  CHECK(launcher.args.front() == std::filesystem::weakly_canonical(project).string());
+  std::vector<std::filesystem::path> listed = gateway.recent_projects();
+  REQUIRE(listed.size() == 1);
+  CHECK(listed.front() == std::filesystem::weakly_canonical(project));
+
+  // (ii) A non-project selection: refused as a value, nothing spawned, nothing recorded.
+  launcher.invoked = false;
+  const std::filesystem::path plain = scratch.root / "plain";
+  std::error_code ec;
+  std::filesystem::create_directories(plain, ec);
+  CHECK_FALSE(gateway.open_project(plain));
+  CHECK_FALSE(launcher.invoked);
+  CHECK(gateway.recent_projects().size() == 1); // still just the one real project
+
+  // (iii) New composes an ABSOLUTE, not-yet-existing target from parent + name and
+  //       spawns the sibling whose bootstrap create-branch scaffolds it (D-open_ui-4).
+  REQUIRE(gateway.new_project(scratch.root, "Fresh"));
+  REQUIRE(launcher.invoked);
+  const std::filesystem::path target = scratch.root / "Fresh";
+  REQUIRE(launcher.args.size() == 1);
+  CHECK(launcher.args.front() == std::filesystem::weakly_canonical(target).string());
+  CHECK_FALSE(std::filesystem::exists(target)); // the create signal to the child
+  CHECK(gateway.recent_projects().size() == 1); // New records nothing
+  launcher.invoked = false;
+  CHECK_FALSE(gateway.new_project(scratch.root, "bad/name"));
+  CHECK_FALSE(launcher.invoked);
+
+  // (iv) Replay re-orders MRU-front and spawns; a vanished entry is refused.
+  const std::filesystem::path second = make_project(scratch.root, "two");
+  REQUIRE(gateway.open_project(second)); // two is MRU-front now
+  REQUIRE(gateway.open_recent(project)); // replay pulls the first one back to the front
+  CHECK(launcher.args.front() == std::filesystem::weakly_canonical(project).string());
+  listed = gateway.recent_projects();
+  REQUIRE(listed.size() == 2);
+  CHECK(listed.front() == std::filesystem::weakly_canonical(project));
+  launcher.invoked = false;
+  CHECK_FALSE(gateway.open_recent(scratch.root / "never_a_project"));
+  CHECK_FALSE(launcher.invoked);
+
+  // (v) The async pick forwards to the injected dialog, exactly as the derived class's.
+  dialog.next = scratch.root / "chosen";
+  std::optional<std::filesystem::path> got;
+  gateway.pick_folder([&got](std::optional<std::filesystem::path> p) { got = p; });
+  CHECK(dialog.shown);
+  REQUIRE(got.has_value());
+  CHECK(*got == scratch.root / "chosen");
+}
+
+TEST_CASE("a session-free gateway answers every session verb inertly", "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  ProjectEntryGateway gateway(recent, fs, dialog, launcher, k_exe);
+
+  // A launcher has no session to publish, navigate or sweep, so every session verb is
+  // a value-returning no-op rather than a null-guarded branch (D-welcome-6). Driven
+  // through the L3 seam, which is how a `dock` host would reach them.
+  ace::dock::ProjectGateway& seam = gateway;
+  CHECK_FALSE(seam.save());
+  CHECK_FALSE(seam.is_dirty());
+  CHECK_FALSE(seam.can_undo());
+  CHECK_FALSE(seam.can_redo());
+  CHECK_FALSE(seam.undo());
+  CHECK_FALSE(seam.redo());
+  for (const bool preview : {true, false}) {
+    const ace::dock::GcSummary summary = seam.clean_up(preview);
+    CHECK(summary.reclaimed_files == 0);
+    CHECK(summary.reclaimed_bytes == 0);
+    CHECK_FALSE(summary.ran); // no sweep ran — never a phantom reclaim
+  }
+  seam.save_as(); // a no-op: no pick is opened and nothing is published
+  CHECK_FALSE(dialog.shown);
+
+  // The non-pure virtuals keep their inherited neutral defaults too, so a welcome
+  // hosting this gateway offers nothing to insert, delete, frame or apologise for.
+  CHECK(seam.insert_kinds().empty());
+  CHECK(seam.insert_cell("org.arbc.raster", {}) == "Insert is unavailable.");
+  CHECK_FALSE(seam.can_delete());
+  CHECK(seam.delete_selected() == 0);
+  CHECK_FALSE(seam.can_frame_selection());
+  CHECK_FALSE(seam.frame_selection());
+  CHECK_FALSE(seam.can_new_shot_from_view());
+  CHECK_FALSE(seam.new_shot_from_view());
+  CHECK(seam.reopen_unbindable_count() == 0);
+
+  // Not one of them reached a process launch either (A13's verbs are in-process, and
+  // there is no process here to be in).
+  CHECK_FALSE(launcher.invoked);
+}
 
 TEST_CASE("AppProjectGateway::open_project validates, records MRU-front, spawns",
           "[app_project_gateway]") {

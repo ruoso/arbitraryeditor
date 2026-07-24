@@ -292,6 +292,14 @@ for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
 
 ---
 
+## Welcome window visual treatment (branding, splash art, geometry persistence)
+
+**Source:** `tasks/refinements/editor/welcome.md` (welcome, 2026-07-24) — Acceptance criteria / Open questions (none).
+
+`dock::WelcomeWindow` draws the three verbs over a plain full-viewport ImGui window with no branding, splash art, or remembered geometry. Whether to add product branding, a splash illustration, remembered window size/position across launches, or a differentiated first-run experience is a design judgment call with no correct answer derivable from the constitution (D26 explicitly excludes all of these from v1 scope). These are product-taste decisions that warrant real use before deciding; no WBS task was created.
+
+---
+
 ## Export destination re-seed: project/layout identity vs service `instance()` on in-process reopen
 
 **Source:** `tasks/refinements/cameras/export_destination_reseed.md` (cameras.export_destination_reseed, 2026-07-24) — Open questions / D-reseed-1 rejected alternative.
