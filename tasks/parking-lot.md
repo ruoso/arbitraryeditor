@@ -305,3 +305,38 @@ for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
 **Source:** `tasks/refinements/cameras/export_destination_reseed.md` (cameras.export_destination_reseed, 2026-07-24) — Open questions / D-reseed-1 rejected alternative.
 
 The Export panel's re-seed keys on `ExportService::instance()` — a monotonic per-service id — which is a faithful proxy for the live project today because the shipped model is 1:1 service-per-process (`project_gateway.hpp:21-33`, `app_state.hpp:284-285`). If the editor ever grows an in-process project reopen (swapping `Document`/`AppState` under a **surviving** `ExportService` instead of the current detached-sibling-`exec` model), `instance()` would not change across the swap, so the panel would retain the previous project's destination. The fix in that future would be to key the re-seed on a project/layout identity rather than the service `instance()` — D-reseed-1's "rejected alternative", which is correct only under that future architecture. This is a design call contingent on an architecture decision no leaf owns today; the WBS records the trigger: if in-process reopen ever ships, revisit `views.cpp:315-317` and `ExportPanel::owner` to key on a stable project identity instead.
+
+---
+
+## Worker-backed parallel tile decode/encode — and where the pool would come from
+
+**Source:** `tasks/refinements/editor/raster_tile_store.md` (project.raster_tile_store, 2026-07-24) — Open questions 1 / D-raster_tile_store-4.
+
+The editor now threads its `arbc::RasterTileStore` through save and load (A23), but leaves
+`TileDecodeDispatch`/`TileEncodeDispatch` **null**, so both directions run inline. A
+worker-backed dispatch needs an `arbc::WorkerPool` (`tile_decode_dispatch.hpp:95-99`, *"pool
+must outlive the dispatch"*), and the editor's only pool belongs to `ace::render::CanvasHost`
+(`src/render/ace/render/canvas_host.hpp:64-70`) — **L2**, unreachable from L1
+`project`/`commands` under §8, and not yet constructed when `open_or_create_app_state` runs.
+Minting a second pool inside `project` would contradict A4's *shared pool* clause and add the
+editor-owned thread `open.md` Constraint 7 forbids. Answering this means deciding whether the
+pool's lifetime moves below `render` (an A4/A5 amendment) or whether cold-open latency on
+large raster projects is simply accepted. A null dispatch is byte-identical to the serial
+path, so nothing is incorrect today — this is a latency/architecture judgment, not a kernel to
+write. No WBS task was created.
+
+---
+
+## Should new editor projects author `Rgba32fLinearPremul` instead of libarbc's 16f default?
+
+**Source:** `tasks/refinements/editor/raster_tile_store.md` (project.raster_tile_store, 2026-07-24) — Open questions 2 / D-raster_tile_store-3.
+
+`save_project` now honours `doc.storage_format()` (the precondition that makes the tile memo
+hit, and independently a fix for silently re-authoring a 32f project at 16f), but the editor
+deliberately **authors** nothing: a new `Document` keeps libarbc's `Rgba16fLinearPremul`
+default. Choosing 32f would be lossless against the rgba32f working space; it also roughly
+doubles `assets/` and changes every shipped project's bytes. libarbc left the call to the host
+on purpose (`tests/raster_tile_store_golden.t.cpp:378-379`, *"Lossy from an rgba32f working
+space, by the user's authored choice"*), and it interacts with D10's colour boundary and D13's
+portability story — a product/quality decision, possibly a per-project setting rather than a
+constant. No WBS task was created.

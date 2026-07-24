@@ -169,8 +169,9 @@ task editor "Editor — host GUI over libarbc" {
     task raster_tile_store "Thread RasterTileStore/TileDecodeDispatch through save/open for raster memoisation" {
       effort 1.5d
       allocate team
+      complete 100
       depends editor.cells.model
-      note "Thread arbc::RasterTileStore (and TileDecodeDispatch) through project::save_project -> arbc::builtin_codecs(registry, &tiles) (document_serialize.hpp:134) and project::open_project -> arbc::load_document(..., tiles, decode) (:218) so raster-cell tiles are memoized across saves instead of re-hashed on every save. save.cpp:120 passes null tiles and project_open.cpp:97-98 passes none -- correct but O(all tiles) per save. editor.cells.model is the first leaf to put raster cells in a saved project, making this load-bearing. Source-of-debt: tasks/refinements/editor.cells/model.md. Design: docs/01-architecture.md A4/A14."
+      note "Thread arbc::RasterTileStore (and TileDecodeDispatch) through project::save_project -> arbc::builtin_codecs(registry, &tiles) (document_serialize.hpp:134) and project::open_project -> arbc::load_document(..., tiles, decode) (:218) so raster-cell tiles are memoized across saves instead of re-hashed on every save. save.cpp:120 passes null tiles and project_open.cpp:97-98 passes none -- correct but O(all tiles) per save. editor.cells.model is the first leaf to put raster cells in a saved project, making this load-bearing. Source-of-debt: tasks/refinements/editor.cells/model.md. Design: docs/01-architecture.md A4/A14. Refinement: tasks/refinements/editor/raster_tile_store.md"
     }
     task reopen_degradation_notice "Surface unbindable-content count as a one-shot open notice" {
       effort 0.5d

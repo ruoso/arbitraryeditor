@@ -247,6 +247,34 @@ TEST_CASE("open_or_create_app_state resolves a path: create-when-new, open-when-
   }
 }
 
+// editor.project.raster_tile_store / A23 Constraint 1: one `arbc::RasterTileStore` per
+// `Document`, minted BY the call that mints the `Document`. Both bootstrap branches must hand
+// one over — a session whose `tiles()` were null would silently fall back to a full re-hash of
+// the whole document on every save, and nothing else in the tree would notice.
+TEST_CASE("open_or_create_app_state always carries a raster tile store") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+
+  SECTION("the create branch") {
+    const auto session = open_or_create_app_state(fs, scratch.root / "created");
+    REQUIRE(session.has_value());
+    CHECK(session.value().tiles() != nullptr);
+  }
+
+  SECTION("the open branch") {
+    const std::filesystem::path root = scratch.root / "reopened";
+    {
+      auto created = ace::project::create_project(fs, root);
+      REQUIRE(created.has_value());
+      CHECK(created.value().tiles != nullptr);
+      REQUIRE(created.value().document->checkpoint().has_value());
+    } // the first session is dropped (workspace unmapped) before reopening
+    const auto session = open_or_create_app_state(fs, root);
+    REQUIRE(session.has_value());
+    CHECK(session.value().tiles() != nullptr);
+  }
+}
+
 TEST_CASE("open_or_create_app_state surfaces OpenError values, never throws") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;

@@ -1,7 +1,8 @@
 #include <ace/project/save.hpp>
 
 #include <arbc/runtime/document_serialize.hpp>
-#include <arbc/serialize/codec.hpp> // arbc::CodecTable (complete type for builtin_codecs)
+#include <arbc/runtime/raster_tile_store.hpp> // arbc::RasterTileStore (the save-side memo)
+#include <arbc/serialize/codec.hpp>           // arbc::CodecTable (complete type for builtin_codecs)
 #include <arbc/serialize/save_context.hpp>
 #include <arbc/serialize/writer.hpp> // arbc::SerializeError
 
@@ -97,7 +98,8 @@ FilesystemAssetSink::put(std::string_view resolved_uri, std::span<const std::byt
 platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
                                            const ProjectLayout& layout, const arbc::Document& doc,
                                            const arbc::Registry& registry,
-                                           const WriterPost& post_writer) {
+                                           const WriterPost& post_writer,
+                                           arbc::RasterTileStore* tiles) {
   // Ensure `assets/` (and, by extension, the root) exists before any blob or the
   // canonical publish. Save is a publish step; `make_directories` is idempotent
   // mkdir -p. The workspace and its checkpoints are deliberately untouched (D16/§9).
@@ -116,7 +118,14 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
   // tokens are unchanged), so this is byte-identical for a solid/probe document.
   arbc::KindBridge bridge;
   seed_kind_bridge(bridge, registry);
-  const arbc::CodecTable codecs = arbc::builtin_codecs(registry);
+  // Bind the document's raster hash memo into the codec table BY CLOSURE (A23,
+  // D-raster_tile_store-2): the raster codec captures `tiles` when the table is built, so
+  // this is the only moment it can be attached. With a live memo an untouched tile is a
+  // hit — no `peek`, no storage conversion, no SHA-256 — and only the tiles the user
+  // actually touched are re-hashed. `nullptr` is exactly `builtin_codecs(registry)`:
+  // correct pixels, no memoisation (`document_serialize.hpp:134`). The host NEVER brackets
+  // the pass — `begin_pass`/`end_pass` are the codec's (`codec_raster.cpp:117-126`).
+  const arbc::CodecTable codecs = arbc::builtin_codecs(registry, tiles);
 
   // Owned bytes route to `assets/` through the content-addressed sink; the base URI
   // is the canonical path so the library resolves each asset reference beside it
@@ -124,6 +133,17 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
   FilesystemAssetSink sink(fs);
   arbc::SaveContext ctx(layout.canonical.string());
   ctx.set_asset_sink(&sink);
+  // Re-emit the document's AUTHORED storage format (D-raster_tile_store-3), arbc's own idiom
+  // for a ctx-carrying save (`document_serialize.cpp:431`). Two things ride on it. (1) The
+  // memo is KEYED on the storage format — the codec calls `memo.begin_pass(ctx.storage_format())`
+  // and the load seeds at the `LoadContext`'s format — so a save left at `SaveContext`'s own
+  // default misses EVERY seeded entry, silently no-op'ing memoisation on exactly the projects
+  // that came from disk. (2) Independently: a load installs the file's authored format onto the
+  // `Document` (`document_serialize.cpp:755-759`), so without this a 32f-authored project
+  // re-saves at 16f — a precision downgrade that renames every blob in `assets/`. The editor
+  // still AUTHORS nothing: a new `Document` keeps libarbc's `Rgba16fLinearPremul` default, so
+  // editor-created projects are byte-unchanged.
+  ctx.set_storage_format(doc.storage_format());
 
   // POST the capture, serialize off-thread (D-writer_thread-7). `capture_snapshot` is a READ,
   // but it copies the writer-owned content side-map and unknown-field stash, so it belongs on the
@@ -188,7 +208,22 @@ platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
   // target layout so `project.arbc` + the content-addressed `assets/` land under
   // `target_root`. Captures the current in-memory state; the source project is never
   // touched. `save_project` `make_directories`-es `assets/` (and thus the root).
-  platform::Result<SaveOutcome> published = save_project(fs, layout, doc, registry, post_writer);
+  // NO TILE STORE HERE — deliberately, and this is the one place the memo must not be shared.
+  // The raster codec resolves a memo HIT entirely inside the memo: it dispatches no encode and
+  // therefore never hands the tile to the `AssetSink` at all (`codec_raster.cpp:155`, the
+  // `probe` branch of phase 1 — only MISSES reach the reap that calls `store_asset`). A memo
+  // is thus implicitly scoped to ONE asset destination: "I hashed this tile last pass" is only
+  // usable as "…so its blob is already on disk" when this pass writes to the SAME `assets/`.
+  // For plain Save that always holds — `AppState`'s `layout_` never changes (D-save_as-2) and
+  // the memo was either born cold or seeded from that very root's canonical. A Save As
+  // publishes into a FRESH root whose `assets/` is empty, so a shared memo would emit a
+  // `project.arbc` naming tile blobs that were never written there: a silently pixel-less copy,
+  // exactly the data-loss class D-save_as-4's clobber guard exists to prevent. The copy is
+  // worth one full re-hash; it is a user-initiated, once-per-invocation publish, and libarbc
+  // documents the null store as correct (`document_serialize.hpp:134`). The SESSION's memo is
+  // left untouched, so the next plain Save into the source root is still incremental.
+  platform::Result<SaveOutcome> published =
+      save_project(fs, layout, doc, registry, post_writer, /*tiles=*/nullptr);
   if (!published.has_value()) {
     return published.error();
   }

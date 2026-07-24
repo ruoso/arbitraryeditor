@@ -95,10 +95,21 @@ using WriterPost = std::function<void(const std::function<void()>&)>;
 // and so must be posted, but everything after it runs over an immutable snapshot and must NOT
 // be — holding the single writer thread for the whole serialize+write would stall every queued
 // edit and every canvas's viewport rebuild behind a disk publish.
+//
+// `tiles` is the DOCUMENT'S `org.arbc.raster` hash memo (A23 / D-raster_tile_store-2), the one
+// `open_project`/`create_project` minted beside the `Document` and `commands::AppState` holds
+// for the process's life. It is bound into the raster codec BY CLOSURE at codec-table
+// construction (`builtin_codecs(registry, tiles)`), so it must be supplied here — there is no
+// post-hoc attach. A save through a live memo re-hashes only the tiles the user actually
+// touched; `nullptr` is libarbc's own documented degradation — exactly
+// `builtin_codecs(registry)`, still writing correct pixels, just re-hashing the whole document
+// (`arbc/runtime/document_serialize.hpp:134`) — which is what keeps every pre-existing call
+// site and test source-compatible. Trailing and defaulted for that reason.
 platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
                                            const ProjectLayout& layout, const arbc::Document& doc,
                                            const arbc::Registry& registry,
-                                           const WriterPost& post_writer = {});
+                                           const WriterPost& post_writer = {},
+                                           arbc::RasterTileStore* tiles = nullptr);
 
 // Publish a COPY of the live `doc` as a fresh project rooted at `target_root` — the
 // portable core (`project.arbc` + content-addressed `assets/`) plus a
@@ -112,6 +123,14 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
 // `project.arbc` it returns `std::errc::file_exists` and writes nothing
 // (D-save_as-4). Errors are values (the `SaveError` publish faults ride through
 // unchanged); never throws.
+//
+// Save As takes NO tile store, and that is a correctness rule rather than an oversight (A23
+// clause 2, with the full argument at the `save_project` call in `save.cpp`): the raster codec
+// resolves a memo HIT entirely inside the memo and never hands the tile to the `AssetSink`, so
+// a memo is implicitly scoped to ONE `assets/`. Sharing the session's into a fresh root would
+// publish a canonical naming tile blobs nobody wrote there — a silently pixel-less copy. A
+// Save As therefore re-hashes the document once, libarbc's documented correct-but-
+// non-incremental mode, and leaves the caller's own memo untouched.
 platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
                                               const std::filesystem::path& target_root,
                                               const arbc::Document& doc,

@@ -49,8 +49,12 @@ UndoOutcome redo_step(AppState& state) {
 } // namespace
 
 AppState::AppState(project::OpenedProject opened)
-    : document_(std::move(opened.document)), layout_(std::move(opened.layout)),
-      rebuilt_from_canonical_(opened.rebuilt_from_canonical),
+    // The document's raster hash memo, taken over from the `OpenedProject` that minted it
+    // beside the `Document` (A23): seeded on a rebuild-from-canonical open, cold on a
+    // workspace map or a fresh create. `AppState` is its process-lifetime owner for the same
+    // reason it owns the persistent `Registry` and the document-scoped `KindBridge` (A7).
+    : document_(std::move(opened.document)), tiles_(std::move(opened.tiles)),
+      layout_(std::move(opened.layout)), rebuilt_from_canonical_(opened.rebuilt_from_canonical),
       // The A19 degradation count, ferried not recomputed (D-reopen_degradation_notice-1):
       // `project::open_project` produces it once at bootstrap and this is the only place
       // the UI can reach it — the dock's open verbs spawn SIBLING processes and never see
@@ -174,8 +178,10 @@ platform::Result<project::SaveOutcome> save_project(AppState& state, const platf
   // The dump lives in `project` (D-save-1); `commands` only wires the session into
   // it and updates the dirty baseline. The capture half is POSTED to the writer thread
   // through `post_writer`; the serialize + publish half runs here, off it (D-writer_thread-7).
-  platform::Result<project::SaveOutcome> published =
-      project::save_project(fs, state.layout(), state.document(), state.registry(), post_writer);
+  // The session's raster memo rides in as the trailing argument (A23): an untouched tile is
+  // a memo hit, so a re-save re-hashes only what the user actually touched.
+  platform::Result<project::SaveOutcome> published = project::save_project(
+      fs, state.layout(), state.document(), state.registry(), post_writer, state.tiles());
   if (!published.has_value()) {
     return published.error(); // a failed publish leaves the session dirty
   }
@@ -210,6 +216,10 @@ save_project_as(AppState& state, const platform::FileSystem& fs,
   // the writer thread through `post_writer` (D-writer_thread-7); the serialize + publish runs
   // here. The current session is deliberately left untouched — no `mark_saved`, no `layout_`
   // rebind (D-save_as-2 / Constraint 4).
+  // Deliberately WITHOUT the session's raster memo: a memo hit skips the asset sink, so
+  // sharing it into a fresh destination would publish a copy whose `assets/` is empty (see
+  // the note in `project::save_project_as`). The copy costs one full re-hash; the session's
+  // own memo is left intact, so the next plain Save is still incremental.
   platform::Result<project::SaveOutcome> published =
       project::save_project_as(fs, resolved, state.document(), state.registry(), post_writer);
   if (!published.has_value()) {

@@ -7,6 +7,7 @@
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp>
 #include <arbc/runtime/filesystem_asset_source.hpp>
+#include <arbc/runtime/raster_tile_store.hpp> // arbc::RasterTileStore (the load SEEDS it)
 
 #include <cstddef>
 #include <filesystem>
@@ -76,9 +77,28 @@ create_workspace_document(const std::filesystem::path& workspace_file) {
 // right after the built-ins (D-reopen-1) — the seam that keeps a persisted camera a
 // live `scene::CameraContent` on reopen instead of a degraded placeholder — while
 // `project` stays typed only on `arbc::Registry` (no `project->scene` edge).
+//
+//
+// `tiles` is the CALLER'S store (A23 / Constraint 6) — never one minted here. The load
+// SEEDS it: every tile it decodes carries a blob name the reader already knows, so seeding
+// makes the session's first save a pure memo sweep instead of a full re-hash of the
+// document. It must therefore outlive this call and belong to the `Document`, which is
+// exactly what separates it from the transient `Registry`/`KindBridge`/`AssetSource`
+// (D-open-7). The `TileDecodeDispatch` stays null: a worker-backed decode needs an
+// `arbc::WorkerPool` L1 cannot reach and which does not exist at open time, and a null
+// dispatch decodes INLINE, byte-identically to the serial load (D-raster_tile_store-4,
+// `arbc/runtime/document_serialize.hpp:212`). `open.md` Constraint 7 is kept, not amended.
+//
+// Taken BY REFERENCE-TO-`unique_ptr`, not as a raw pointer, for one reason: a seeded memo
+// holds owning `BlockRef` pins into `document`'s pool (`raster_tile_store.hpp:141`), so the
+// one branch that loads successfully and THEN fails (a faulted `checkpoint`) would destroy
+// the pool here while the caller's store still pinned into it. Releasing the store inside
+// that branch, while `document` is still alive, is the same release-before-the-`Document`
+// rule Constraint 2 states for the declaration order of `OpenedProject`/`AppState`.
 platform::Result<std::unique_ptr<arbc::Document>>
 rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_bytes,
-                       const std::function<void(arbc::Registry&)>& register_extra_kinds) {
+                       const std::function<void(arbc::Registry&)>& register_extra_kinds,
+                       std::unique_ptr<arbc::RasterTileStore>& tiles) {
   platform::Result<std::unique_ptr<arbc::Document>> minted =
       create_workspace_document(layout.workspace_file);
   if (!minted.has_value()) {
@@ -107,11 +127,15 @@ rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_b
   seed_kind_bridge(bridge, registry);
   arbc::FilesystemAssetSource assets;
   const auto loaded = arbc::load_document(canonical_bytes, *document, bridge, registry,
-                                          layout.canonical.string(), &assets);
+                                          layout.canonical.string(), &assets, tiles.get(),
+                                          /*decode=*/nullptr);
   if (!loaded.has_value()) {
     return make_error_code(OpenError::CorruptDocument);
   }
   if (!document->checkpoint().has_value()) {
+    // The load may already have seeded the memo with pins into `document`'s pool; release
+    // them HERE, before `document` unwinds at the return below (see the note above).
+    tiles.reset();
     return make_error_code(OpenError::IoError);
   }
   return document;
@@ -175,6 +199,14 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
     return make_error_code(OpenError::NotADirectory);
   }
 
+  // The document's ONE raster hash memo, minted before the branch so BOTH open paths hand
+  // it back on `OpenedProject` (A23 / Constraint 1): a workspace-mapped open leaves it COLD
+  // (nothing to seed it from, D-raster_tile_store-7), a rebuild-from-canonical open seeds it
+  // with the blob names `load_document` just read. Empty-and-cold is correct, only
+  // non-incremental — the first save of that session hashes every tile once, every save
+  // after it is incremental.
+  std::unique_ptr<arbc::RasterTileStore> tiles = std::make_unique<arbc::RasterTileStore>();
+
   // Fast, durable-by-default path (D-open-3): map the crash-durable workspace when the
   // file is present — then KEEP the mapped document only when it is actually usable.
   //
@@ -220,6 +252,7 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
       if (unbindable == 0 || !canonical_exists) {
         OpenedProject opened;
         opened.document = std::move(*mapped);
+        opened.tiles = std::move(tiles); // cold: no `load_document` ran (D-raster_tile_store-7)
         opened.layout = layout;
         opened.rebuilt_from_canonical = false;
         opened.unbindable_content_records = unbindable;
@@ -249,13 +282,15 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
   }
 
   platform::Result<std::unique_ptr<arbc::Document>> rebuilt =
-      rebuild_from_canonical(layout, *bytes, register_extra_kinds);
+      rebuild_from_canonical(layout, *bytes, register_extra_kinds, tiles);
   if (!rebuilt.has_value()) {
     return rebuilt.error();
   }
 
   OpenedProject opened;
   opened.document = std::move(*rebuilt);
+  // Seeded by the load above: the next save is a pure memo sweep, not a full re-hash.
+  opened.tiles = std::move(tiles);
   opened.layout = layout;
   opened.rebuilt_from_canonical = true;
   return opened;
@@ -293,6 +328,11 @@ platform::Result<OpenedProject> create_project(const platform::FileSystem& fs,
 
   OpenedProject opened;
   opened.document = std::move(document);
+  // A fresh project has no tiles to seed, but the store is still minted here so
+  // `OpenedProject::tiles` is never null on success (Constraint 1) and "one store per
+  // `Document`" holds on BOTH bootstrap paths. Cold and empty is the right start: the
+  // first save of a newly painted project hashes what the user actually made.
+  opened.tiles = std::make_unique<arbc::RasterTileStore>();
   opened.layout = layout;
   opened.rebuilt_from_canonical = false;
   return opened;

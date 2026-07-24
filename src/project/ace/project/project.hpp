@@ -7,6 +7,11 @@
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge
+// The COMPLETE type, not a forward declaration (A23): `OpenedProject` holds the store
+// through a `unique_ptr` and is destroyed in every TU that opens a project, so the
+// deleter needs the definition here. An exported public header of the v0.3.0 pin that
+// pulls no JSON — no new link dependency, no new DAG edge (§8).
+#include <arbc/runtime/raster_tile_store.hpp>
 
 #include <cstddef>
 #include <filesystem>
@@ -123,6 +128,19 @@ std::error_code make_error_code(OpenError error) noexcept;
 // `editor.project.app_state`'s, not this leaf's.
 struct OpenedProject {
   std::unique_ptr<arbc::Document> document;
+  // The document's ONE `org.arbc.raster` incremental-save hash memo (A23,
+  // D-raster_tile_store-1), minted BY the same call that mints `document` so "one store
+  // per `Document`" is structural — no `open_project`/`create_project` return path can
+  // produce a `Document` without it, and it is never null on success. The save side binds
+  // it into the codec table (`builtin_codecs(registry, tiles)`), the rebuild-from-canonical
+  // load SEEDS it with the blob names it just read off disk.
+  //
+  // DECLARED AFTER `document` ON PURPOSE (Constraint 2): the memo holds owning `BlockRef`
+  // pins into the document's `BigBlockPool` (`arbc/runtime/raster_tile_store.hpp:141`), and
+  // reverse-declaration destruction order is what releases those pins before the pool they
+  // point into. Held through a `unique_ptr` because `RasterTileStore` owns a `std::mutex`
+  // and is therefore neither copyable nor movable, while `OpenedProject` is moved.
+  std::unique_ptr<arbc::RasterTileStore> tiles;
   ProjectLayout layout;
   // True when `open_project` rebuilt from the canonical `project.arbc` (a fresh
   // clone, another machine, or an unusable workspace) rather than mapping the

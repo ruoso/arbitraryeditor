@@ -12,6 +12,7 @@
 #include <arbc/contract/registry.hpp>
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge (the document-scoped bridge)
+#include <arbc/runtime/raster_tile_store.hpp> // arbc::RasterTileStore (A23; complete: unique_ptr member)
 
 #include <atomic>
 #include <cstddef>
@@ -68,12 +69,31 @@ public:
   explicit AppState(project::OpenedProject opened);
 
   AppState(AppState&&) = default;
-  AppState& operator=(AppState&&) = default;
+  // Move ASSIGNMENT is deleted, and that is a lifetime rule rather than a style choice
+  // (A23 / D-raster_tile_store-6). `tiles_` pins `BlockRef`s into `document_`'s pool
+  // (`arbc/runtime/raster_tile_store.hpp:141`), and a DEFAULTED move assignment runs
+  // member-by-member in declaration order — it would assign `document_` first, freeing the
+  // pool while the old memo still pinned into it, i.e. a use-after-free at the next
+  // release. The move CONSTRUCTOR is kept and is load-bearing
+  // (`open_or_create_app_state` returns by value); nothing in the tree move-ASSIGNS an
+  // `AppState` (A7 means there is only ever one), so deleting is strictly better than
+  // hand-writing an ordering nobody exercises.
+  AppState& operator=(AppState&&) = delete;
   AppState(const AppState&) = delete;
   AppState& operator=(const AppState&) = delete;
 
   arbc::Document& document() { return *document_; }
   const arbc::Document& document() const { return *document_; }
+
+  // The document's ONE `org.arbc.raster` incremental-save hash memo (A23), minted with the
+  // `Document` inside `project` and held here for the process's life. Never null in a live
+  // `AppState`. Handed to `project::save_project` so an untouched tile is a memo hit instead
+  // of a fresh SHA-256 over its storage bytes; `tiles()->tiles_hashed()` is the behavioural
+  // witness that memoisation actually happened — the STRONGER of the two incremental-save
+  // counters, because write-if-absent alone would give the right blob count while still
+  // re-hashing the whole document (`raster_tile_store.hpp:112-118`, D-raster_tile_store-5).
+  arbc::RasterTileStore* tiles() { return tiles_.get(); }
+  const arbc::RasterTileStore* tiles() const { return tiles_.get(); }
 
   const project::ProjectLayout& layout() const { return layout_; }
 
@@ -157,6 +177,12 @@ public:
 
 private:
   std::unique_ptr<arbc::Document> document_;
+  // DECLARED AFTER `document_` ON PURPOSE (Constraint 2 / D-raster_tile_store-6): the memo
+  // holds owning `BlockRef` pins into the document's `BigBlockPool`, so reverse-declaration
+  // destruction order is what releases those pins BEFORE the pool they point into. Held
+  // through a `unique_ptr` — the `history_` idiom below — because `RasterTileStore` owns a
+  // `std::mutex` and is therefore neither copyable nor movable, while `AppState` is moved.
+  std::unique_ptr<arbc::RasterTileStore> tiles_;
   project::ProjectLayout layout_;
   arbc::Registry registry_;
   // The document-scoped, writer-owned kind bridge (D-writer_thread-9). Declared after

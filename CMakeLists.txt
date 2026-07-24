@@ -252,6 +252,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/export_test.cpp
                          tests/contact_sheet_test.cpp
                          tests/writer_thread_test.cpp
+                         tests/raster_tile_store_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene ace::writer
