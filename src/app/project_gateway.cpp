@@ -204,7 +204,8 @@ ace::dock::GcSummary AppProjectGateway::clean_up(bool preview) {
   return ace::dock::GcSummary{outcome.value().deleted, outcome.value().bytes_reclaimed, true};
 }
 
-bool AppProjectGateway::save_as(const std::filesystem::path& parent, const std::string& name) {
+ace::dock::ProjectEntryOutcome AppProjectGateway::save_as(const std::filesystem::path& parent,
+                                                          const std::string& name) {
   // Save As is NEW's compose shape applied to THIS session (D27 / D-dir_is_project-4): the
   // rail picks the parent through `pick_folder` and types the name into the shared compose
   // modal, so what arrives here is already a parent-plus-name pair and this call is
@@ -223,11 +224,34 @@ bool AppProjectGateway::save_as(const std::filesystem::path& parent, const std::
   const std::optional<std::filesystem::path> target =
       ace::project::compose_new_project_target(parent, name);
   if (!target.has_value()) {
-    return false; // empty / invalid / traversing name: nothing published, nothing spawned
+    // An empty / invalid / traversing name: nothing published, nothing spawned, and retyping is
+    // exactly the corrective act — so this guard answers `refused_target` without ever touching
+    // `commands` (A25).
+    return ace::dock::ProjectEntryOutcome::refused_target;
   }
-  return ace::commands::save_project_as(app_state_, filesystem_, launcher_, executable_, *target,
-                                        writer_post_)
-      .has_value();
+
+  // This is the `clean_up`/`GcOutcome`->`GcSummary` re-vocabularization above, applied to Save As
+  // (A25 / D-save_as_outcome-3): L1 `commands` decided WHICH STAGE stopped — it is the level that
+  // owns both `std::errc` and `SaveError` — and L4, the only level that may name an L1 type and a
+  // `dock` type in one function, translates that stage into the dock's own outcome. A total
+  // `switch` with no `default:`, so a stage added later is a compiler diagnostic rather than a
+  // silent fallthrough into the wrong message.
+  const ace::commands::SaveAsResult result = ace::commands::save_project_as(
+      app_state_, filesystem_, launcher_, executable_, *target, writer_post_);
+  switch (result.stage) {
+  case ace::commands::SaveAsStage::publish_failed:
+    return ace::dock::ProjectEntryOutcome::publish_failed;
+  case ace::commands::SaveAsStage::spawn_failed:
+    return ace::dock::ProjectEntryOutcome::spawn_failed;
+  case ace::commands::SaveAsStage::spawned:
+    return ace::dock::ProjectEntryOutcome::succeeded;
+  case ace::commands::SaveAsStage::refused:
+    break;
+  }
+  // `refused` falls out here rather than returning inline — `entry_feedback`'s own shape
+  // (src/dock/dock.cpp), which keeps the switch total with no `default:` and no unreachable
+  // trailing statement for the coverage gate to argue about.
+  return ace::dock::ProjectEntryOutcome::refused_target;
 }
 
 void AppProjectGateway::set_view_framing(std::function<ViewFraming()> framing) {

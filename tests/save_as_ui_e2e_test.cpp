@@ -27,9 +27,12 @@
 // Under D27 Save As runs the SAME two-step New runs: pick a PARENT location, then type a
 // project name into the shared compose modal ("Save Project As", submit "Save Copy"), because
 // the target must not exist and a native folder dialog can only return one that does. So the
-// assertions are on the composed (parent, name) pair the button drives, on the refusal string
-// left in the rail's inline feedback when the gateway says no, and on the cancel paths. No
-// byte-exact golden (software-GL pixels are flaky, per the open_ui/save e2e precedent).
+// assertions are on the composed (parent, name) pair the button drives, on the string left in
+// the rail's inline feedback for EACH of the seam's four outcomes (A25 — a refused target, a
+// failed publish and a failed sibling `exec` now say three different, true things where the
+// shipped UI said one name-refusal), and on the cancel paths. No byte-exact golden (software-GL
+// pixels are flaky, per the open_ui/save e2e precedent) and no new one is needed: this leaf
+// changes no pixel, no widget id and no layout — the signal is the string.
 
 using ace::app::Shell;
 using ace::app::ShellOptions;
@@ -42,7 +45,11 @@ class FakeGateway final : public ace::dock::ProjectGateway {
 public:
   std::optional<std::filesystem::path> next; // what the scripted pick resolves to
   bool cancel_next = false;                  // …or a cancelled pick
-  bool save_as_ok = true;                    // whether the composed target is accepted
+  // What the composed submit answers, on the FOUR-outcome seam Save As joined (A25 /
+  // D-save_as_outcome-1). The shipped `bool save_as_ok` could only script "accepted" versus
+  // "refused", which is exactly the collapse this leaf pays off — a failed publish and a failed
+  // exec are now scriptable and, below, are asserted to render their own strings.
+  ace::dock::ProjectEntryOutcome save_as_result = ace::dock::ProjectEntryOutcome::succeeded;
   int picks = 0;
   std::vector<std::pair<std::filesystem::path, std::string>> save_as_calls;
 
@@ -65,9 +72,10 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
-  bool save_as(const std::filesystem::path& parent, const std::string& name) override {
+  ace::dock::ProjectEntryOutcome save_as(const std::filesystem::path& parent,
+                                         const std::string& name) override {
     save_as_calls.emplace_back(parent, name);
-    return save_as_ok;
+    return save_as_result;
   }
   ace::dock::GcSummary clean_up(bool) override { return {}; } // inert (see gc_ui_e2e_test)
   // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
@@ -144,7 +152,7 @@ TEST_CASE("save_as e2e: the rail's Save As… runs the parent-pick + typed-name 
     // 3. A REFUSED copy (the gateway says no — an invalid name, or a target that already
     //    exists): the modal STAYS OPEN and the rail's inline feedback carries the one refusal
     //    string (D-dir_is_project-6/-7), the same channel Save/Open/Recent write.
-    gateway.save_as_ok = false;
+    gateway.save_as_result = ace::dock::ProjectEntryOutcome::refused_target;
     ctx->ItemInput("Save Project As/Name");
     ctx->KeyCharsReplace("Taken");
     ctx->ItemClick("Save Project As/Save Copy");
@@ -156,14 +164,48 @@ TEST_CASE("save_as e2e: the rail's Save As… runs the parent-pick + typed-name 
     IM_CHECK(state->dockspace->save_as_modal_open());
     IM_CHECK(state->dockspace->project_feedback() == refusal);
 
+    // 3b. A failed PUBLISH is not a name problem (A25): the target was accepted and no usable
+    //     copy was produced, so the rail says so instead of asking for a different name. The
+    //     modal stays open — a retry may genuinely succeed once the disk problem is fixed
+    //     (D-save_as_outcome-6). The literal is the MAPPER's, not this call site's.
+    gateway.save_as_result = ace::dock::ProjectEntryOutcome::publish_failed;
+    ctx->ItemInput("Save Project As/Name");
+    ctx->KeyCharsReplace("Unwritable");
+    ctx->ItemClick("Save Project As/Save Copy");
+    ctx->Yield(2);
+    IM_CHECK(gateway.save_as_calls.size() == 2);
+    IM_CHECK(gateway.save_as_calls.back().second == std::string("Unwritable"));
+    IM_CHECK(ctx->ItemExists("Save Project As/Save Copy")); // still open
+    IM_CHECK(state->dockspace->save_as_modal_open());
+    IM_CHECK(state->dockspace->project_feedback() == std::string("Could not save a copy there."));
+    IM_CHECK(state->dockspace->project_feedback() != refusal);
+
+    // 3c. THE BUG THIS LEAF EXISTS TO KILL: a failed sibling `exec` left a COMPLETE, VALID copy
+    //     on disk, and the shipped UI told the user to type a different name — which, retried
+    //     with the same name, hits D27's existing-target guard and reports the very same string
+    //     for an entirely different reason. Save As opts into its own launch-failure wording
+    //     (D-save_as_outcome-5), so the copy's existence is stated rather than contradicted.
+    gateway.save_as_result = ace::dock::ProjectEntryOutcome::spawn_failed;
+    ctx->ItemInput("Save Project As/Name");
+    ctx->KeyCharsReplace("Orphaned");
+    ctx->ItemClick("Save Project As/Save Copy");
+    ctx->Yield(2);
+    IM_CHECK(gateway.save_as_calls.size() == 3);
+    IM_CHECK(gateway.save_as_calls.back().second == std::string("Orphaned"));
+    IM_CHECK(ctx->ItemExists("Save Project As/Save Copy")); // still open
+    IM_CHECK(state->dockspace->save_as_modal_open());
+    IM_CHECK(state->dockspace->project_feedback() ==
+             std::string("Saved the copy, but could not start the editor."));
+    IM_CHECK(state->dockspace->project_feedback() != refusal);
+
     // 4. An accepted copy records exactly one more save_as(parent, name) with the TYPED
     //    values and closes the modal.
-    gateway.save_as_ok = true;
+    gateway.save_as_result = ace::dock::ProjectEntryOutcome::succeeded;
     ctx->ItemInput("Save Project As/Name");
     ctx->KeyCharsReplace("Copy");
     ctx->ItemClick("Save Project As/Save Copy");
     ctx->Yield(2);
-    IM_CHECK(gateway.save_as_calls.size() == 2);
+    IM_CHECK(gateway.save_as_calls.size() == 4);
     IM_CHECK(gateway.save_as_calls.back().first == parent);
     IM_CHECK(gateway.save_as_calls.back().second == std::string("Copy"));
     IM_CHECK(!ctx->ItemExists("Save Project As/Save Copy")); // the modal closed
@@ -176,7 +218,7 @@ TEST_CASE("save_as e2e: the rail's Save As… runs the parent-pick + typed-name 
     IM_CHECK(ctx->ItemExists("Save Project As/Cancel"));
     ctx->ItemClick("Save Project As/Cancel");
     ctx->Yield(2);
-    IM_CHECK(gateway.save_as_calls.size() == 2); // unchanged
+    IM_CHECK(gateway.save_as_calls.size() == 4); // unchanged
     IM_CHECK(!state->dockspace->save_as_modal_open());
     IM_CHECK(!ctx->ItemExists("Save Project As/Save Copy"));
 

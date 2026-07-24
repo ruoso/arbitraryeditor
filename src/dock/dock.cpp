@@ -342,22 +342,24 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   // took, which is exactly the split dock.cpp:83-97 draws against the one-shot notice. Also
   // drawn every frame so BeginPopupModal stays balanced.
   //
-  // Save As is a SESSION verb (A13) and keeps its `bool`, so the widening is adapted HERE, at
-  // the one binding, rather than at the seam (D-entry_outcome-7). Observably a no-op today:
-  // all four of `save_as`'s documented failure modes (dock.hpp — invalid name · target exists ·
-  // failed publish · failed exec) already collapse into this one string, so mapping them all
-  // to `refused_target` reproduces the shipped UI exactly. Telling a failed publish or a failed
-  // exec apart needs a fourth enumerator and a richer result out of `commands::save_project_as`
-  // — L1 work outside "the entry verbs", deferred to `editor.project.save_as_outcome`.
+  // Save As binds the seam DIRECTLY (A25): the session verb that also creates a project
+  // directory now speaks the same four-outcome vocabulary, so there is no adapter here to
+  // flatten a failed publish or a failed exec into a name refusal. It opts into one string —
+  // a failed launch after a Save As means the copy IS on disk (D-save_as_outcome-5), which is
+  // exactly what the user needs to know before deciding whether to retry. Designated
+  // initializers because `refused_message` keeps its default and `spawn_failed_message` sits
+  // after it.
   {
     ProjectGateway* gw = &gateway;
     (void)draw_compose_target_modal(
         dockspace.save_as_modal(), dockspace.project_feedback(),
-        ComposeModalSpec{"Save Project As", "Save Copy",
-                         [gw](const std::filesystem::path& parent, const std::string& name) {
-                           return gw->save_as(parent, name) ? ProjectEntryOutcome::succeeded
-                                                            : ProjectEntryOutcome::refused_target;
-                         }});
+        ComposeModalSpec{
+            .popup_id = "Save Project As",
+            .submit_label = "Save Copy",
+            .submit = [gw](const std::filesystem::path& parent,
+                           const std::string& name) { return gw->save_as(parent, name); },
+            .spawn_failed_message = "Saved the copy, but could not start the editor.",
+        });
   }
   draw_gc_modal(dockspace, gateway);
   draw_reopen_notice_modal(dockspace, gateway);
@@ -423,22 +425,34 @@ const char* name() { return "dock"; }
 // `exec` as a bad folder. A shared pure function is the smallest construct that makes that
 // disagreement impossible rather than merely fixed.
 //
-// The launch-failure literal lives here and nowhere else; the refusal wording stays the
-// caller's, because which target was refused is per-verb context the mapper has no way to
-// know. No ImGui state, no host object — a table-testable pure function.
-const char* entry_feedback(ProjectEntryOutcome outcome, const char* refused_message) {
+// The copy-failure literal lives here and nowhere else — it is Save-As-only and context-free,
+// so no caller could say anything truer. The refusal wording stays the caller's, because which
+// target was refused is per-verb context the mapper has no way to know; and the launch-failure
+// wording joins it as a DEFAULTED parameter (A25 / D-save_as_outcome-5), because after a Save As
+// the copy is on disk and "Could not start the editor." alone would leave the user one obvious
+// retry away from a `file_exists` refusal. Every call site that does not opt in gets the one
+// shipped literal. No ImGui state, no host object — a table-testable pure function.
+const char* entry_feedback(ProjectEntryOutcome outcome, const char* refused_message,
+                           const char* spawn_failed_message) {
   switch (outcome) {
   case ProjectEntryOutcome::succeeded:
     return ""; // the empty string standing in for the hosts' old `.clear()`
   case ProjectEntryOutcome::refused_target:
     return refused_message;
+  case ProjectEntryOutcome::publish_failed:
+    // The target was accepted; producing the copy is what failed (a full disk, an unwritable
+    // parent, a document that would not serialize). Nothing was saved there, so the sentence is
+    // literally true — and retyping the name, which the shipped string asked for, fixes none of
+    // it.
+    return "Could not save a copy there.";
   case ProjectEntryOutcome::spawn_failed:
     break;
   }
   // Nothing the user does in a folder picker helps: the target was fine and the sibling
   // process could not be started (a broken install, a missing executable, an exhausted
-  // process table). D26's shipped copy, reused verbatim rather than re-opened.
-  return "Could not start the editor.";
+  // process table). D26's shipped copy is the DEFAULT of this parameter, reused verbatim
+  // rather than re-opened.
+  return spawn_failed_message;
 }
 
 // The compose-target modal (D-open_ui-4 / D27): opened once a folder pick resolves a parent
@@ -472,20 +486,21 @@ bool draw_compose_target_modal(NewProjectModal& modal, std::string& feedback,
       const ProjectEntryOutcome outcome =
           spec.submit ? spec.submit(modal.parent(), name) : ProjectEntryOutcome::refused_target;
       // The SAME mapper the flat Open/Recent verbs use (A24), so the modal now CAN tell a
-      // refused target from a failed launch — and still deliberately does not tell an invalid
-      // name from a taken one: both call for the identical corrective act, so they share one
-      // string (D-dir_is_project-6). The shipped "Enter a valid project name." would be
-      // actively misleading, because after D27 the DOMINANT refusal is a perfectly valid name
-      // that is already taken.
-      feedback = entry_feedback(outcome, spec.refused_message);
+      // refused target from a failed publish from a failed launch — and still deliberately does
+      // not tell an invalid name from a taken one: both call for the identical corrective act,
+      // so they share one string (D-dir_is_project-6). The shipped "Enter a valid project name."
+      // would be actively misleading, because after D27 the DOMINANT refusal is a perfectly
+      // valid name that is already taken.
+      feedback = entry_feedback(outcome, spec.refused_message, spec.spawn_failed_message);
       if (outcome == ProjectEntryOutcome::succeeded) {
         modal.close();
         submitted = true;
         ImGui::CloseCurrentPopup();
       }
       // Anything else leaves the modal open with the message on screen — including a
+      // `publish_failed` (a retry may genuinely succeed once the disk problem is fixed) and a
       // `spawn_failed`, where retyping the name is not the fix but closing the modal would
-      // throw away the parent the async pick resolved.
+      // throw away the parent the async pick resolved (D-save_as_outcome-6).
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) {

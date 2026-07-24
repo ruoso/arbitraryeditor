@@ -54,7 +54,10 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
-  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
+  ace::dock::ProjectEntryOutcome save_as(const std::filesystem::path&,
+                                         const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
   ace::dock::GcSummary clean_up(bool) override { return {}; } // inert (see gc_ui_e2e_test)
 
   bool undo() override {

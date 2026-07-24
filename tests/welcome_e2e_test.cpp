@@ -87,7 +87,10 @@ public:
   // session-free ProjectEntryGateway answers them (app_project_gateway_test.cpp).
   bool save() override { return false; }
   bool is_dirty() const override { return false; }
-  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
+  ace::dock::ProjectEntryOutcome save_as(const std::filesystem::path&,
+                                         const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
   ace::dock::GcSummary clean_up(bool) override { return {}; }
   bool undo() override { return false; }
   bool redo() override { return false; }
@@ -395,21 +398,43 @@ TEST_CASE("entry_outcome: entry_feedback maps each outcome to one inline string"
   const char* const not_a_project = "That folder is not a project.";
   const char* const no_longer_available = "That project is no longer available.";
 
-  // succeeded -> the empty string, standing in for the hosts' old `.clear()`, for BOTH.
+  // Save As's opt-in launch-failure wording (A25 / D-save_as_outcome-5) — the ONE call site
+  // that overrides the default, used here to prove it leaks into no other row.
+  const char* const saved_but_no_launch = "Saved the copy, but could not start the editor.";
+
+  // succeeded -> the empty string, standing in for the hosts' old `.clear()`, for BOTH — and
+  // independent of the spawn-failure wording, defaulted or supplied.
   CHECK(std::string(entry_feedback(ProjectEntryOutcome::succeeded, not_a_project)) ==
         std::string{});
   CHECK(std::string(entry_feedback(ProjectEntryOutcome::succeeded, no_longer_available)) ==
         std::string{});
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::succeeded, not_a_project,
+                                   saved_but_no_launch)) == std::string{});
 
-  // refused_target -> the caller's string, echoed unchanged.
+  // refused_target -> the caller's string, echoed unchanged — and, again, unaffected by the
+  // third parameter. D27's one refusal message is byte-identical after this leaf.
   CHECK(std::string(entry_feedback(ProjectEntryOutcome::refused_target, not_a_project)) ==
         std::string(not_a_project));
   CHECK(std::string(entry_feedback(ProjectEntryOutcome::refused_target, no_longer_available)) ==
         std::string(no_longer_available));
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::refused_target, not_a_project,
+                                   saved_but_no_launch)) == std::string(not_a_project));
 
-  // spawn_failed -> the launch-failure literal REGARDLESS of the refusal string passed. This
-  // row is the pin: the message is a property of the OUTCOME, not of the call site, which is
-  // what makes the two hosts structurally incapable of disagreeing about it.
+  // publish_failed -> the MAPPER's own literal, regardless of the refusal string AND regardless
+  // of an overridden spawn-failure string. This row pins the mapper, not the caller, as its
+  // owner: the message is Save-As-only and context-free, so no call site could say anything
+  // truer (D-save_as_outcome-5).
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::publish_failed, not_a_project)) ==
+        std::string("Could not save a copy there."));
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::publish_failed, no_longer_available,
+                                   saved_but_no_launch)) ==
+        std::string("Could not save a copy there."));
+
+  // spawn_failed with the parameter OMITTED -> the shipped launch-failure literal, REGARDLESS of
+  // the refusal string passed. This row is the pin: the message is a property of the OUTCOME,
+  // not of the call site, which is what makes the two hosts structurally incapable of
+  // disagreeing about it — and it is the regression that every entry-verb call site (Open,
+  // Recent, New, and both welcome verbs), none of which opts in, is byte-identical.
   CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed, not_a_project)) ==
         std::string("Could not start the editor."));
   CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed, no_longer_available)) ==
@@ -417,6 +442,14 @@ TEST_CASE("entry_outcome: entry_feedback maps each outcome to one inline string"
   CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed,
                                    "Enter a project name that does not already exist here.")) ==
         std::string("Could not start the editor."));
+
+  // spawn_failed with the parameter SUPPLIED -> that string verbatim. Exactly one shipped call
+  // site does this, because after a Save As the copy is already on disk.
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed, not_a_project,
+                                   saved_but_no_launch)) == std::string(saved_but_no_launch));
+  CHECK(std::string(entry_feedback(ProjectEntryOutcome::spawn_failed,
+                                   "Enter a project name that does not already exist here.",
+                                   saved_but_no_launch)) == std::string(saved_but_no_launch));
 }
 
 TEST_CASE("welcome: wants_welcome_launcher picks launcher mode only for an interactive no-arg "

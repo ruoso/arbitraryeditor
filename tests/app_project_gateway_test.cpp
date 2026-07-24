@@ -24,6 +24,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -76,6 +77,47 @@ public:
     invoked = true;
     return std::make_error_code(std::errc::no_such_file_or_directory);
   }
+};
+
+// Delegates to NativeFileSystem but can be told to fault `make_directories` (the
+// tests/save_as_test.cpp:127 FaultyFileSystem pattern, narrowed to the one operation this
+// suite needs). It is what lets Save As's PUBLISH half fail against a target that does not
+// exist — the `publish_failed` outcome A25 added, which cannot be staged by pre-creating the
+// target, because D27's existing-target guard would refuse before the publish is reached.
+class FaultyFileSystem final : public ace::platform::FileSystem {
+public:
+  bool fail_make_directories = false;
+
+  bool exists(const std::filesystem::path& path) const override { return native_.exists(path); }
+
+  ace::platform::Result<std::vector<std::filesystem::path>>
+  list_directory(const std::filesystem::path& dir) const override {
+    return native_.list_directory(dir);
+  }
+
+  ace::platform::Result<std::string> read_file(const std::filesystem::path& path) const override {
+    return native_.read_file(path);
+  }
+
+  std::error_code write_file(const std::filesystem::path& path,
+                             std::string_view contents) const override {
+    return native_.write_file(path, contents);
+  }
+
+  std::error_code make_directories(const std::filesystem::path& dir) const override {
+    if (fail_make_directories) {
+      return std::make_error_code(std::errc::io_error);
+    }
+    return native_.make_directories(dir);
+  }
+
+  std::error_code atomic_replace(const std::filesystem::path& path,
+                                 std::string_view contents) const override {
+    return native_.atomic_replace(path, contents);
+  }
+
+private:
+  ace::platform::NativeFileSystem native_;
 };
 
 // Scripts a folder pick; delivers synchronously, or holds the callback for a
@@ -158,7 +200,10 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return false; }
   bool is_dirty() const override { return false; }
-  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
+  ace::dock::ProjectEntryOutcome save_as(const std::filesystem::path&,
+                                         const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
   ace::dock::GcSummary clean_up(bool) override { return {}; }
   bool undo() override { return false; }
   bool redo() override { return false; }
@@ -271,9 +316,11 @@ TEST_CASE("a session-free gateway answers every session verb inertly", "[app_pro
     CHECK(summary.reclaimed_bytes == 0);
     CHECK_FALSE(summary.ran); // no sweep ran — never a phantom reclaim
   }
-  // Save As on the new synchronous compose signature (D27 / D-dir_is_project-4): still inert,
-  // because a launcher has no session to copy. No pick is opened and nothing is published.
-  CHECK_FALSE(seam.save_as(scratch.root, "Copy"));
+  // Save As now answers on the outcome seam too (A25 / D-save_as_outcome-1), and is still
+  // inert, because a launcher has no session to copy. `refused_target` is the honest inert
+  // answer — this gateway publishes nothing and launches nothing, so it can report neither a
+  // failed publish nor a failed spawn. No pick is opened and nothing is published.
+  CHECK(seam.save_as(scratch.root, "Copy") == ProjectEntryOutcome::refused_target);
   CHECK_FALSE(dialog.shown);
 
   // The non-pure virtuals keep their inherited neutral defaults too, so a welcome
@@ -622,7 +669,7 @@ TEST_CASE("AppProjectGateway::save_as composes parent + name, publishes a copy, 
   // Save As now takes a parent + a typed name, exactly as New does (D27 / D-dir_is_project-4),
   // and is SYNCHRONOUS: the rail owns the `pick_folder` half, so this verb opens no dialog of
   // its own and its outcome is its return value.
-  REQUIRE(gateway.save_as(scratch.root, "Copy"));
+  REQUIRE(gateway.save_as(scratch.root, "Copy") == ProjectEntryOutcome::succeeded);
   CHECK_FALSE(dialog.shown); // save_as itself opens no folder dialog any more
 
   // The composed target now exists and holds the portable core — project.arbc + assets/ +
@@ -653,26 +700,89 @@ TEST_CASE("AppProjectGateway::save_as refuses an existing target and an invalid 
   auto session = make_session(fs, scratch.root / "session");
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
+  // This case is also the regression that A25 did NOT change what a refusal means: both halves
+  // still answer `refused_target`, and D27 / D-dir_is_project-6's one refusal string is
+  // byte-identical after the widening.
+
   // (i) A composed target that already exists — an EMPTY directory, the case the shipped
-  //     narrow clobber guard let through (D27's direct reversal). Refused as a `false` the
-  //     rail renders on the same frame; nothing published, nothing spawned.
+  //     narrow clobber guard let through (D27's direct reversal). Refused as a value the
+  //     rail renders on the same frame; nothing published, nothing spawned. The refusal is
+  //     produced deep in L1 (`project`'s existing-target guard, classified `refused` by
+  //     `commands`) and translated back into the dock's vocabulary here.
   const std::filesystem::path taken = scratch.root / "Taken";
   std::error_code ec;
   std::filesystem::create_directories(taken, ec);
-  CHECK_FALSE(gateway.save_as(scratch.root, "Taken"));
+  CHECK(gateway.save_as(scratch.root, "Taken") == ProjectEntryOutcome::refused_target);
   CHECK_FALSE(launcher.invoked);
   CHECK_FALSE(fs.exists(ace::project::project_layout(taken).canonical));
   CHECK_FALSE(fs.exists(ace::project::project_layout(taken).assets_dir));
 
   // (ii) A name `compose_new_project_target` refuses — empty, and one that would traverse out
-  //      of the parent. Same `false`, still zero writes and zero launches.
+  //      of the parent. Same `refused_target`, still zero writes and zero launches, and this
+  //      half never reaches `commands` at all (the L4 compose guard answers directly).
   for (const std::string& bad :
        {std::string(""), std::string("  "), std::string("bad/name"), std::string("..")}) {
-    CHECK_FALSE(gateway.save_as(scratch.root, bad));
+    CHECK(gateway.save_as(scratch.root, bad) == ProjectEntryOutcome::refused_target);
     CHECK_FALSE(launcher.invoked);
   }
 
   // The session is untouched throughout (D-save_as-2).
+  CHECK(gateway.is_dirty());
+  CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
+}
+
+TEST_CASE("AppProjectGateway::save_as reports publish_failed when the copy cannot be written",
+          "[app_project_gateway]") {
+  // The stage L4 could not previously name (A25): the target was ACCEPTED — it is a valid,
+  // not-yet-existing name — and producing the copy is what failed. The shipped `bool` collapsed
+  // this onto the rail's "Enter a project name that does not already exist here.", telling a
+  // user with a full disk to retype a name that was never the problem.
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // Armed only AFTER the session's own bootstrap, so exactly the copy's publish faults.
+  fs.fail_make_directories = true;
+
+  CHECK(gateway.save_as(scratch.root, "Copy") == ProjectEntryOutcome::publish_failed);
+  CHECK_FALSE(launcher.invoked); // a failed publish execs nothing (no sibling on a non-bundle)
+  CHECK_FALSE(fs.exists(ace::project::project_layout(scratch.root / "Copy").canonical));
+
+  // The current session is untouched on the fault path too (D-save_as-2).
+  CHECK(gateway.is_dirty());
+  CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
+}
+
+TEST_CASE("AppProjectGateway::save_as reports spawn_failed and leaves the copy on disk",
+          "[app_project_gateway]") {
+  // The bug this leaf exists to kill, at the level that produces it: the publish SUCCEEDED and
+  // the sibling `exec` failed, so a complete, valid copy is sitting in the target directory
+  // while the shipped UI told the user to type a different name — and the obvious retry with the
+  // same name then hit D27's existing-target guard and produced that same message for an
+  // entirely different reason.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  FailingLauncher launcher; // the target is accepted and the copy lands; the `exec` is what fails
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  CHECK(gateway.save_as(scratch.root, "Copy") == ProjectEntryOutcome::spawn_failed);
+  CHECK(launcher.invoked); // the exec was attempted, which is only possible after a publish
+
+  // …and the copy really is on disk — the fact `spawn_failed` exists to let the rail state.
+  const std::filesystem::path target = scratch.root / "Copy";
+  const auto target_layout = ace::project::project_layout(target);
+  CHECK(fs.exists(target_layout.canonical));
+  CHECK(fs.exists(target_layout.assets_dir));
+
+  // The current session is STILL its own, on this path as on every other (D-save_as-2): no
+  // `mark_saved`, no `layout_` rebind.
   CHECK(gateway.is_dirty());
   CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
 }

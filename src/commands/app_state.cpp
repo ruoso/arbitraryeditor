@@ -189,15 +189,16 @@ platform::Result<project::SaveOutcome> save_project(AppState& state, const platf
   return *published;
 }
 
-platform::Result<project::SaveOutcome>
-save_project_as(AppState& state, const platform::FileSystem& fs,
-                const platform::ProcessLauncher& launcher, const std::filesystem::path& executable,
-                const std::filesystem::path& target_root, const project::WriterPost& post_writer) {
+SaveAsResult save_project_as(AppState& state, const platform::FileSystem& fs,
+                             const platform::ProcessLauncher& launcher,
+                             const std::filesystem::path& executable,
+                             const std::filesystem::path& target_root,
+                             const project::WriterPost& post_writer) {
   // Reject an empty target before any I/O or exec (Constraint 5, mirroring
   // `open_another_project`): an empty path would publish into the CWD and spawn a
   // mystery sibling. The launcher is never touched and nothing is written.
   if (target_root.empty()) {
-    return std::make_error_code(std::errc::invalid_argument);
+    return {SaveAsStage::refused, std::make_error_code(std::errc::invalid_argument), {}};
   }
 
   // Canonicalize ONCE to an absolute path so the publish and the sibling `exec`
@@ -209,7 +210,11 @@ save_project_as(AppState& state, const platform::FileSystem& fs,
     resolved = std::filesystem::weakly_canonical(resolved, ec);
   }
   if (ec) {
-    return ec;
+    // A path that cannot be resolved is NOT a refusal (D-save_as_outcome-4): retyping the name
+    // does not fix it, and "could not save a copy there" is literally true — nothing was saved
+    // there. Defensively unreachable in practice (`weakly_canonical` succeeds on non-existent
+    // paths), so this is about which bucket is honest, not which is hot.
+    return {SaveAsStage::publish_failed, ec, {}};
   }
 
   // Publish a COPY of the LIVE document into the target (D-save_as-1). The capture is POSTED to
@@ -223,16 +228,27 @@ save_project_as(AppState& state, const platform::FileSystem& fs,
   platform::Result<project::SaveOutcome> published =
       project::save_project_as(fs, resolved, state.document(), state.registry(), post_writer);
   if (!published.has_value()) {
-    return published.error(); // a failed publish execs nothing (Constraint 7)
+    // A failed publish execs nothing (Constraint 7) — and this is where the two vocabularies
+    // this level owns are told apart (D-save_as_outcome-3). `std::errc::file_exists` is D27's
+    // existing-target guard (`project::save_project_as`), a target the user can retype; a
+    // `SaveError` is a disk/serialize fault, which retyping cannot fix. Splitting here rather
+    // than in L4 keeps `app` from re-deriving knowledge this level already has.
+    const std::error_code publish_ec = published.error();
+    return {publish_ec == std::errc::file_exists ? SaveAsStage::refused
+                                                 : SaveAsStage::publish_failed,
+            publish_ec,
+            {}};
   }
 
   // Open the copy in a detached sibling editor on the same absolute path. A failed
-  // exec leaves the (successfully published) copy on disk and returns the error.
+  // exec leaves the (successfully published) copy on disk and returns the error — which is
+  // precisely why `spawn_failed` carries `published`: the caller must be able to say "the copy
+  // is safe" rather than "pick another name".
   if (const std::error_code exec_ec = open_another_project(launcher, executable, resolved)) {
-    return exec_ec;
+    return {SaveAsStage::spawn_failed, exec_ec, published.value()};
   }
 
-  return published;
+  return {SaveAsStage::spawned, {}, published.value()};
 }
 
 platform::Result<project::GcOutcome> gc_project(AppState& state, bool dry_run) {

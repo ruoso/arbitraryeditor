@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <system_error>
 
 namespace ace::commands {
 
@@ -333,12 +334,43 @@ platform::Result<project::SaveOutcome> save_project(AppState& state, const platf
 // a fresh sibling process owns the copy. Errors are values: a failed publish execs
 // nothing (no sibling on a half-written bundle); a failed exec leaves the published
 // copy on disk and returns the error. Never throws.
-platform::Result<project::SaveOutcome> save_project_as(AppState& state,
-                                                       const platform::FileSystem& fs,
-                                                       const platform::ProcessLauncher& launcher,
-                                                       const std::filesystem::path& executable,
-                                                       const std::filesystem::path& target_root,
-                                                       const project::WriterPost& post_writer = {});
+
+// How far Save As got before it stopped (A25 / D-save_as_outcome-2).
+// `platform::Result<project::SaveOutcome>` cannot answer this: it holds EITHER a value OR a
+// `std::error_code`, so a failed call structurally cannot also report that the copy reached
+// disk — and the codes OVERLAP across stages, since a canonicalize fault and a `spawn_detached`
+// fault are both plain system/generic codes. So no caller could tell "nothing was written" from
+// "the copy is on disk but nothing launched", which is exactly the pair the UI must not confuse:
+// one is fixed by freeing disk space, the other by opening the copy that already exists.
+enum class SaveAsStage {
+  refused,        // a bad target the user can retype: nothing written, nothing spawned
+  publish_failed, // the target was not refused, but no usable copy was produced
+  spawn_failed,   // the copy IS on disk; the sibling `exec` failed
+  spawned,        // the copy is on disk AND the sibling editor is running
+};
+
+// The stage, the fault that stopped it, and (once the copy reached disk) what was published.
+// A plain POD in the house "errors are values" idiom — L4 maps `stage` onto the dock's own
+// vocabulary with a total `switch`, so a future stage is a compiler diagnostic rather than an
+// `else` fallthrough (D-save_as_outcome-2).
+struct SaveAsResult {
+  SaveAsStage stage = SaveAsStage::refused;
+  std::error_code error;            // empty iff `stage == spawned`
+  project::SaveOutcome published{}; // meaningful iff the copy reached disk (spawn_failed/spawned)
+};
+
+// The refused-versus-fault split happens HERE, in L1 `commands` (D-save_as_outcome-3): this is
+// the level that owns BOTH error vocabularies — `std::errc` from its own guards and `SaveError`
+// from `project` — the pairing `D-dir_is_project-2` already blessed on one channel. A publish
+// that failed with `std::errc::file_exists` is D27's existing-target guard, i.e. `refused`;
+// every other publish fault is `publish_failed`. A CANONICALIZE fault is `publish_failed` too
+// (D-save_as_outcome-4): nothing the user retypes resolves it, and "could not save a copy
+// there" is literally true.
+SaveAsResult save_project_as(AppState& state, const platform::FileSystem& fs,
+                             const platform::ProcessLauncher& launcher,
+                             const std::filesystem::path& executable,
+                             const std::filesystem::path& target_root,
+                             const project::WriterPost& post_writer = {});
 
 // Clean up (GC): reclaim the on-disk `assets/` orphans this session's saves left
 // behind, through the L1 `project::gc_project` sweep over `state.layout()`

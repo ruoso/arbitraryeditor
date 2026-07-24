@@ -7,7 +7,12 @@
 // canonicalizes the target once, publishes the copy, and hands it to an injected
 // `ProcessLauncher` (the exec_new fake) — rejecting an empty target and never
 // touching the launcher on a publish failure, and never marking the current session
-// clean. The workspace-backed sessions exercise writer-thread capture racing the
+// clean. Since editor.project.save_as_outcome (A25) the orchestrator answers with a
+// `SaveAsResult { stage, error, published }` rather than a bare
+// `platform::Result<SaveOutcome>`, so these cases assert WHICH STAGE stopped — the
+// discriminant the error channel alone cannot carry, because a refused target and a
+// disk fault arrive as codes from two different categories and a failed `exec` leaves
+// a complete copy on disk. The workspace-backed sessions exercise writer-thread capture racing the
 // `HousekeepingThread` under the ASan/TSan legs of the gate, and — reusing the
 // probe golden — the copy→reopen→render round-trip proves copy fidelity.
 
@@ -321,7 +326,11 @@ TEST_CASE("commands::save_project_as canonicalizes the target, publishes, and ex
   REQUIRE_FALSE(rel.empty());
 
   const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, rel);
-  REQUIRE(saved.has_value());
+  // The success stage on the A25 result: the copy is on disk AND the sibling is running, with
+  // no error and the publish's own revision carried through for the caller.
+  REQUIRE(saved.stage == ace::commands::SaveAsStage::spawned);
+  CHECK_FALSE(static_cast<bool>(saved.error));
+  CHECK(saved.published.revision == state.document().pin()->revision());
 
   const std::filesystem::path resolved = std::filesystem::weakly_canonical(abs_target);
   CHECK(launcher.invoked);
@@ -348,32 +357,37 @@ TEST_CASE("commands::save_project_as rejects an empty target without publishing 
 
   RecordingLauncher launcher;
   const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, "");
-  REQUIRE_FALSE(saved.has_value());
-  CHECK(saved.error() == std::errc::invalid_argument);
+  // A bad target the user can retype — `refused`, not a fault: nothing was written and nothing
+  // was spawned.
+  CHECK(saved.stage == ace::commands::SaveAsStage::refused);
+  CHECK(saved.error == std::errc::invalid_argument);
   CHECK_FALSE(launcher.invoked); // the launcher is never touched
 }
 
 TEST_CASE("commands::save_project_as short-circuits a publish failure and never execs") {
   ScratchDir scratch;
-  ace::platform::NativeFileSystem fs;
+  // A GENUINE publish fault, injected through the seam. Before A25 this case staged an
+  // already-occupied target, which post-D27 is refused by the existing-target guard — i.e. it
+  // had silently become a duplicate of the refused-target case below and no longer exercised
+  // the branch its name claims. The `SaveError` route is what `publish_failed` is for: a full
+  // disk / unwritable parent, which no amount of retyping fixes.
+  FaultyFileSystem fs;
   const std::filesystem::path root = scratch.root / "session";
   auto created = ace::project::create_project(fs, root);
   REQUIRE(created.has_value());
   AppState state(std::move(*created));
   build_saveable_probe(state.document());
 
-  // A target that already holds a project.arbc makes the publish refuse-to-clobber:
-  // the orchestrator returns that error and spawns nothing (Constraint 7).
-  const std::filesystem::path target = scratch.root / "occupied";
-  std::error_code ec;
-  std::filesystem::create_directories(target, ec);
-  std::ofstream(ace::project::project_layout(target).canonical) << "existing";
+  // The fault is armed only AFTER the session exists, so the session's own bootstrap is real
+  // and only the copy's publish faults.
+  const std::filesystem::path target = scratch.root / "unwritable";
+  fs.fail_make_directories = true;
 
   RecordingLauncher launcher;
   const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, target);
-  REQUIRE_FALSE(saved.has_value());
-  CHECK(saved.error() == std::errc::file_exists);
-  CHECK_FALSE(launcher.invoked); // a failed publish execs nothing
+  CHECK(saved.stage == ace::commands::SaveAsStage::publish_failed);
+  CHECK(saved.error == SaveError::IoError);
+  CHECK_FALSE(launcher.invoked); // a failed publish execs nothing (Constraint 7)
 }
 
 TEST_CASE("commands::save_project_as short-circuits a refused target and never execs") {
@@ -394,8 +408,11 @@ TEST_CASE("commands::save_project_as short-circuits a refused target and never e
 
   RecordingLauncher launcher;
   const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, target);
-  REQUIRE_FALSE(saved.has_value());
-  CHECK(saved.error() == std::errc::file_exists);
+  // `refused`, not `publish_failed`: D27's existing-target guard is a target the user can
+  // retype, and the split lives here in L1 `commands` — the level that owns both `std::errc`
+  // and `SaveError` (D-save_as_outcome-3).
+  CHECK(saved.stage == ace::commands::SaveAsStage::refused);
+  CHECK(saved.error == std::errc::file_exists);
   CHECK_FALSE(launcher.invoked); // ZERO launches: a refused target execs nothing
 
   // Nothing was published into the target, and the CURRENT session is untouched
@@ -419,11 +436,89 @@ TEST_CASE("commands::save_project_as leaves the published copy on disk when the 
   FailingLauncher launcher;
   const std::filesystem::path target = scratch.root / "copy";
   const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, target);
-  REQUIRE_FALSE(saved.has_value());
-  CHECK(saved.error() == std::errc::no_such_file_or_directory);
+  // `spawn_failed` — the stage that carries the load-bearing fact the bare `error_code` erased:
+  // the copy IS on disk. `published` is meaningful here precisely because of that, which is why
+  // it rides alongside the error rather than instead of it (D-save_as_outcome-2).
+  CHECK(saved.stage == ace::commands::SaveAsStage::spawn_failed);
+  CHECK(saved.error == std::errc::no_such_file_or_directory);
+  CHECK(saved.published.revision == state.document().pin()->revision());
   CHECK(launcher.invoked); // the exec was attempted (publish had succeeded)
   // The published copy survives the failed exec (Constraint 7).
   CHECK(fs.exists(ace::project::project_layout(target).canonical));
+  // …and the CURRENT session is still its own (D-save_as-2): no `mark_saved`, no layout rebind,
+  // on the failure path either.
+  CHECK(state.layout().canonical == root / "project.arbc");
+}
+
+TEST_CASE("commands::save_project_as separates a refused target from a publish fault") {
+  // THE case this leaf exists for (A25). Both of these exits leave `published.error()` set at
+  // the one branch in `commands::save_project_as`, and the bare `platform::Result` erased which
+  // one it was — so a full disk was reported to the user as "Enter a project name that does not
+  // already exist here.", which no retype could ever satisfy. The stage tells them apart, and
+  // the split happens HERE, in the only level holding both vocabularies (D-save_as_outcome-3).
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  const std::filesystem::path root = scratch.root / "session";
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  AppState state(std::move(*created));
+  build_saveable_probe(state.document());
+  RecordingLauncher launcher;
+
+  SECTION("an existing target is a REFUSAL the user can retype away") {
+    const std::filesystem::path target = scratch.root / "already_there";
+    std::error_code ec;
+    std::filesystem::create_directories(target, ec);
+
+    const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, target);
+    CHECK(saved.stage == ace::commands::SaveAsStage::refused);
+    CHECK(saved.error == std::errc::file_exists);
+  }
+
+  SECTION("an unwritable target root is a FAULT no retype fixes") {
+    const std::filesystem::path target = scratch.root / "unwritable_root";
+    fs.fail_make_directories = true;
+
+    const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, target);
+    CHECK(saved.stage == ace::commands::SaveAsStage::publish_failed);
+    CHECK(saved.error == SaveError::IoError);
+    // Two different error CATEGORIES over the one channel (D-dir_is_project-2) — which is
+    // precisely why the level that owns both is the one that classifies them.
+    CHECK(saved.error != std::errc::file_exists);
+  }
+
+  // Neither exit touches the launcher: a refusal and a publish fault both exec nothing.
+  CHECK_FALSE(launcher.invoked);
+}
+
+TEST_CASE("commands::save_project_as reports a publish fault after a clean publish") {
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  const std::filesystem::path root = scratch.root / "session";
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  AppState state(std::move(*created));
+  build_saveable_probe(state.document());
+
+  // The POST-publish fault (`project::save_project_as`'s trailing `.gitignore` write): the
+  // canonical and `assets/` land, then the gitignore step faults, so a `SaveError` comes back
+  // even though bytes reached the target. That is still a fault and not a refusal — the bundle
+  // is not a usable project and retyping the name does not make it one — and it must still exec
+  // nothing. The fault path is armed on the CANONICALIZED target, mirroring the one
+  // canonicalization `commands::save_project_as` performs.
+  const std::filesystem::path target = scratch.root / "gitignore_blocked";
+  const std::filesystem::path resolved =
+      std::filesystem::weakly_canonical(std::filesystem::absolute(target));
+  const ProjectLayout target_layout = ace::project::project_layout(resolved);
+  fs.fail_atomic_replace_at = target_layout.gitignore;
+
+  RecordingLauncher launcher;
+  const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, target);
+  CHECK(saved.stage == ace::commands::SaveAsStage::publish_failed);
+  CHECK(saved.error == SaveError::IoError);
+  CHECK_FALSE(launcher.invoked);
+  CHECK(fs.exists(target_layout.canonical)); // the publish half really did land
+  CHECK_FALSE(fs.exists(target_layout.gitignore));
 }
 
 TEST_CASE("save_project_as's copy reloads and renders byte-exact against the probe golden") {

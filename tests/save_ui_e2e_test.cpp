@@ -59,7 +59,10 @@ public:
   bool is_dirty() const override { return dirty; }
   // Save As (A13/D-save_as) — inert here; the dedicated Save As… button coverage
   // lives in save_as_ui_e2e_test.cpp.
-  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
+  ace::dock::ProjectEntryOutcome save_as(const std::filesystem::path&,
+                                         const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
   // Clean up (GC, A13/editor.project.gc) — inert here; the confirm-flow coverage
   // lives in gc_ui_e2e_test.cpp.
   ace::dock::GcSummary clean_up(bool) override { return {}; }

@@ -63,25 +63,30 @@ struct InsertKindSpec {
 // The user's answers, keyed by `InsertFieldSpec::id`.
 using InsertValues = std::vector<std::pair<std::string, std::string>>;
 
-// What ONE project-entry verb did (docs/01-architecture.md A24 / D-entry_outcome-1), in the
-// dock's OWN vocabulary — a scoped enum in the `GcSummary`/`InsertKindSpec`/`ComposeModalSpec`
-// family, naming no `project`, `platform`, `commands` or `arbc` type and adding no include.
+// What ONE project-entry verb — or the one SESSION verb that also creates a project directory,
+// `save_as` (A25) — did, in the dock's OWN vocabulary (docs/01-architecture.md A24/A25 /
+// D-entry_outcome-1 / D-save_as_outcome-1): a scoped enum in the
+// `GcSummary`/`InsertKindSpec`/`ComposeModalSpec` family, naming no `project`, `platform`,
+// `commands` or `arbc` type and adding no include.
 //
-// It replaces the `bool` these verbs used to return, which conflated the two failures D22's
-// spawn model makes structurally distinct — and which A12's own inversion makes impossible to
-// tell apart after the fact, because `dock` may include neither `<ace/project/...>` nor
+// It replaces the `bool` these verbs used to return, which conflated the failures D22's spawn
+// model makes structurally distinct — and which A12's own inversion makes impossible to tell
+// apart after the fact, because `dock` may include neither `<ace/project/...>` nor
 // `<ace/platform/...>` to ask a second question. The answer has to arrive WITH the refusal.
 //
-// Exactly three enumerators, split by CORRECTIVE ACT rather than by cause: every pre-launch
-// refusal is answered by the user choosing a different target, and nothing the user does in a
-// folder picker fixes a failed `exec`. That is also what keeps D-dir_is_project-6's
-// one-string-for-both-of-New's-refusals decision intact — `refused_target` deliberately does
-// not split an invalid name from a taken one.
+// Exactly four enumerators, split by CORRECTIVE ACT rather than by cause: every pre-launch
+// refusal is answered by the user choosing a different target, a failed publish is answered by
+// fixing the disk, and nothing the user does in a folder picker fixes a failed `exec`. That is
+// also what keeps D-dir_is_project-6's one-string-for-both-of-New's-refusals decision intact —
+// `refused_target` deliberately does not split an invalid name from a taken one.
 enum class ProjectEntryOutcome {
   succeeded,      // validated AND spawned: the sibling editor exists
   refused_target, // declined before launching anything (not a project / no longer a project /
                   // an invalid name / a target that already exists) — nothing was spawned
-  spawn_failed,   // the target was accepted and the sibling `exec` failed
+  publish_failed, // the target was accepted and producing the copy failed — Save As only; the
+                  // entry verbs publish nothing, so no entry verb can return this
+  spawn_failed,   // the target was accepted (and, for Save As, the copy is on disk) and the
+                  // sibling `exec` failed
 };
 
 // The ONE mapping from an outcome to the inline feedback a host renders (D-entry_outcome-4).
@@ -93,10 +98,20 @@ enum class ProjectEntryOutcome {
 //
 // Returns `""` for `succeeded` (so each call site collapses from an if/else into one
 // assignment, with the empty string standing in for the old `.clear()`), `refused_message`
-// verbatim for `refused_target`, and the single launch-failure literal for `spawn_failed` —
-// regardless of what refusal string the caller passed. Takes no ImGui state, so it is
-// unit-testable with no context and no host object.
-const char* entry_feedback(ProjectEntryOutcome outcome, const char* refused_message);
+// verbatim for `refused_target`, the mapper's own `"Could not save a copy there."` literal for
+// `publish_failed` (Save-As-only and context-free, so it is never a caller parameter), and
+// `spawn_failed_message` for `spawn_failed` — in every case regardless of what the OTHER
+// caller strings say. Takes no ImGui state, so it is unit-testable with no context and no host
+// object.
+//
+// `spawn_failed_message` is DEFAULTED to the one shipped launch-failure literal
+// (D-save_as_outcome-5), which is what keeps D-entry_outcome-4 intact rather than reopening it:
+// that decision made two HOSTS of one verb incapable of disagreeing, not every verb identical,
+// and it already grants that the refusal wording is per-verb context ("Open says one thing,
+// Recent another"). After a Save As the copy IS on disk, so exactly one call site opts in and
+// says so; every other call site takes the default, and divergence-by-accident stays impossible.
+const char* entry_feedback(ProjectEntryOutcome outcome, const char* refused_message,
+                           const char* spawn_failed_message = "Could not start the editor.");
 
 // The project-entry seam (docs/01-architecture.md A12, docs/00-design.md D22).
 // The tool rail's New / Open / Recent affordances drive this ABSTRACT interface,
@@ -110,10 +125,11 @@ const char* entry_feedback(ProjectEntryOutcome outcome, const char* refused_mess
 //
 // Every action spawns a NEW sibling editor process (process-per-project, D19/A7)
 // and NEVER swaps the current process's one Document — the current window stays up
-// (D19's tab analog). Errors are values: the THREE ENTRY verbs return a
-// `ProjectEntryOutcome` — succeeded / refused_target / spawn_failed — which the two hosts
-// render as inline feedback through `entry_feedback` (A24 / Constraint 7); the session verbs
-// (A13) still return a plain success/failure `bool`.
+// (D19's tab analog). Errors are values: the three entry verbs AND `save_as` return a
+// `ProjectEntryOutcome` — succeeded / refused_target / publish_failed / spawn_failed — which
+// the two hosts render as inline feedback through `entry_feedback` (A24/A25 / Constraint 7);
+// the remaining session verbs (A13), which create no project directory, still return a plain
+// success/failure `bool`.
 class ProjectGateway {
 public:
   virtual ~ProjectGateway() = default;
@@ -164,12 +180,24 @@ public:
   // creates a project directory, so under D27 it takes the same not-yet-existing target New
   // takes — which a native folder dialog structurally cannot return, so the picker moved to
   // the rail's own `pick_folder` call for the PARENT and the name is typed into the shared
-  // compose modal. Returning `bool` rather than `void` is what that buys: the outcome lands in
+  // compose modal. Returning a VALUE rather than `void` is what that buys: the outcome lands in
   // the rail's inline feedback on the same frame, closing the "error value swallowed across
-  // the async pick" hole the previous shape documented against itself. False means nothing was
-  // published and nothing was spawned — an invalid name, a target that already exists, a
-  // failed publish, or a failed exec.
-  virtual bool save_as(const std::filesystem::path& parent, const std::string& name) = 0;
+  // the async pick" hole the previous shape documented against itself.
+  //
+  // Returning the SAME `ProjectEntryOutcome` the entry verbs return (A25 / D-save_as_outcome-1)
+  // is what makes those four failure modes tell the truth — the shipped `bool` collapsed all
+  // four into one name-refusal string, two of which are not name problems at all:
+  //   `succeeded`      — the copy is on disk AND the sibling editor is running.
+  //   `refused_target` — an invalid name, or a target that already exists: nothing was written
+  //                      and nothing was spawned, and retyping the name may fix it.
+  //   `publish_failed` — the target was accepted and no usable copy was produced (a full disk,
+  //                      an unwritable parent, a document that would not serialize); nothing
+  //                      was spawned and retyping the name fixes nothing.
+  //   `spawn_failed`   — THE COPY EXISTS and the sibling `exec` failed. Load-bearing: the user
+  //                      must not be told to pick another name, because the obvious retry with
+  //                      the same one now hits D27's existing-target guard.
+  virtual ProjectEntryOutcome save_as(const std::filesystem::path& parent,
+                                      const std::string& name) = 0;
 
   // Clean up (GC): reclaim the in-process session's on-disk `assets/` orphans
   // (D13/§8/A13). Like `save()` this acts on THIS process's one owned session, not
@@ -332,14 +360,21 @@ private:
 struct ComposeModalSpec {
   const char* popup_id = "New Project"; // the BeginPopupModal title AND the e2e's ref prefix
   const char* submit_label = "Create";  // the submit button's visible label
-  // What submitting does, in the entry seam's three-outcome vocabulary (A24 / D-entry_outcome-7):
-  // New binds `new_project` directly; Save As — a SESSION verb (A13) still returning `bool` —
-  // binds a two-token adapter at its call site rather than widening the seam.
+  // What submitting does, in the seam's four-outcome vocabulary (A24/A25): New binds
+  // `new_project` and Save As binds `save_as` — both DIRECTLY now that the session verb that
+  // creates a project directory speaks the same enum (D-save_as_outcome-1), so no call site
+  // adapts anything.
   std::function<ProjectEntryOutcome(const std::filesystem::path&, const std::string&)> submit;
   // The ONE string a refused submit renders (D-dir_is_project-6), handed to `entry_feedback`
-  // exactly as the flat Open/Recent verbs hand it theirs. A launch failure is NOT this string:
-  // the mapper answers `spawn_failed` with its own literal.
+  // exactly as the flat Open/Recent verbs hand it theirs. Neither a failed publish nor a failed
+  // launch is this string: the mapper answers `publish_failed` with its own literal, and
+  // `spawn_failed` with the next field.
   const char* refused_message = "Enter a project name that does not already exist here.";
+  // What a failed sibling launch means for THIS submit (D-save_as_outcome-5). Defaulted to the
+  // one shipped literal, so New — which publishes nothing — is byte-identical; Save As opts in,
+  // because after it the copy is already on disk and the user needs to know that before they
+  // decide what to do next.
+  const char* spawn_failed_message = "Could not start the editor.";
 };
 
 // Draw one frame of a parent-plus-typed-name compose modal against `modal`'s state,
@@ -350,8 +385,12 @@ struct ComposeModalSpec {
 // Outcomes are values, mapped through the SAME `entry_feedback` the flat Open/Recent verbs use
 // (A24): anything short of `succeeded` leaves the modal open with a message in `feedback` —
 // `spec.refused_message` for a refused target, one string for both of its causes because an
-// invalid name and a taken name call for the identical corrective act (D-dir_is_project-6),
-// and the launch-failure literal for a `spawn_failed`, which no amount of retyping fixes.
+// invalid name and a taken name call for the identical corrective act (D-dir_is_project-6);
+// the mapper's own copy-failure literal for a `publish_failed`; and `spec.spawn_failed_message`
+// for a `spawn_failed`, neither of which any amount of retyping fixes (A25). The close policy
+// is deliberately NOT forked per outcome (D-save_as_outcome-6): closing on a non-success would
+// throw away the parent the async pick resolved, and New's and Save As's needs would conflict
+// inside this one shared widget.
 //
 // Returns whether the submit succeeded this frame — the rail ignores it (the project window
 // stays up), the welcome latches its exit on it (D-welcome-8).

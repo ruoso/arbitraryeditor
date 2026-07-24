@@ -75,7 +75,10 @@ public:
   // the dedicated coverage lives in save_ui_e2e_test.cpp / save_as_ui_e2e_test.cpp.
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
-  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
+  ace::dock::ProjectEntryOutcome save_as(const std::filesystem::path&,
+                                         const std::string&) override {
+    return ace::dock::ProjectEntryOutcome::refused_target;
+  }
   ace::dock::GcSummary clean_up(bool) override { return {}; } // inert (see gc_ui_e2e_test)
   // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
   // undo_ui_e2e_test.cpp.
