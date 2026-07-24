@@ -398,8 +398,9 @@ task editor "Editor — host GUI over libarbc" {
     task export_destination_reseed "Re-seed Export destination when service is pointed at a new project" {
       effort 0.5d
       allocate team
+      complete 100
       depends !contact_sheet
-      note "The Export panel seeds its destination path (exports/ under the project directory) once when the ExportService is first created; on project reopen the panel retains the previous project's destination because the panel keyed its reset on the service pointer address, not a stable identity. Re-seed the destination whenever the service instance id changes, so the path always reflects the live project. Source-of-debt: tasks/refinements/editor/contact_sheet.md (fixer follow-up). Design: docs/01-architecture.md A20."
+      note "The Export panel seeds its destination path (exports/ under the project directory) once when the ExportService is first created; on project reopen the panel retains the previous project's destination because the panel keyed its reset on the service pointer address, not a stable identity. Re-seed the destination whenever the service instance id changes, so the path always reflects the live project. Source-of-debt: tasks/refinements/editor/contact_sheet.md (fixer follow-up). Design: docs/01-architecture.md A20. Refinement: tasks/refinements/cameras/export_destination_reseed.md"
     }
   }
 

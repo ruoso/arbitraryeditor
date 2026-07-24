@@ -289,3 +289,11 @@ snapshot per export. Whether libarbc should offer a version-addressed offline re
 versions) is a **library** design judgement for the `arbitrarycomposer` maintainer — the
 editor has no host-side fix that is not a full second document load. Upstream-issue candidate
 for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
+
+---
+
+## Export destination re-seed: project/layout identity vs service `instance()` on in-process reopen
+
+**Source:** `tasks/refinements/cameras/export_destination_reseed.md` (cameras.export_destination_reseed, 2026-07-24) — Open questions / D-reseed-1 rejected alternative.
+
+The Export panel's re-seed keys on `ExportService::instance()` — a monotonic per-service id — which is a faithful proxy for the live project today because the shipped model is 1:1 service-per-process (`project_gateway.hpp:21-33`, `app_state.hpp:284-285`). If the editor ever grows an in-process project reopen (swapping `Document`/`AppState` under a **surviving** `ExportService` instead of the current detached-sibling-`exec` model), `instance()` would not change across the swap, so the panel would retain the previous project's destination. The fix in that future would be to key the re-seed on a project/layout identity rather than the service `instance()` — D-reseed-1's "rejected alternative", which is correct only under that future architecture. This is a design call contingent on an architecture decision no leaf owns today; the WBS records the trigger: if in-process reopen ever ships, revisit `views.cpp:315-317` and `ExportPanel::owner` to key on a stable project identity instead.

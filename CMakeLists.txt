@@ -288,6 +288,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/focused_canvas_indicator_e2e_test.cpp
                               tests/accent_palette_test.cpp
                               tests/export_e2e_test.cpp
+                              tests/export_destination_reseed_e2e_test.cpp
                               tests/contact_sheet_e2e_test.cpp
                               tests/view_id_natural_order_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)

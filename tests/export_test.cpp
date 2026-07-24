@@ -850,6 +850,44 @@ TEST_CASE("export: a job still running at teardown is joined before the document
   CHECK(rendered.load() > 0);
 }
 
+// editor.cameras.export_destination_reseed (D-reseed-3): the identity property the
+// panel's destination re-seed keys on. The reset in `draw_export` fires when
+// `panel.owner != service.instance()`, so `instance()` MUST be unique per constructed
+// service and immune to address reuse — the exact failure the pre-contact_sheet pointer
+// key fell to. Pinned headlessly here so a regression to a constant/reused id fails
+// deterministically, without depending on the allocator reproducing an address collision.
+TEST_CASE("export: distinct services carry distinct instance ids") {
+  RecordingFileSystem fs;
+  ace::platform::NativeThreads threads;
+
+  // Two live services: their ids are non-zero (0 is the panel's "bound to nothing yet")
+  // and distinct — `next_instance()` starts at 1 and never repeats.
+  ExportService a(threads, fs);
+  ExportService b(threads, fs);
+  CHECK(a.instance() != 0);
+  CHECK(b.instance() != 0);
+  CHECK(a.instance() != b.instance());
+
+  // Address-reuse guard: the precise false-match the pointer key fell to. Build a
+  // service on the heap, record its id and address, DESTROY it, then build a second on
+  // the heap — the allocator is free to hand the freed bytes straight back. A pointer
+  // comparison would then report "same panel"; the monotonic id must still differ.
+  auto first = std::make_unique<ExportService>(threads, fs);
+  const std::uint64_t first_id = first->instance();
+  const ExportService* first_addr = first.get();
+  first.reset();
+  auto second = std::make_unique<ExportService>(threads, fs);
+  const std::uint64_t second_id = second->instance();
+  const ExportService* second_addr = second.get();
+
+  // Surface whether the reuse was actually exercised this run (the property holds either
+  // way, so the assertion below is not gated on the nondeterministic collision).
+  const bool address_reused = (first_addr == second_addr);
+  CAPTURE(address_reused);
+  CHECK(second_id != 0);
+  CHECK(first_id != second_id); // immune to reuse, whether or not the addresses matched
+}
+
 TEST_CASE("export: the service refuses to start without a renderer and joins cleanly") {
   RecordingFileSystem fs;
   ace::platform::NativeThreads threads;
