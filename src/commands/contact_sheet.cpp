@@ -18,40 +18,46 @@
 namespace ace::commands {
 namespace {
 
-// The one place a byte becomes a cell. Everything outside the table's range — a
-// control character, a DEL, and every byte of a multi-byte UTF-8 sequence — is
-// UNMAPPED, and a maximal run of unmapped bytes collapses to ONE fallback box
-// (D-sheet-4). `editor.cameras.caption_latin1` is the registered follow-up that
-// decodes code points instead; until it lands, boxing is the bounded, visible
-// degradation rather than a silent drop.
-bool is_mapped(char raw) {
-  const unsigned char ch = static_cast<unsigned char>(raw);
-  return ch >= static_cast<unsigned char>(k_glyph_first) &&
-         ch <= static_cast<unsigned char>(k_glyph_last);
+// The one place a CODE POINT becomes a cell. Everything outside the two table ranges
+// — a control character, a DEL, the C1 controls, a CJK ideograph, an emoji, and
+// U+FFFD for ill-formed input — is UNMAPPED, and a maximal run of unmapped code points
+// collapses to ONE fallback box (D-sheet-4, kept by D-latin1-4).
+bool is_mapped(char32_t code_point) {
+  return (code_point >= k_glyph_first && code_point <= k_glyph_last) ||
+         (code_point >= k_latin1_first && code_point <= k_latin1_last);
 }
 
-// The 8 scanlines of the cell `raw` draws as.
-const std::uint8_t* glyph_rows(char raw) {
-  if (!is_mapped(raw)) {
-    return k_fallback_glyph.data();
+// The 8 scanlines of the cell `code_point` draws as. Two range tests are the ONLY
+// mapping, so no value can index outside a table (Constraint 3).
+const std::uint8_t* glyph_rows(char32_t code_point) {
+  if (code_point >= k_glyph_first && code_point <= k_glyph_last) {
+    const std::size_t index = static_cast<std::size_t>(code_point - k_glyph_first);
+    return k_glyph_table.data() + index * k_glyph_cell_height;
   }
-  const int index = static_cast<unsigned char>(raw) - static_cast<unsigned char>(k_glyph_first);
-  return k_glyph_table.data() + static_cast<std::size_t>(index) * k_glyph_cell_height;
+  if (code_point >= k_latin1_first && code_point <= k_latin1_last) {
+    const std::size_t index = static_cast<std::size_t>(code_point - k_latin1_first);
+    return k_latin1_glyph_table.data() + index * k_glyph_cell_height;
+  }
+  return k_fallback_glyph.data();
 }
 
-// Walk `text` as cells, calling `visit(rows, cell_index)` once per drawn cell.
+// Walk `text` as cells, calling `visit(rows, cell_index)` once per drawn cell. The ONE
+// iteration primitive every public caption function routes through — which is why
+// decoding here fixes measurement, truncation and drawing at once (D-latin1-1).
 template <class Visit> int for_each_cell(std::string_view text, Visit visit) {
   int cells = 0;
   bool in_unmapped_run = false;
-  for (const char ch : text) {
-    if (is_mapped(ch)) {
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    const char32_t code_point = next_code_point(text, pos);
+    if (is_mapped(code_point)) {
       in_unmapped_run = false;
     } else if (in_unmapped_run) {
       continue; // still inside the SAME run — one box covers the whole of it
     } else {
       in_unmapped_run = true;
     }
-    visit(glyph_rows(ch), cells);
+    visit(glyph_rows(code_point), cells);
     ++cells;
   }
   return cells;
@@ -117,6 +123,71 @@ void place_contact_tile(const ContactSheetLayout& layout, int index, int native_
 
 // ---- the caption face --------------------------------------------------------
 
+char32_t next_code_point(std::string_view text, std::size_t& pos) {
+  // A call past the end still ADVANCES: `pos` strictly increasing is the property that
+  // makes every walk over this function provably terminate, misuse included.
+  if (pos >= text.size()) {
+    ++pos;
+    return k_replacement_code_point;
+  }
+  const auto byte_at = [&text](std::size_t at) { return static_cast<unsigned char>(text[at]); };
+  const unsigned char lead = byte_at(pos);
+  if (lead < 0x80U) {
+    ++pos;
+    return static_cast<char32_t>(lead);
+  }
+
+  // The Unicode 3.9 well-formed byte-sequence table, spelled as a per-lead range for
+  // the FIRST continuation byte. Encoding it here — rather than decoding freely and
+  // range-checking afterwards — is what rejects overlongs (0xC0/0xC1, 0xE0 0x80),
+  // surrogate encodings (0xED 0xA0) and out-of-range scalars (0xF4 0x90, 0xF5+)
+  // WITHOUT ever accumulating a value the table could be indexed with.
+  unsigned int length = 0;
+  char32_t value = 0;
+  unsigned char low = 0x80U;
+  unsigned char high = 0xBFU;
+  if (lead >= 0xC2U && lead <= 0xDFU) {
+    length = 2;
+    value = static_cast<char32_t>(lead & 0x1FU);
+  } else if (lead >= 0xE0U && lead <= 0xEFU) {
+    length = 3;
+    value = static_cast<char32_t>(lead & 0x0FU);
+    if (lead == 0xE0U) {
+      low = 0xA0U; // no overlong three-byte form
+    } else if (lead == 0xEDU) {
+      high = 0x9FU; // no surrogate encoding
+    }
+  } else if (lead >= 0xF0U && lead <= 0xF4U) {
+    length = 4;
+    value = static_cast<char32_t>(lead & 0x07U);
+    if (lead == 0xF0U) {
+      low = 0x90U; // no overlong four-byte form
+    } else if (lead == 0xF4U) {
+      high = 0x8FU; // nothing past U+10FFFF
+    }
+  } else {
+    // A lone continuation byte (0x80..0xBF), an overlong lead (0xC0/0xC1) or a byte no
+    // UTF-8 sequence can start (0xF5..0xFF): a maximal subpart of exactly one byte.
+    ++pos;
+    return k_replacement_code_point;
+  }
+
+  for (unsigned int i = 1; i < length; ++i) {
+    // Truncated tail or a byte outside the permitted range: the maximal subpart is
+    // everything ACCEPTED so far, and the offending byte is left for the next call to
+    // classify on its own terms.
+    if (pos + i >= text.size() || byte_at(pos + i) < low || byte_at(pos + i) > high) {
+      pos += i;
+      return k_replacement_code_point;
+    }
+    value = (value << 6) | static_cast<char32_t>(byte_at(pos + i) & 0x3FU);
+    low = 0x80U;
+    high = 0xBFU;
+  }
+  pos += length;
+  return value;
+}
+
 int text_cells(std::string_view text) {
   return for_each_cell(text, [](const std::uint8_t*, int) {});
 }
@@ -162,15 +233,20 @@ std::string fit_text(std::string_view text, int max_width, int scale) {
   int cells = 0;
   bool in_unmapped_run = false;
   std::size_t take = 0;
-  for (std::size_t i = 0; i < text.size(); ++i) {
-    const bool mapped = is_mapped(text[i]);
+  std::size_t pos = 0;
+  // The walk advances by decoded CODE POINT and `take` is the byte offset AFTER the
+  // last accepted one, so the cut can never land inside a multi-byte sequence: valid
+  // UTF-8 in is valid UTF-8 out, and re-measuring the result agrees with the cell count
+  // this loop computed (D-latin1-5).
+  while (pos < text.size()) {
+    const bool mapped = is_mapped(next_code_point(text, pos));
     const int add = (mapped || !in_unmapped_run) ? 1 : 0;
     if (cells + add > keep) {
       break;
     }
     cells += add;
     in_unmapped_run = !mapped;
-    take = i + 1;
+    take = pos;
   }
   return std::string(text.substr(0, take)) + "...";
 }

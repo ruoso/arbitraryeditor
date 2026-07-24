@@ -74,8 +74,20 @@ using ace::commands::fit_text;
 using ace::commands::k_contact_gutter;
 using ace::commands::k_contact_tile_max;
 using ace::commands::k_contact_tile_min;
+using ace::commands::k_fallback_glyph;
 using ace::commands::k_glyph_cell_height;
 using ace::commands::k_glyph_cell_width;
+using ace::commands::k_glyph_count;
+using ace::commands::k_glyph_first;
+using ace::commands::k_glyph_last;
+using ace::commands::k_glyph_table;
+using ace::commands::k_glyph_width;
+using ace::commands::k_latin1_first;
+using ace::commands::k_latin1_glyph_count;
+using ace::commands::k_latin1_glyph_table;
+using ace::commands::k_latin1_last;
+using ace::commands::k_replacement_code_point;
+using ace::commands::next_code_point;
 using ace::commands::plan_contact_sheet;
 using ace::commands::plan_export;
 using ace::commands::Rgba8;
@@ -214,6 +226,115 @@ ace::commands::RenderFn stub_renderer() {
 Rgba8 pixel_at(const Srgb8Image& image, int x, int y) {
   const std::size_t at = (static_cast<std::size_t>(y) * image.width + x) * 4;
   return Rgba8{image.pixels[at], image.pixels[at + 1], image.pixels[at + 2], image.pixels[at + 3]};
+}
+
+// ---- caption-face probes (editor.cameras.caption_latin1) ---------------------
+
+// The test's OWN UTF-8 encoder, so `next_code_point` is never validated against itself.
+std::string utf8(char32_t code_point) {
+  const auto byte = [](unsigned int value) {
+    return static_cast<char>(static_cast<unsigned char>(value));
+  };
+  std::string out;
+  if (code_point < 0x80U) {
+    out.push_back(byte(code_point));
+  } else if (code_point < 0x800U) {
+    out.push_back(byte(0xC0U | (code_point >> 6)));
+    out.push_back(byte(0x80U | (code_point & 0x3FU)));
+  } else if (code_point < 0x10000U) {
+    out.push_back(byte(0xE0U | (code_point >> 12)));
+    out.push_back(byte(0x80U | ((code_point >> 6) & 0x3FU)));
+    out.push_back(byte(0x80U | (code_point & 0x3FU)));
+  } else {
+    out.push_back(byte(0xF0U | (code_point >> 18)));
+    out.push_back(byte(0x80U | ((code_point >> 12) & 0x3FU)));
+    out.push_back(byte(0x80U | ((code_point >> 6) & 0x3FU)));
+    out.push_back(byte(0x80U | (code_point & 0x3FU)));
+  }
+  return out;
+}
+
+// The 8 scanlines `text` draws its FIRST cell as, read back THROUGH `draw_text` — the
+// public surface, never the table — so a wrong mapping and a wrong blit both show up
+// here. `draw_text` writes every shadow before any glyph, so a white pixel is exactly
+// a set bit.
+std::array<std::uint8_t, k_glyph_cell_height> cell_bits(std::string_view text) {
+  Srgb8Image cell;
+  cell.width = k_glyph_cell_width + 2;
+  cell.height = k_glyph_cell_height + 2;
+  cell.pixels.assign(static_cast<std::size_t>(cell.width) * cell.height * 4, 0);
+  draw_text(cell, 0, 0, text, 1);
+  std::array<std::uint8_t, k_glyph_cell_height> rows{};
+  for (int y = 0; y < k_glyph_cell_height; ++y) {
+    unsigned int row = 0;
+    for (int x = 0; x < k_glyph_width; ++x) {
+      if (pixel_at(cell, x, y) == Rgba8{255, 255, 255, 255}) {
+        row |= 1U << (k_glyph_width - 1 - x);
+      }
+    }
+    rows[static_cast<std::size_t>(y)] = static_cast<std::uint8_t>(row);
+  }
+  return rows;
+}
+
+// How many U+FFFD a decode of `text` yields — the measure the truncation law's
+// "introduces no replacement the input did not have" is stated against.
+int replacements(std::string_view text) {
+  int count = 0;
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    if (next_code_point(text, pos) == k_replacement_code_point) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+// `draw_text`'s algorithm re-derived here from the ASCII table alone and walked as
+// BYTES — the pre-Latin-1 semantics. For an ASCII string the shipped face must still
+// agree with this bit for bit, which is what pins the widening as a pure extension.
+Srgb8Image reference_ascii_draw(std::string_view text, int scale, int width, int height) {
+  Srgb8Image image;
+  image.width = width;
+  image.height = height;
+  image.pixels.assign(static_cast<std::size_t>(width) * height * 4, 0);
+  const auto put = [&image](int x, int y, std::uint8_t value) {
+    if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
+      return;
+    }
+    const std::size_t at = (static_cast<std::size_t>(y) * image.width + x) * 4;
+    image.pixels[at] = value;
+    image.pixels[at + 1] = value;
+    image.pixels[at + 2] = value;
+    image.pixels[at + 3] = 255;
+  };
+  for (int pass = 0; pass < 2; ++pass) {
+    const std::uint8_t value = pass == 0 ? std::uint8_t{0} : std::uint8_t{255};
+    const int offset = pass == 0 ? scale : 0;
+    int cell = 0;
+    for (const char raw : text) {
+      const unsigned char ch = static_cast<unsigned char>(raw);
+      REQUIRE(ch >= 0x20U); // the corpus is ASCII by construction
+      REQUIRE(ch <= 0x7EU);
+      const std::uint8_t* rows =
+          k_glyph_table.data() + static_cast<std::size_t>(ch - 0x20U) * k_glyph_cell_height;
+      for (int row = 0; row < k_glyph_cell_height; ++row) {
+        for (int col = 0; col < k_glyph_width; ++col) {
+          if ((rows[row] & (1U << (k_glyph_width - 1 - col))) == 0U) {
+            continue;
+          }
+          for (int dy = 0; dy < scale; ++dy) {
+            for (int dx = 0; dx < scale; ++dx) {
+              put(cell * k_glyph_cell_width * scale + offset + col * scale + dx,
+                  offset + row * scale + dy, value);
+            }
+          }
+        }
+      }
+      ++cell;
+    }
+  }
+  return image;
 }
 
 bool rects_intersect(const ContactCellRect& a, const ContactCellRect& b) {
@@ -576,15 +697,21 @@ TEST_CASE("contact_sheet: a caption too wide for the tile is truncated, never ov
 TEST_CASE("contact_sheet: unmapped bytes render as one fallback box, not one per byte") {
   const std::string cafe = "Caf\xc3\xa9"; // "Café" in UTF-8 — 5 bytes
   CHECK(cafe.size() == 5);
-  // C, a, f and ONE box for the two-byte sequence.
+  // C, a, f and — since `editor.cameras.caption_latin1` — a real `é` GLYPH, not a box.
   CHECK(text_cells(cafe) == 4);
   CHECK(text_width(cafe, 1) == 4 * k_glyph_cell_width);
-  // A longer run still collapses to one box; two runs separated by a mapped byte are two.
-  CHECK(text_cells("\xc3\xa9\xc3\xa9") == 1);
+  // Two `é` are now two CELLS: the single assertion that fails against the byte walk.
+  CHECK(text_cells("\xc3\xa9\xc3\xa9") == 2);
   CHECK(text_cells("\xc3\xa9-\xc3\xa9") == 3);
   CHECK(text_cells("") == 0);
   // Control characters and DEL are unmapped too, and never read out of the table.
   CHECK(text_cells(std::string("a\x7f\x01\x1f", 4)) == 2);
+  // The run-collapse law survives, retargeted to code points the table genuinely does
+  // not cover: "中文" is ONE box, and ill-formed bytes join the same run through U+FFFD.
+  CHECK(text_cells("\xe4\xb8\xad\xe6\x96\x87") == 1);
+  CHECK(text_cells("a\xe4\xb8\xad-\xe6\x96\x87") == 4);
+  CHECK(text_cells("a\xff\xfe"
+                   "b") == 3);
 
   // What is DRAWN agrees with what is MEASURED.
   Srgb8Image strip;
@@ -603,6 +730,305 @@ TEST_CASE("contact_sheet: unmapped bytes render as one fallback box, not one per
   CHECK(rightmost >= 0);
   CHECK(rightmost < text_width(cafe, 1)); // four cells wide, not five
   CHECK(rightmost >= 3 * k_glyph_cell_width);
+  // Re-derived from the `é` cell's OWN bits: three ASCII cells, then that cell's
+  // rightmost lit column, then its shadow one pixel further right.
+  const std::array<std::uint8_t, k_glyph_cell_height> e_acute = cell_bits("\xc3\xa9");
+  int lit = -1;
+  for (int row = 0; row < k_glyph_cell_height; ++row) {
+    for (int col = 0; col < k_glyph_width; ++col) {
+      if ((e_acute[static_cast<std::size_t>(row)] & (1U << (k_glyph_width - 1 - col))) != 0U) {
+        lit = std::max(lit, col);
+      }
+    }
+  }
+  REQUIRE(lit >= 0);
+  CHECK(rightmost == 3 * k_glyph_cell_width + lit + 1);
+}
+
+TEST_CASE("contact_sheet: the UTF-8 decoder is total and always advances") {
+  struct Row {
+    std::string bytes;
+    std::vector<char32_t> expected;
+  };
+  const char32_t bad = k_replacement_code_point;
+  // Well-formed rows first, then one row per ill-formed CLASS. The expectations follow
+  // Unicode 3.9's maximal-subpart rule: a lead byte no sequence can start is a subpart
+  // of one byte, and a lead whose continuation is out of range keeps only what it
+  // accepted — so `C0 80` is TWO replacements (0xC0 can never lead), while `C3` alone
+  // is one.
+  const std::vector<Row> rows = {
+      {"", {}},
+      {"Hi!", {U'H', U'i', U'!'}},
+      {std::string("a\0b", 3), {U'a', 0, U'b'}},  // an embedded NUL is a code point
+      {"\xc3\xa9", {0x00E9}},                     // é
+      {"\xe4\xb8\xad", {0x4E2D}},                 // 中
+      {"\xf0\x9f\x98\x80", {0x1F600}},            // 😀
+      {"\x7f", {0x7F}},                           // DEL decodes, it just does not map
+      {"\xc3", {bad}},                            // truncated two-byte tail
+      {"\xe4\xb8", {bad}},                        // truncated three-byte tail
+      {"\xf0\x9f\x98", {bad}},                    // truncated four-byte tail
+      {"\x80", {bad}},                            // a lone continuation byte
+      {"\xc0\x80", {bad, bad}},                   // overlong two-byte form
+      {"\xe0\x80\x80", {bad, bad, bad}},          // overlong three-byte form
+      {"\xed\xa0\x80", {bad, bad, bad}},          // a surrogate encoding
+      {"\xf5\x80\x80\x80", {bad, bad, bad, bad}}, // past U+10FFFF
+      {"\xf4\x90\x80\x80", {bad, bad, bad, bad}}, // past U+10FFFF, valid lead
+      {"\xfe", {bad}},                            // no UTF-8 sequence starts with FE
+      {"\xff", {bad}},                            // ... or FF
+      {"a\xc3", {U'a', bad}},                     // ill-formed tail after good text
+      {"\xc3"
+       "z",
+       {bad, U'z'}}, // the offending byte is re-classified on its own terms
+  };
+
+  for (const Row& row : rows) {
+    INFO("row of " << row.bytes.size() << " bytes");
+    std::vector<char32_t> decoded;
+    std::size_t pos = 0;
+    while (pos < row.bytes.size()) {
+      const std::size_t before = pos;
+      decoded.push_back(next_code_point(row.bytes, pos));
+      // ANTI-VACUITY / termination: `pos` STRICTLY increases on every call, so a
+      // decoder that stalled would hang here rather than pass.
+      REQUIRE(pos > before);
+      REQUIRE(pos <= row.bytes.size());
+    }
+    CHECK(decoded == row.expected);
+  }
+
+  // ANTI-VACUITY: the well-formed rows produce NO replacement at all, so a decoder that
+  // answered U+FFFD for everything fails this case instead of passing it.
+  CHECK(replacements("Hi!") == 0);
+  CHECK(replacements("\xc3\xa9\xe4\xb8\xad\xf0\x9f\x98\x80") == 0);
+  CHECK(replacements("\xc3") == 1);
+
+  // A call past the end still advances, so even misuse terminates.
+  std::size_t past = 4;
+  CHECK(next_code_point("ab", past) == k_replacement_code_point);
+  CHECK(past == 5);
+}
+
+TEST_CASE("contact_sheet: the glyph table covers ASCII and printable Latin-1") {
+  const std::array<std::uint8_t, k_glyph_cell_height> box = k_fallback_glyph;
+  const auto mapped = [&box](char32_t code_point) {
+    const std::string text = utf8(code_point);
+    // Mapped or not, ONE code point is one cell; membership is whether that cell is
+    // the fallback box.
+    REQUIRE(text_cells(text) == 1);
+    return cell_bits(text) != box;
+  };
+  for (char32_t cp = 0; cp <= 0x0180U; ++cp) {
+    INFO("U+" << std::hex << static_cast<unsigned int>(cp));
+    const bool expected = (cp >= 0x20U && cp <= 0x7EU) || (cp >= 0xA0U && cp <= 0xFFU);
+    CHECK(mapped(cp) == expected);
+  }
+  // DEL and the C1 controls stay deliberately unmapped (D-latin1-2).
+  CHECK_FALSE(mapped(0x7FU));
+  CHECK_FALSE(mapped(0x9FU));
+  CHECK(mapped(0xA0U)); // NBSP is mapped (blank), not boxed
+  CHECK(mapped(0x00FFU));
+  CHECK_FALSE(mapped(0x0100U));
+  CHECK_FALSE(mapped(0x4E2DU));  // 中
+  CHECK_FALSE(mapped(0xFFFDU));  // U+FFFD is itself undrawable, by design
+  CHECK_FALSE(mapped(0x1F600U)); // 😀
+}
+
+TEST_CASE("contact_sheet: every glyph cell is well-formed") {
+  const auto check_cell = [](const std::uint8_t* rows, const std::string& what) {
+    INFO(what);
+    for (int row = 0; row < k_glyph_cell_height; ++row) {
+      // Constraint 5: the face is FIVE columns wide — a sixth-bit typo would silently
+      // bleed a pixel into the next cell's advance.
+      CHECK((rows[row] & ~0x1FU) == 0U);
+    }
+    // Constraint 4: row 7 is where a set bit's shadow lands, so a glyph that lit it
+    // would put a caption's shadow outside the strip the layout allocated.
+    CHECK(rows[k_glyph_cell_height - 1] == 0U);
+  };
+  for (int i = 0; i < k_glyph_count; ++i) {
+    check_cell(k_glyph_table.data() + static_cast<std::size_t>(i) * k_glyph_cell_height,
+               "ASCII cell " + std::to_string(i));
+  }
+  for (int i = 0; i < k_latin1_glyph_count; ++i) {
+    check_cell(k_latin1_glyph_table.data() + static_cast<std::size_t>(i) * k_glyph_cell_height,
+               "Latin-1 cell " + std::to_string(i));
+  }
+  check_cell(k_fallback_glyph.data(), "fallback box");
+  CHECK(k_glyph_table.size() == static_cast<std::size_t>(k_glyph_count) * k_glyph_cell_height);
+  CHECK(k_latin1_glyph_table.size() ==
+        static_cast<std::size_t>(k_latin1_glyph_count) * k_glyph_cell_height);
+  CHECK(k_latin1_last - k_latin1_first + 1 == static_cast<char32_t>(k_latin1_glyph_count));
+  CHECK(k_glyph_last - k_glyph_first + 1 == static_cast<char32_t>(k_glyph_count));
+
+  // ANTI-VACUITY: every mapped code point draws INK, except the three that are blank by
+  // decision — U+0020, U+00A0 (NBSP) and U+00AD (SHY). A forgotten row block of zeroes
+  // in the new array fails here instead of shipping as an invisible caption.
+  for (char32_t cp = k_glyph_first; cp <= k_glyph_last; ++cp) {
+    INFO("U+" << std::hex << static_cast<unsigned int>(cp));
+    CHECK((text_set_bits(utf8(cp)) > 0) == (cp != 0x20U));
+  }
+  for (char32_t cp = k_latin1_first; cp <= k_latin1_last; ++cp) {
+    INFO("U+" << std::hex << static_cast<unsigned int>(cp));
+    CHECK((text_set_bits(utf8(cp)) > 0) == (cp != 0xA0U && cp != 0xADU));
+  }
+}
+
+TEST_CASE("contact_sheet: an accented glyph differs from its base letter") {
+  // The copy-paste detector: a Latin-1 block filled by duplicating one ASCII cell 96
+  // times passes the coverage and well-formedness laws and fails right here.
+  const std::vector<std::string> families = {
+      "AÀÁÂÃÄÅ", "aàáâãäå", "EÈÉÊË", "eèéêë", "IÌÍÎÏ", "iìíîï", "NÑ", "nñ",
+      "OÒÓÔÕÖØ", "oòóôõöø", "UÙÚÛÜ", "uùúûü", "YÝÿ",   "yýÿ",   "CÇ", "cç"};
+  for (const std::string& family : families) {
+    std::vector<std::array<std::uint8_t, k_glyph_cell_height>> seen;
+    std::size_t pos = 0;
+    while (pos < family.size()) {
+      const std::size_t start = pos;
+      const char32_t cp = next_code_point(family, pos);
+      REQUIRE(cp != k_replacement_code_point); // the corpus is well-formed UTF-8
+      INFO("family " << family << ", U+" << std::hex << static_cast<unsigned int>(cp));
+      const std::array<std::uint8_t, k_glyph_cell_height> bits =
+          cell_bits(family.substr(start, pos - start));
+      for (const auto& other : seen) {
+        CHECK(bits != other);
+      }
+      seen.push_back(bits);
+    }
+    CHECK(seen.size() >= 2);
+  }
+}
+
+TEST_CASE("contact_sheet: a caption truncates on a code-point boundary") {
+  const std::vector<std::string> corpus = {
+      "Café Extérieur", "Ñandú", "ÀÉÎÕÜ çøæß", "Hero", "中文 mixed Ünicode",
+  };
+  bool truncated_somewhere = false;
+  for (const std::string& name : corpus) {
+    const int before = replacements(name);
+    for (int scale = 1; scale <= 2; ++scale) {
+      for (int max_width = 0; max_width <= 200; ++max_width) {
+        INFO("name " << name << " scale " << scale << " width " << max_width);
+        const std::string fitted = fit_text(name, max_width, scale);
+        // The cut lands on a code-point boundary, so re-decoding introduces no U+FFFD
+        // the input did not already have (D-latin1-5).
+        CHECK(replacements(fitted) <= before);
+        CHECK(text_width(fitted, scale) <= max_width);
+        if (fitted != name && fitted.size() >= 3 && fitted.substr(fitted.size() - 3) == "...") {
+          truncated_somewhere = true;
+        }
+      }
+    }
+  }
+  CHECK(truncated_somewhere); // ANTI-VACUITY: the sweep really does truncate
+
+  // A well-formed accented name in, well-formed UTF-8 out, at every width.
+  const std::string cafe = "Café Extérieur";
+  for (int max_width = 0; max_width <= 200; ++max_width) {
+    INFO("width " << max_width);
+    CHECK(replacements(fit_text(cafe, max_width, 1)) == 0);
+  }
+  // And the byte walk's off-by-one is gone: cutting between the two bytes of `é` would
+  // leave a lone 0xC3 here.
+  CHECK(fit_text("Café", 6 * 4, 1) == "Café");
+  CHECK(replacements(fit_text("Café Extérieur", 6 * 8, 1)) == 0);
+}
+
+TEST_CASE("contact_sheet: the ASCII face is unchanged by the Latin-1 extension") {
+  struct Case {
+    std::string text;
+    int cells;
+    int set_bits;
+  };
+  // Literal pre-change values, including the golden's own deliberately-overlong name.
+  const std::vector<Case> corpus = {
+      {"Hero", 4, 51},
+      {"Wide", 4, 57},
+      {"Hero 1", 6, 61},
+      {"A very long camera name that will not fit", 41, 399},
+  };
+  for (const Case& item : corpus) {
+    INFO(item.text);
+    CHECK(text_cells(item.text) == item.cells);
+    CHECK(text_set_bits(item.text) == item.set_bits);
+    CHECK(text_width(item.text, 1) == item.cells * k_glyph_cell_width);
+    CHECK(text_width(item.text, 2) == item.cells * k_glyph_cell_width * 2);
+    CHECK(text_width(item.text, 0) == 0);
+
+    // And what is DRAWN is memcmp-identical to a reference bitmap built by the
+    // pre-change BYTE walk over the untouched ASCII table.
+    for (int scale = 1; scale <= 2; ++scale) {
+      const int width = item.cells * k_glyph_cell_width * scale + 4;
+      const int height = k_glyph_cell_height * scale + 4;
+      Srgb8Image actual;
+      actual.width = width;
+      actual.height = height;
+      actual.pixels.assign(static_cast<std::size_t>(width) * height * 4, 0);
+      draw_text(actual, 0, 0, item.text, scale);
+      const Srgb8Image expected = reference_ascii_draw(item.text, scale, width, height);
+      REQUIRE(actual.pixels.size() == expected.pixels.size());
+      CHECK(std::memcmp(actual.pixels.data(), expected.pixels.data(), actual.pixels.size()) == 0);
+    }
+  }
+  // The shipped truncation, literally.
+  CHECK(fit_text("A very long camera name that will not fit", 96, 1) == "A very long c...");
+  CHECK(fit_text("Hero", 96, 1) == "Hero");
+}
+
+TEST_CASE("contact_sheet: the caption pixel laws extend to Latin-1") {
+  const std::string name = "Café Ñandú"; // Latin-1 throughout, still one cell per letter
+  CHECK(text_cells(name) == 10);
+  for (int scale = 1; scale <= 2; ++scale) {
+    INFO("scale " << scale);
+    Srgb8Image strip;
+    strip.width = 200;
+    strip.height = k_glyph_cell_height * 3;
+    strip.pixels.assign(static_cast<std::size_t>(strip.width) * strip.height * 4, 0);
+    draw_text(strip, 0, 0, name, scale);
+
+    std::set<std::array<std::uint8_t, 4>> colours;
+    std::size_t white = 0;
+    std::size_t black = 0;
+    for (std::size_t i = 0; i < strip.pixels.size(); i += 4) {
+      colours.insert(
+          {strip.pixels[i], strip.pixels[i + 1], strip.pixels[i + 2], strip.pixels[i + 3]});
+      if (strip.pixels[i] == 255 && strip.pixels[i + 3] == 255) {
+        ++white;
+      } else if (strip.pixels[i] == 0 && strip.pixels[i + 3] == 255) {
+        ++black;
+      }
+    }
+    // D-sheet-2 / D-sheet-4 survive the widening: background, opaque white, opaque
+    // black — no third colour, no alpha ramp, no read of what is underneath.
+    CHECK(colours.size() == 3);
+    CHECK(black > 0);
+    CHECK(white ==
+          static_cast<std::size_t>(text_set_bits(name)) * static_cast<std::size_t>(scale * scale));
+    CHECK(white > 0);
+  }
+
+  // Nothing outside the tile's own column is touched, with an accented caption.
+  const int tile_edge = 64;
+  const std::string fitted = fit_text("Ñandú Extérieur Café", tile_edge, 1);
+  CHECK(fitted != "Ñandú Extérieur Café");
+  CHECK(text_width(fitted, 1) <= tile_edge);
+  Srgb8Image target;
+  target.width = 3 * tile_edge;
+  target.height = k_glyph_cell_height * 2;
+  target.pixels.assign(static_cast<std::size_t>(target.width) * target.height * 4, 0);
+  const int origin = tile_edge;
+  draw_text(target, origin, 0, fitted, 1);
+  bool inside_drawn = false;
+  for (int y = 0; y < target.height; ++y) {
+    for (int x = 0; x < target.width; ++x) {
+      const Rgba8 px = pixel_at(target, x, y);
+      if (x >= origin && x < origin + tile_edge) {
+        inside_drawn = inside_drawn || px != Rgba8{0, 0, 0, 0};
+        continue;
+      }
+      REQUIRE(px == Rgba8{0, 0, 0, 0});
+    }
+  }
+  CHECK(inside_drawn);
 }
 
 // ---- the refusals (D23 / D-sheet-7) ------------------------------------------
@@ -1076,4 +1502,77 @@ TEST_CASE("contact_sheet: the composed sheet is byte-exact vs the golden") {
   CHECK(plan.tiles[2].caption != plan.tiles[2].camera_name);
   CHECK(plan.tiles[2].caption.substr(plan.tiles[2].caption.size() - 3) == "...");
   CHECK(text_width(plan.tiles[2].caption, plan.caption_scale) <= plan.tile_edge);
+}
+
+TEST_CASE("contact_sheet: an accented caption composes byte-exact vs the golden") {
+  const std::unique_ptr<arbc::Document> doc = build_sheet_doc();
+  const ace::commands::RenderFn shipped =
+      [&doc](const arbc::Affine& camera, int width, int height,
+             const std::optional<Rgba8>& background) -> ace::render::Srgb8Image {
+    if (!background) {
+      return ace::render::render_document_srgb8(*doc, width, height, camera);
+    }
+    return ace::render::render_document_srgb8_over(
+        *doc, width, height, camera, {background->r, background->g, background->b, background->a});
+  };
+
+  // One caption now drawn IN FULL, one mixing Latin-1 with a CJK code point outside the
+  // table — so this single artifact pins both the new glyphs and the surviving fallback
+  // box (`editor.cameras.caption_latin1` acceptance).
+  CameraDoc cams;
+  const arbc::Affine frame = arbc::Affine::translation(8.0, 8.0);
+  const arbc::ObjectId cafe = cams.add("Café Extérieur", 64, 64, frame);
+  const arbc::ObjectId nandu = cams.add("Ñandú 中", 96, 54, frame);
+
+  ExportOptions options;
+  options.destination = k_dest;
+  options.contact_sheet = true;
+  options.tile_edge = 96;
+  const ContactSheetPlan plan =
+      plan_contact_sheet(*cams.document, {cafe, nandu}, options, real_shot_camera(), {});
+  REQUIRE(plan.tiles.size() == 2);
+
+  const std::vector<Srgb8Image> renders = render_tiles(plan, shipped, std::nullopt);
+  const Srgb8Image sheet = compose_contact_sheet(plan, renders, std::nullopt);
+  REQUIRE(sheet.width == plan.width);
+  REQUIRE(sheet.height == plan.height);
+  CHECK(ace_test::compare_golden("contact_sheet_latin1.rgba8", sheet.pixels));
+
+  // ANTI-VACUITY 1: the sheet is genuinely not uniformly background.
+  bool any_content = false;
+  for (std::size_t i = 0; i < sheet.pixels.size(); i += 4) {
+    if (sheet.pixels[i + 3] != 0) {
+      any_content = true;
+      break;
+    }
+  }
+  CHECK(any_content);
+
+  // ANTI-VACUITY 2: the accented glyphs are DRAWN, not merely counted. The caption strip
+  // of tile 0 ("Café Extérieur") has white pixels at columns that are background in a
+  // same-geometry sheet whose first camera is captioned "Caf" — i.e. the extra glyphs
+  // past "Caf" really put ink down.
+  CameraDoc plain;
+  const arbc::ObjectId caf = plain.add("Caf", 64, 64, frame);
+  const arbc::ObjectId nandu2 = plain.add("Ñandú 中", 96, 54, frame);
+  const ContactSheetPlan plan_plain =
+      plan_contact_sheet(*plain.document, {caf, nandu2}, options, real_shot_camera(), {});
+  const std::vector<Srgb8Image> renders_plain = render_tiles(plan_plain, shipped, std::nullopt);
+  const Srgb8Image plain_sheet = compose_contact_sheet(plan_plain, renders_plain, std::nullopt);
+  REQUIRE(plain_sheet.width == sheet.width);
+  REQUIRE(plain_sheet.height == sheet.height);
+  const ContactTile& tile0 = plan.tiles[0];
+  const int strip_h = k_glyph_cell_height * plan.caption_scale;
+  bool extra_ink = false;
+  for (int y = tile0.caption_y; y < tile0.caption_y + strip_h && !extra_ink; ++y) {
+    for (int x = tile0.caption_x; x < tile0.caption_x + plan.tile_edge; ++x) {
+      const Rgba8 here = pixel_at(sheet, x, y);
+      const Rgba8 there = pixel_at(plain_sheet, x, y);
+      if (here == Rgba8{255, 255, 255, 255} && there != Rgba8{255, 255, 255, 255}) {
+        extra_ink = true;
+        break;
+      }
+    }
+  }
+  CHECK(extra_ink);
 }

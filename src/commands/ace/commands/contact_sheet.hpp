@@ -24,8 +24,10 @@
 //     between each tile rect and an independent render of the same camera, which any
 //     later filter, premultiply or blend breaks immediately.
 //
-// Captions come from an embedded ASCII bitmap glyph table (`src/commands/glyphs.cpp`,
-// D-sheet-4) because §8 makes `views`/`dock` the ONLY layer that sees ImGui and this
+// Captions come from an embedded bitmap glyph table (`src/commands/glyphs.cpp`,
+// D-sheet-4) covering ASCII and the printable Latin-1 Supplement (D-latin1-2), walked
+// as DECODED CODE POINTS (D-latin1-1) because a camera name is free text carrying UTF-8
+// bytes — because §8 makes `views`/`dock` the ONLY layer that sees ImGui and this
 // is a headless L1 job: there is no font atlas to borrow. Glyphs are 1-bit cells
 // scaled by integer pixel replication and written as opaque white over an opaque
 // black shadow — legible on light, dark, mid-grey and transparent backgrounds
@@ -42,6 +44,7 @@
 #include <arbc/base/transform.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -64,18 +67,39 @@ inline constexpr int k_glyph_cell_width = 6;
 inline constexpr int k_glyph_cell_height = 8;
 // U+0020 .. U+007E, the printable ASCII range.
 inline constexpr int k_glyph_count = 95;
-inline constexpr char k_glyph_first = ' ';
-inline constexpr char k_glyph_last = '~';
+inline constexpr char32_t k_glyph_first = U' ';
+inline constexpr char32_t k_glyph_last = U'~';
+// U+00A0 .. U+00FF, the printable Latin-1 Supplement (`editor.cameras.caption_latin1`,
+// A21 as amended). A SECOND contiguous block rather than one widened array: the
+// shipped ASCII bytes stay byte-identical, and `[0x7F, 0x9F]` — DEL and the C1
+// controls — stays deliberately UNMAPPED, so a control character still boxes.
+inline constexpr int k_latin1_glyph_count = 96;
+inline constexpr char32_t k_latin1_first = char32_t{0x00A0};
+inline constexpr char32_t k_latin1_last = char32_t{0x00FF};
 
-// The table itself, defined in `src/commands/glyphs.cpp` — one byte per scanline,
+// The tables themselves, defined in `src/commands/glyphs.cpp` — one byte per scanline,
 // the glyph's five columns in the LOW FIVE BITS, leftmost column = bit 4.
 extern const std::array<std::uint8_t, k_glyph_count * k_glyph_cell_height> k_glyph_table;
-// The hollow box drawn for any byte the table does not map. One box per unmapped
-// RUN, so a UTF-8 name does not explode into one box per byte.
+extern const std::array<std::uint8_t, k_latin1_glyph_count * k_glyph_cell_height>
+    k_latin1_glyph_table;
+// The hollow box drawn for any code point the tables do not map. One box per unmapped
+// RUN, so a CJK name does not explode into one box per character.
 extern const std::array<std::uint8_t, k_glyph_cell_height> k_fallback_glyph;
 
-// How many CELLS `text` draws as: one per mapped byte, and one per maximal run of
-// unmapped bytes. `"Café"` (5 UTF-8 bytes) is four cells — `C`, `a`, `f`, box.
+// The code point an ill-formed maximal subpart decodes to. Itself unmapped, so
+// malformed input joins the same fallback run as any other undrawable text.
+inline constexpr char32_t k_replacement_code_point = 0xFFFDU;
+
+// Decode the scalar at `pos` and advance `pos` past it. Total: an ill-formed sequence
+// yields `k_replacement_code_point` and consumes exactly one maximal subpart, so `pos`
+// strictly increases on every call, nothing is read past `text.size()`, and the walk
+// terminates on every input including truncated, overlong, surrogate-encoding and
+// out-of-range sequences (D-latin1-1).
+char32_t next_code_point(std::string_view text, std::size_t& pos);
+
+// How many CELLS `text` draws as. `text` is decoded as UTF-8: one cell per mapped code
+// point, and one per maximal run of unmapped ones. `"Café"` (5 UTF-8 bytes) is four
+// cells — `C`, `a`, `f`, `é` — while `"中文"` is one box (D-latin1-4).
 int text_cells(std::string_view text);
 
 // The pixel width `draw_text` occupies for `text` at `scale`. Zero for a
@@ -89,7 +113,8 @@ int text_set_bits(std::string_view text);
 
 // The longest prefix of `text` that fits `max_width` pixels at `scale`, with a
 // trailing `...` when anything was dropped (Constraint 4: a caption never leaves its
-// tile column). Empty when not even one cell fits.
+// tile column). Empty when not even one cell fits. The cut lands on a CODE-POINT
+// boundary, so valid UTF-8 in is valid UTF-8 out (D-latin1-5).
 std::string fit_text(std::string_view text, int max_width, int scale);
 
 // Draw `text` into `target` with its top-left cell at (x, y), integer-scaled by

@@ -497,11 +497,17 @@ TEST_CASE("contact_sheet e2e: the Export panel writes one tiled sheet, opt-in, w
     // --- (7) A camera named `contact-sheet` KEEPS the name; the sheet moves ------------
     // The rename rides the shipped L1 verb through the writer identity — the Inspector
     // ships no rename field yet (editor.panels.inspector), so there is no widget for it.
+    // A SECOND camera takes a UTF-8 name (`editor.cameras.caption_latin1`), so this run
+    // also drives an accented caption through the whole rename → writer → plan → compose
+    // → encode → file path; the recompose-and-byte-compare below is what pins it.
     const arbc::ObjectId first_id = cameras()[0].id;
-    canvas.apply_edit([&state, first_id] {
+    const arbc::ObjectId second_id = cameras()[1].id;
+    canvas.apply_edit([&state, first_id, second_id] {
       ace::scene::rename_camera(state.document(), state.registry(), first_id, "contact-sheet");
+      ace::scene::rename_camera(state.document(), state.registry(), second_id, "Café");
     });
-    IM_CHECK(pump_until(ctx, [&] { return cameras()[0].name == "contact-sheet"; }));
+    IM_CHECK(pump_until(
+        ctx, [&] { return cameras()[0].name == "contact-sheet" && cameras()[1].name == "Café"; }));
     ctx->ItemClick("export/###export_items"); // both outputs
     ctx->Yield(2);
     before = facts_of(state);
@@ -513,6 +519,26 @@ TEST_CASE("contact_sheet e2e: the Export panel writes one tiled sheet, opt-in, w
     IM_CHECK(collided->contact_sheet->path == sheet_2_path); // the sheet moved
     IM_CHECK(std::filesystem::exists(sheet_path));
     IM_CHECK(std::filesystem::exists(sheet_2_path));
+    // The accented caption survives the full path: recompose the moved sheet in-test
+    // through the SAME public seams and byte-compare the encode against the file on disk
+    // — no PNG decoder introduced, exactly as (6) does for the filled-background case.
+    const ace::commands::ContactSheetPlan accented_replay = sheet_plan(128, true);
+    IM_CHECK(accented_replay.tiles.size() == 3);
+    IM_CHECK(accented_replay.path == sheet_2_path);
+    IM_CHECK(accented_replay.tiles[1].caption == "Café"); // fits the tile, drawn in full
+    std::vector<ace::commands::Srgb8Image> accented_renders;
+    for (const ace::commands::ContactTile& tile : accented_replay.tiles) {
+      accented_renders.push_back(
+          (*e2e->render)(tile.render_camera, tile.width, tile.height, std::nullopt));
+    }
+    const ace::commands::Srgb8Image accented =
+        ace::commands::compose_contact_sheet(accented_replay, accented_renders, std::nullopt);
+    const std::vector<std::uint8_t> accented_encoded = ace::commands::encode_png(accented);
+    IM_CHECK(!accented_encoded.empty());
+    IM_CHECK(accented_encoded == read_bytes(sheet_2_path));
+    // And the FILENAME is still the sanitized ASCII form — `sanitize_stem` unchanged
+    // (D-latin1-8): the accented camera's file dropped the accent, it did not move here.
+    IM_CHECK(collided->items[1].path == e2e->exports_dir / "Caf.png");
     IM_CHECK(facts_of(state) == before);
 
     // --- (8) Both outputs off DISABLES Export -----------------------------------------

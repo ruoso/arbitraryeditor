@@ -391,8 +391,9 @@ task editor "Editor — host GUI over libarbc" {
     task caption_latin1 "Contact-sheet captions: Latin-1 camera names" {
       effort 0.5d
       allocate team
+      complete 100
       depends !contact_sheet
-      note "Decode the camera name from UTF-8 to code points inside commands, extend the embedded glyph table with the printable Latin-1 range (U+00A0–U+00FF), drive text_width/fit_text/draw_text off code points instead of bytes, and keep the fallback box for anything outside the table. Motivation: camera names are free text with no charset constraint (editor.cameras.rename_stable_id), and D3/D23's arbitrariness principle argues against silently boxing a name the user typed — 'Café' rendering as 'Caf□' is a visible defect. Tests: table-driven Catch2 cases over accented names and malformed UTF-8, plus one golden with an accented caption. Source-of-debt: tasks/refinements/editor/contact_sheet.md. Design: docs/00-design.md D23."
+      note "Decode the camera name from UTF-8 to code points inside commands, extend the embedded glyph table with the printable Latin-1 range (U+00A0–U+00FF), drive text_width/fit_text/draw_text off code points instead of bytes, and keep the fallback box for anything outside the table. Motivation: camera names are free text with no charset constraint (editor.cameras.rename_stable_id), and D3/D23's arbitrariness principle argues against silently boxing a name the user typed — 'Café' rendering as 'Caf□' is a visible defect. Tests: table-driven Catch2 cases over accented names and malformed UTF-8, plus one golden with an accented caption. Source-of-debt: tasks/refinements/editor/contact_sheet.md. Design: docs/00-design.md D23. Refinement: tasks/refinements/cameras/caption_latin1.md"
     }
     task export_destination_reseed "Re-seed Export destination when service is pointed at a new project" {
       effort 0.5d
