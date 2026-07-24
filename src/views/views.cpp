@@ -43,9 +43,18 @@ std::size_t body_index(dockmodel::ViewType type) { return static_cast<std::size_
 // the one `ace_shell_test` binary) starts clean rather than inheriting stale ticks.
 constexpr std::size_t k_destination_capacity = 1024;
 struct ExportPanel {
-  const commands::ExportService* owner = nullptr;
+  // `ExportService::instance()`, never the service's address: a destroyed service's
+  // address is free to be reused by the next one, and this panel is process-wide, so
+  // a pointer match would carry one service's ticks and destination into another's.
+  // 0 is "bound to nothing yet".
+  std::uint64_t owner = 0;
   std::vector<arbc::ObjectId> ticked;
   int scale = 1;
+  // D-sheet-5's two INDEPENDENT output modes. The defaults reproduce the shipped
+  // panel exactly: per-camera files on, contact sheet off.
+  bool write_items = true;
+  bool contact_sheet = false;
+  int tile_edge = commands::k_contact_tile_default;
   bool filled_background = false;
   // Opaque black: an opaque default is what makes "tick filled, run" produce a fully
   // opaque PNG without the panel guessing a colour for the user.
@@ -303,9 +312,9 @@ void draw_history(commands::AppState& state, std::string_view /*view_id*/) {
 void draw_export(commands::ExportService& service, commands::AppState& state,
                  std::string_view /*view_id*/) {
   ExportPanel& panel = g_export_panel;
-  if (panel.owner != &service) {
+  if (panel.owner != service.instance()) {
     panel = ExportPanel{};
-    panel.owner = &service;
+    panel.owner = service.instance();
   }
   if (!panel.destination_seeded) {
     // D16 / D-export-10: exports default into the project's own `exports/` — the
@@ -345,9 +354,24 @@ void draw_export(commands::ExportService& service, commands::AppState& state,
   }
 
   ImGui::Separator();
+  ImGui::TextUnformatted("Output");
+  // The two outputs D14 names, each toggled on its own (D-sheet-5): the sheet alone is
+  // D6's fast shot map, and asking for it must not cost N full-resolution renders.
+  ImGui::Checkbox("Per-camera files###export_items", &panel.write_items);
+  ImGui::Checkbox("Contact sheet###export_contact_sheet", &panel.contact_sheet);
+  // The sheet's ONE layout knob (D-sheet-3) — how big each thumbnail is, which is what
+  // governs legibility of both the image and its caption. Clamped here as well as at
+  // plan time so the widget shows the value the run will actually use.
+  ImGui::InputInt("Tile size###export_tile", &panel.tile_edge);
+  panel.tile_edge =
+      std::clamp(panel.tile_edge, commands::k_contact_tile_min, commands::k_contact_tile_max);
+
+  ImGui::Separator();
   ImGui::TextUnformatted("Options");
   // D14's two knobs. The multiplier is an integer >= 1 (Constraint 2): `out = N *
   // native`, genuinely composed at the higher resolution, never a post-hoc resample.
+  // It applies to the per-camera files ONLY — `scale` is defined against a camera's
+  // SET resolution, and the sheet has none (D-sheet-5).
   ImGui::InputInt("Scale (N x)###export_scale", &panel.scale);
   panel.scale = std::max(1, panel.scale);
   // Transparent is the DEFAULT (it preserves alpha); a filled background is a
@@ -376,14 +400,19 @@ void draw_export(commands::ExportService& service, commands::AppState& state,
   }
 
   // Refuse rather than guess: with nothing ticked (or no destination, or no bound
-  // derivation) Export is DISABLED, not silently interpreted as "everything".
+  // derivation, or BOTH outputs off) Export is DISABLED, not silently interpreted as
+  // "everything" or as "the default one".
   const bool can_run = !running && !panel.ticked.empty() && panel.destination[0] != '\0' &&
+                       (panel.write_items || panel.contact_sheet) &&
                        static_cast<bool>(service.shot_camera());
   ImGui::BeginDisabled(!can_run);
   if (ImGui::Button("Export###export_run")) {
     commands::ExportOptions options;
     options.destination = std::filesystem::path(panel.destination.data());
     options.scale = panel.scale;
+    options.write_items = panel.write_items;
+    options.contact_sheet = panel.contact_sheet;
+    options.tile_edge = panel.tile_edge;
     if (panel.filled_background) {
       options.background =
           commands::Rgba8{to_srgb8(panel.background[0]), to_srgb8(panel.background[1]),
@@ -423,6 +452,11 @@ void draw_export(commands::ExportService& service, commands::AppState& state,
       if (!item.message.empty()) {
         ImGui::TextWrapped("%s", item.message.c_str());
       }
+    }
+    // The sheet's own verdict (D-sheet-5): a refusal that never reached the panel
+    // would be exactly the silent no-op D23 forbids.
+    if (report->contact_sheet && !report->contact_sheet->message.empty()) {
+      ImGui::TextWrapped("%s", report->contact_sheet->message.c_str());
     }
     // D-export-8: batch coherence is REPORTED, not enforced — an edit that landed
     // mid-batch is stated rather than silently mixed in.

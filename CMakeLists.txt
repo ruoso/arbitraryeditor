@@ -250,6 +250,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/new_shot_from_view_test.cpp
                          tests/history_publish_test.cpp
                          tests/export_test.cpp
+                         tests/contact_sheet_test.cpp
                          tests/writer_thread_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
@@ -287,6 +288,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/focused_canvas_indicator_e2e_test.cpp
                               tests/accent_palette_test.cpp
                               tests/export_e2e_test.cpp
+                              tests/contact_sheet_e2e_test.cpp
                               tests/view_id_natural_order_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)

@@ -6,6 +6,7 @@
 #include <arbc/runtime/document.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -38,21 +39,15 @@ bool is_reserved_device_name(const std::string& stem) {
          std::end(k_reserved_names);
 }
 
-// Take the next free variant of `base` within one plan: `base`, then `base-2`,
-// `base-3`, ... The FIRST occurrence is never renumbered (D-export-6): a user whose
-// camera names are already distinct — i.e. every normal export — gets exactly the
-// filenames the .tji decided, and only a genuine within-batch duplicate is suffixed.
-std::string take_unique_stem(const std::string& base, std::vector<std::string>& used) {
-  std::string candidate = base;
-  for (int n = 2; std::find(used.begin(), used.end(), candidate) != used.end(); ++n) {
-    candidate = base + "-" + std::to_string(n);
-  }
-  used.push_back(candidate);
-  return candidate;
-}
-
 // Whether every pixel is fully opaque — the observable the filled-background option
 // is asserted through, without introducing a PNG decoder just for tests.
+// Handed out once per constructed service, never reused (see `ExportService::instance`).
+// Atomic because nothing forbids two services being built on different threads.
+std::uint64_t next_instance() {
+  static std::atomic<std::uint64_t> counter{0};
+  return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
 bool all_opaque(const Srgb8Image& image) {
   if (image.pixels.empty()) {
     return false;
@@ -66,6 +61,15 @@ bool all_opaque(const Srgb8Image& image) {
 }
 
 } // namespace
+
+std::string take_unique_stem(const std::string& base, std::vector<std::string>& used) {
+  std::string candidate = base;
+  for (int n = 2; std::find(used.begin(), used.end(), candidate) != used.end(); ++n) {
+    candidate = base + "-" + std::to_string(n);
+  }
+  used.push_back(candidate);
+  return candidate;
+}
 
 std::string sanitize_stem(std::string_view name, std::size_t index) {
   std::string out;
@@ -120,11 +124,21 @@ ExportPlan plan_export(const arbc::Document& document, const std::vector<arbc::O
     plan.reason = "No render-camera derivation installed.";
     return plan;
   }
+  // Both outputs off is not "give me the default one" (D23 again, D-sheet-5): the
+  // panel disables Export in this state, and a caller that asks anyway is told why.
+  if (!options.write_items && !options.contact_sheet) {
+    plan.reason = "Nothing to write — tick per-camera files, the contact sheet, or both.";
+    return plan;
+  }
 
   const int scale = std::max(1, options.scale);
   // Layer order, over the lock-free `pin()` reader seam — a read, so nothing is
   // posted to the writer (Constraint 7).
-  const std::vector<scene::Camera> cameras = scene::cameras(document);
+  // A sheet-only run plans NO batch items — an empty item list is what makes the
+  // fast path fast, and it is also what leaves the `contact-sheet` stem free
+  // (D-sheet-6). The sheet phase reads its own camera list below.
+  const std::vector<scene::Camera> cameras =
+      options.write_items ? scene::cameras(document) : std::vector<scene::Camera>{};
   std::vector<std::string> used;
   for (const scene::Camera& camera : cameras) {
     if (std::find(selected.begin(), selected.end(), camera.id) == selected.end()) {
@@ -167,8 +181,14 @@ ExportPlan plan_export(const arbc::Document& document, const std::vector<arbc::O
     plan.items.push_back(std::move(item));
   }
 
-  if (plan.items.empty()) {
-    plan.reason = "None of the selected cameras still exist.";
+  // The second phase (D-sheet-5), seeded with the stems the batch already took.
+  if (options.contact_sheet) {
+    plan.contact_sheet = plan_contact_sheet(document, selected, options, shot_camera, used);
+  }
+
+  if (plan.items.empty() && (!plan.contact_sheet || plan.contact_sheet->tiles.empty())) {
+    plan.reason = plan.contact_sheet ? plan.contact_sheet->reason
+                                     : std::string("None of the selected cameras still exist.");
   }
   return plan;
 }
@@ -178,13 +198,19 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
   ExportReport report;
   report.reason = plan.reason;
 
+  // Progress counts every RENDER across both phases (Constraint 11 / D-sheet-5): the
+  // sheet is a second phase of one job, not a second job, so it shares this readout
+  // rather than resetting it.
+  const std::size_t tile_total = plan.contact_sheet ? plan.contact_sheet->tiles.size() : 0;
+  const std::size_t total = plan.items.size() + tile_total;
+
   const auto publish = [&](std::size_t done, std::string_view current, ExportState state) {
     if (!runner.publish) {
       return;
     }
     ExportProgress progress;
     progress.done = done;
-    progress.total = plan.items.size();
+    progress.total = total;
     progress.current_name = std::string(current);
     progress.state = state;
     runner.publish(progress);
@@ -195,7 +221,10 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
     report.end_revision = report.start_revision;
   }
 
-  if (plan.items.empty() || !runner.render || runner.filesystem == nullptr) {
+  // A refused sheet is still WORK: its reason has to reach the report, so a run that
+  // holds nothing but a refusal is not "nothing to do" (D-sheet-7).
+  const bool sheet_refusal = plan.contact_sheet && plan.contact_sheet->refused;
+  if ((total == 0 && !sheet_refusal) || !runner.render || runner.filesystem == nullptr) {
     if (report.reason.empty()) {
       report.reason = runner.render == nullptr       ? "No renderer installed."
                       : runner.filesystem == nullptr ? "No filesystem installed."
@@ -216,6 +245,7 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
   }
 
   bool cancelled = false;
+  std::size_t done = 0;
   for (const ExportItem& item : plan.items) {
     // Cancellation is honest at ITEM granularity (Constraint 10): `render_offline`
     // exposes no cancellation hook, so a started item always finishes and its file is
@@ -224,7 +254,7 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
       cancelled = true;
       break;
     }
-    publish(report.items.size(), item.camera_name, ExportState::Running);
+    publish(done, item.camera_name, ExportState::Running);
 
     ExportItemResult result;
     result.camera_name = item.camera_name;
@@ -268,6 +298,77 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
       }
     }
     report.items.push_back(std::move(result));
+    ++done;
+  }
+
+  // ---- phase two: the contact sheet (D-sheet-5 / A21) ------------------------
+  if (plan.contact_sheet && !cancelled) {
+    const ContactSheetPlan& sheet = *plan.contact_sheet;
+    ExportItemResult result;
+    result.camera_name = std::string(k_contact_sheet_stem);
+    result.path = sheet.path;
+    result.width = sheet.width;
+    result.height = sheet.height;
+
+    if (sheet.refused || sheet.tiles.empty()) {
+      // Refused as a VALUE, with the requested dimensions already in the reason — the
+      // batch phase above still ran and still wrote its files (D-sheet-7).
+      result.refused = true;
+      result.message = sheet.reason;
+      ++report.refused;
+      report.contact_sheet = std::move(result);
+    } else {
+      std::vector<Srgb8Image> renders;
+      renders.reserve(sheet.tiles.size());
+      for (const ContactTile& tile : sheet.tiles) {
+        // Cancel is checked BETWEEN tiles (Constraint 10, same granularity as the
+        // batch): a started render always finishes, but a cancelled sheet is
+        // abandoned before it can reach disk.
+        if (runner.cancel != nullptr && runner.cancel->load(std::memory_order_acquire)) {
+          cancelled = true;
+          break;
+        }
+        publish(done, tile.camera_name, ExportState::Running);
+        // D-sheet-1: one call to the SAME injected renderer the batch uses, at the
+        // tile's own fitted size. No resample, no filter, no second code path.
+        renders.push_back(
+            runner.render(tile.render_camera, tile.width, tile.height, options.background));
+        ++done;
+      }
+      // A half-composed grid is a byte-valid PNG indistinguishable from a complete
+      // one — the one failure mode the user cannot detect — so a cancelled sheet is
+      // not composed, not encoded and not written, and claims no result (D-sheet-7).
+      if (!cancelled) {
+        const Srgb8Image image = compose_contact_sheet(sheet, renders, options.background);
+        const std::size_t expected =
+            static_cast<std::size_t>(sheet.width) * static_cast<std::size_t>(sheet.height) * 4;
+        if (image.width != sheet.width || image.height != sheet.height ||
+            image.pixels.size() != expected) {
+          result.message = "Contact sheet composition failed.";
+          ++report.failed;
+        } else {
+          result.opaque = all_opaque(image);
+          const std::vector<std::uint8_t> png = encode_png(image);
+          if (png.empty()) {
+            result.message = "PNG encode failed for the contact sheet.";
+            ++report.failed;
+          } else {
+            const std::error_code ec = runner.filesystem->write_file(
+                sheet.path,
+                std::string_view(reinterpret_cast<const char*>(png.data()), png.size()));
+            if (ec) {
+              result.message = "Write failed for the contact sheet: " + ec.message();
+              ++report.failed;
+            } else {
+              result.written = true;
+              result.bytes = png.size();
+              ++report.written;
+            }
+          }
+        }
+        report.contact_sheet = std::move(result);
+      }
+    }
   }
 
   report.state = cancelled ? ExportState::Cancelled : ExportState::Finished;
@@ -275,14 +376,14 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
     report.end_revision = runner.revision();
     report.document_changed_during_export = report.end_revision != report.start_revision;
   }
-  publish(report.items.size(), {}, report.state);
+  publish(done, {}, report.state);
   return report;
 }
 
 // ---- the async job (D-export-7) --------------------------------------------
 
 ExportService::ExportService(platform::Threads& threads, const platform::FileSystem& filesystem)
-    : threads_(threads), filesystem_(filesystem),
+    : instance_(next_instance()), threads_(threads), filesystem_(filesystem),
       progress_(std::make_shared<const ExportProgress>()) {}
 
 ExportService::~ExportService() {
@@ -327,8 +428,12 @@ bool ExportService::start(ExportPlan plan, ExportOptions options) {
   options_ = std::move(options);
   cancel_.store(false, std::memory_order_release);
   running_.store(true, std::memory_order_release);
+  // `total` spans BOTH phases from the first published snapshot, so the panel never
+  // shows a total that grows halfway through the run (Constraint 11).
+  const std::size_t total =
+      plan_.items.size() + (plan_.contact_sheet ? plan_.contact_sheet->tiles.size() : 0);
   progress_.store(std::make_shared<const ExportProgress>(
-                      ExportProgress{0, plan_.items.size(), std::string(), ExportState::Running}),
+                      ExportProgress{0, total, std::string(), ExportState::Running}),
                   std::memory_order_release);
 
   ExportRunner runner;

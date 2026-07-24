@@ -28,6 +28,7 @@
 // leaves unposted.
 
 #include <ace/base/image.hpp>
+#include <ace/commands/contact_sheet.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/threads.hpp>
 #include <ace/scene/camera.hpp>
@@ -86,6 +87,20 @@ struct ExportOptions {
   // alpha, a filled background is a deliberate opt-in). On the transparent path the
   // renderer is byte-identical to the shipped `render_document_srgb8`.
   std::optional<Rgba8> background;
+  // The two output modes, INDEPENDENTLY controlled (D-sheet-5). The defaults are the
+  // shipped behaviour exactly — one PNG per ticked camera, no sheet — so every case
+  // written against the batch keeps passing unmodified. With BOTH off the run is
+  // refused with a reason (D23) rather than reinterpreted.
+  bool write_items = true;
+  bool contact_sheet = false;
+  // The contact sheet's square tile box, in pixels: the ONE layout knob (D-sheet-3).
+  // Every other number on the sheet is a pure function of `(N, tile_edge)`. Clamped
+  // to [k_contact_tile_min, k_contact_tile_max] at plan time.
+  //
+  // `scale` deliberately does NOT reach the sheet: D14 defines the N x multiplier as
+  // "render this camera above its SET RESOLUTION" and the sheet has no camera
+  // resolution, so letting one control mean two things is how knobs become folklore.
+  int tile_edge = k_contact_tile_default;
 };
 
 // One planned output. A refused item still occupies its slot (Constraint 3: the
@@ -107,6 +122,11 @@ struct ExportItem {
 
 struct ExportPlan {
   std::vector<ExportItem> items;
+  // The second PHASE (D-sheet-5, A21), present exactly when `options.contact_sheet`
+  // asked for one — including when it is refused, since a refusal is a value that
+  // still has to reach the report. `items` is empty when `write_items` is off, so a
+  // sheet-only run is an empty batch plus a sheet, not a special case.
+  std::optional<ContactSheetPlan> contact_sheet;
   // Why the plan is empty, when it is (no cameras ticked, no destination). Refuse
   // rather than guess — `run_export` over an empty plan writes nothing.
   std::string reason;
@@ -125,8 +145,11 @@ enum class ExportState {
 // worker publishes by pointer and the UI thread `load()`s once per frame, so a frame's
 // readout is always one coherent generation — no mutex, no half-written struct.
 struct ExportProgress {
-  std::size_t done = 0;  // items finished (written, failed or refused)
-  std::size_t total = 0; // items in the plan
+  std::size_t done = 0; // renders finished (written, failed or refused)
+  // Every render the run will perform, across BOTH phases: the batch's items plus the
+  // contact sheet's tiles (Constraint 11). Fixed before the first snapshot, so the
+  // readout never grows a denominator halfway through.
+  std::size_t total = 0;
   std::string current_name;
   ExportState state = ExportState::Idle;
 };
@@ -149,6 +172,11 @@ struct ExportItemResult {
 
 struct ExportReport {
   std::vector<ExportItemResult> items;
+  // The sheet's own slot (D-sheet-5). Set when the sheet phase reached a verdict —
+  // written, failed or refused — and left unset when the run never got that far (no
+  // sheet requested, or cancelled mid-compose, where claiming a result would assert
+  // an artifact that is deliberately NOT on disk, D-sheet-7).
+  std::optional<ExportItemResult> contact_sheet;
   std::size_t written = 0;
   std::size_t failed = 0;
   std::size_t refused = 0;
@@ -200,6 +228,17 @@ using PickDirectoryFn =
 // platform behaviour.
 std::string sanitize_stem(std::string_view name, std::size_t index);
 
+// Take the next free variant of `base` within one plan: `base`, then `base-2`,
+// `base-3`, ... appending the taken one to `used`. The FIRST occurrence is never
+// renumbered (D-export-6), so a user whose camera names are already distinct — i.e.
+// every normal export — gets exactly the filenames the .tji decided.
+//
+// Public because the contact sheet's own stem is drawn from the SAME pool, seeded
+// with the batch plan's stems, which is what makes a camera named `contact-sheet`
+// keep `contact-sheet.png` while the sheet moves to `contact-sheet-2.png`
+// (Constraint 12 / D-sheet-6).
+std::string take_unique_stem(const std::string& base, std::vector<std::string>& used);
+
 // Build the plan for `selected` cameras (D-export-6). Items come out in
 // `scene::cameras()` order — layer order — one per selected camera that still
 // exists, with distinct paths all directly under `options.destination`. Within one
@@ -213,6 +252,21 @@ std::string sanitize_stem(std::string_view name, std::size_t index);
 ExportPlan plan_export(const arbc::Document& document, const std::vector<arbc::ObjectId>& selected,
                        const ExportOptions& options, const ShotCameraFn& shot_camera);
 
+// Build the contact sheet's plan over the TICKED set (Constraint 7) — grid geometry,
+// per-tile aspect fit, per-tile render camera from the injected derivation at the
+// FITTED size, the fitted caption, and the destination path drawn from the same stem
+// pool as the batch (`taken_stems` seeds it, D-sheet-6). Declared here rather than in
+// <ace/commands/contact_sheet.hpp> because it needs `ExportOptions` and
+// `ShotCameraFn`; defined in `src/commands/contact_sheet.cpp` beside the layout.
+//
+// An empty selection, an unresolved destination, an unbound derivation, cameras that
+// no longer exist, or a sheet over `k_max_export_bytes` all yield a plan with no
+// tiles, `refused == true` and a `reason` — never a guess and never a throw.
+ContactSheetPlan plan_contact_sheet(const arbc::Document& document,
+                                    const std::vector<arbc::ObjectId>& selected,
+                                    const ExportOptions& options, const ShotCameraFn& shot_camera,
+                                    const std::vector<std::string>& taken_stems);
+
 // Encode a straight-alpha sRGB8 RGBA image as an 8-bit RGBA PNG (D-export-3).
 // Degenerate input — a non-positive dimension, or `pixels.size() != w*h*4` — yields
 // an EMPTY vector rather than a malformed file. Pure; allocates only the result.
@@ -223,14 +277,16 @@ struct ExportRunner {
   RenderFn render;                                  // required
   const platform::FileSystem* filesystem = nullptr; // required
   ProgressFn publish;                               // optional (A18)
-  // Checked BETWEEN items (Constraint 10): a single `render_offline` call is not
-  // interruptible and must not be pretended otherwise.
+  // Checked BETWEEN items, and between contact-sheet TILES (Constraint 10): a single
+  // `render_offline` call is not interruptible and must not be pretended otherwise.
   const std::atomic<bool>* cancel = nullptr;
   RevisionFn revision; // optional (D-export-8)
 };
 
 // Run `plan`: for each item, render -> encode -> write, publishing a fresh progress
-// snapshot before and after. Never throws; every outcome is a value.
+// snapshot before and after; then, when the plan carries one, the contact sheet —
+// render each tile -> compose -> encode -> write, into the same progress readout, the
+// same cancel flag and the same report. Never throws; every outcome is a value.
 ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
                         const ExportRunner& runner);
 
@@ -252,6 +308,16 @@ public:
 
   ExportService(const ExportService&) = delete;
   ExportService& operator=(const ExportService&) = delete;
+
+  // A never-repeating identity for this service. The Export panel's own state (the
+  // ticks, the destination, the output modes) is file-static — one panel per process —
+  // so it has to recognise "a different service is drawing me now" and reset. The
+  // service ADDRESS cannot answer that: once a service is destroyed, the next one is
+  // free to land on the same bytes (in the e2e binary, each test builds its own on the
+  // stack), and a pointer comparison then reports "same panel" while the ticked ids,
+  // the destination and the project underneath have all changed. A monotonic counter
+  // is immune to that reuse.
+  std::uint64_t instance() const { return instance_; }
 
   // Installed once by L4 at bootstrap.
   void set_renderer(RenderFn render);
@@ -291,6 +357,7 @@ public:
   void join();
 
 private:
+  const std::uint64_t instance_;
   platform::Threads& threads_;
   const platform::FileSystem& filesystem_;
   RenderFn render_;

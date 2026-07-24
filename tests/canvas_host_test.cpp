@@ -1728,3 +1728,101 @@ TEST_CASE("canvas_host: an export job renders the live document clean against th
   // start/end revision comparison, never a guess about what the user was doing.
   CHECK(report->document_changed_during_export == (report->start_revision != report->end_revision));
 }
+
+TEST_CASE("canvas_host: the contact-sheet phase renders the live document clean against the "
+          "writer and the render loop (cameras.contact_sheet TSan anchor)") {
+  // editor.cameras.contact_sheet adds NO thread — it lengthens the export job with a
+  // second phase — so its threading coverage is an extension of the anchor above
+  // rather than a new lane. `write_items = false` makes EVERY render in this run a
+  // TILE render, so what is under TSan here is exclusively the new phase: N lock-free
+  // reads of the live document while a real `WriterThread` commits `add_camera` /
+  // `rename_camera` edits from the UI thread and a real `CanvasHost` composites.
+  //
+  // This is the direct test of Constraint 13's pure-reader claim across the sheet: the
+  // sheet phase opens no transaction, adds no journal entry and posts NOTHING to the
+  // writer — if it did, this case would deadlock or race rather than merely pass.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem filesystem;
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  auto doc = build_on_writer(writer, [] { return build_raster_doc(); });
+  std::vector<arbc::ObjectId> camera_ids;
+  writer.submit_sync([&] {
+    for (int i = 0; i < 6; ++i) {
+      camera_ids.push_back(ace::scene::add_camera(*doc, registry, "tile " + std::to_string(i),
+                                                  ace::scene::Resolution{24, 24},
+                                                  arbc::Affine::translation(4.0 * i, 4.0)));
+    }
+  });
+  REQUIRE(camera_ids.size() == 6);
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+  host.add("canvas#1", *doc, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  ace::commands::ExportService service(threads, filesystem);
+  service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
+  service.set_revision([&doc] { return doc->pin()->revision(); });
+  service.set_renderer([&doc](const arbc::Affine& camera, int width, int height,
+                              const std::optional<ace::commands::Rgba8>& background) {
+    if (!background) {
+      return ace::render::render_document_srgb8(*doc, width, height, camera);
+    }
+    return ace::render::render_document_srgb8_over(
+        *doc, width, height, camera, {background->r, background->g, background->b, background->a});
+  });
+
+  ace::commands::ExportOptions options;
+  options.destination = scratch.root / "exports";
+  options.write_items = false; // sheet ONLY — every render below is a tile render
+  options.contact_sheet = true;
+  options.tile_edge = 64;
+  const ace::commands::ExportPlan plan =
+      ace::commands::plan_export(*doc, camera_ids, options, service.shot_camera());
+  REQUIRE(plan.items.empty());
+  REQUIRE(plan.contact_sheet.has_value());
+  REQUIRE(plan.contact_sheet->tiles.size() == 6);
+  REQUIRE(service.start(plan, options));
+
+  // UI-thread edits landing WHILE the sheet renders: a rename (a content edit) and a
+  // fresh mint (a structural add), both through the writer identity.
+  for (int i = 0; i < 24; ++i) {
+    apply_edit(writer, host, [&] {
+      ace::scene::rename_camera(*doc, registry, camera_ids[i % camera_ids.size()],
+                                "tile " + std::to_string(i));
+      if (i % 8 == 0) {
+        ace::scene::add_camera(*doc, registry, "extra " + std::to_string(i),
+                               ace::scene::Resolution{16, 16}, arbc::Affine::identity());
+      }
+    });
+  }
+
+  service.join();
+  host.stop();
+  handle->join();
+
+  const std::shared_ptr<const ace::commands::ExportReport> report = service.report();
+  REQUIRE(report != nullptr);
+  CHECK(report->state == ace::commands::ExportState::Finished);
+  CHECK(report->items.empty()); // the batch phase planned nothing, so it wrote nothing
+  CHECK(report->written == 1);
+  REQUIRE(report->contact_sheet.has_value());
+  REQUIRE(report->contact_sheet->written);
+  // One real, signature-valid PNG on disk — a racy read would show up as a short or
+  // malformed one.
+  const std::vector<std::uint8_t> bytes = ace_test::read_file_bytes(report->contact_sheet->path);
+  REQUIRE(bytes.size() > 8);
+  static constexpr std::array<std::uint8_t, 8> k_sig{0x89, 0x50, 0x4E, 0x47,
+                                                     0x0D, 0x0A, 0x1A, 0x0A};
+  CHECK(std::equal(k_sig.begin(), k_sig.end(), bytes.begin()));
+  CHECK(report->contact_sheet->width == plan.contact_sheet->width);
+  CHECK(report->contact_sheet->height == plan.contact_sheet->height);
+}

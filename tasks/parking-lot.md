@@ -266,6 +266,14 @@ a 566 s failure).
 
 ---
 
+## Bundled font for offline text rendering (captions, watermarks, slates)
+
+**Source:** `tasks/refinements/editor/contact_sheet.md` (cameras.contact_sheet, 2026-07-23) — Open questions / D-sheet-4.
+
+`docs/01-architecture.md:247` reserves an `assets/ icons, fonts (bundled)` slot that nothing has ever filled. `editor.cameras.contact_sheet` chose an embedded 5×7 constexpr ASCII bitmap table (D-sheet-4) as the defensible interim — no new external dependency, no runtime asset path, legible on any background via white+black-shadow pair. The follow-up `editor.cameras.caption_latin1` extends the table to the Latin-1 printable range. Whether the editor should eventually ship a real bundled font for offline text rendering — captions, watermarks, slates — is a new-external-dependency and product-scope call that D-sheet-4 deliberately did not make: a TrueType rasterizer (stb_truetype, FreeType, or similar) would be a second vendored library, and its antialiased grey edges are an alpha blend that conflicts with D-sheet-2's copy-only invariant unless the pipeline is widened to compositing. This is a human design judgment; `editor.cameras.caption_latin1` extends the existing table decision without presuming the answer.
+
+---
+
 ## render_offline version-addressed offline render (exact batch-export coherence)
 
 **Source:** `tasks/refinements/editor.cameras/export.md` (cameras.export, 2026-07-23) — Open questions / D-export-8.
