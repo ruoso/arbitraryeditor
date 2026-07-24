@@ -130,6 +130,21 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
 // creating?", and it let a populated non-project directory be silently half-adopted. Errors
 // are values (the `SaveError` publish faults ride through unchanged); never throws.
 //
+// A FAILED Save As LEAVES NOTHING BEHIND (A26). The publish is what materializes
+// `target_root` (`save_project`'s `make_directories` of `assets/`), so both post-guard failure
+// branches — the publish itself and the trailing `.gitignore` write — remove the whole target
+// tree via `platform::FileSystem::remove_tree` before returning. The licence to delete is the
+// existence guard four lines above: it returned false, so every byte under `target_root` was
+// written by this call. Without the rollback that guard would refuse the identical retry
+// forever, which is the loop A25's honest message invites the user into. A failed rollback
+// changes nothing about the returned error — `SaveError` means *why the save failed*, and
+// surviving debris is exactly the pre-A26 behaviour. The REFUSAL path deletes nothing (the
+// target is somebody else's), and neither does `save_project`, which publishes into a live
+// root it did not create. One accepted race: a third party creating `target_root` between the
+// guard and the publish would have its directory removed by the rollback — the same
+// unclosable TOCTOU window the guard itself already has, for a target the user typed seconds
+// earlier in a single-project-per-process desktop tool.
+//
 // Save As takes NO tile store, and that is a correctness rule rather than an oversight (A23
 // clause 2, with the full argument at the `save_project` call in `save.cpp`): the raster codec
 // resolves a memo HIT entirely inside the memo and never hands the tile to the `AssetSink`, so

@@ -44,6 +44,14 @@ public:
   // file — never a truncated one. Save is a publish step, not a crash race.
   virtual std::error_code atomic_replace(const std::filesystem::path& path,
                                          std::string_view contents) const = 0;
+
+  // Recursively remove `path` and everything beneath it. Idempotent: an absent
+  // path is success, mirroring `make_directories`. Returns the typed error
+  // (never throws) on a partial or failed removal, and refuses an empty path
+  // with `std::errc::invalid_argument`. This is the seam's only destructive
+  // faculty (A26) — the caller owns the policy question of what it is entitled
+  // to delete.
+  virtual std::error_code remove_tree(const std::filesystem::path& path) const = 0;
 };
 
 // Native impl over <filesystem> / <fstream>.
@@ -58,6 +66,7 @@ public:
   std::error_code make_directories(const std::filesystem::path& dir) const override;
   std::error_code atomic_replace(const std::filesystem::path& path,
                                  std::string_view contents) const override;
+  std::error_code remove_tree(const std::filesystem::path& path) const override;
 };
 
 } // namespace ace::platform

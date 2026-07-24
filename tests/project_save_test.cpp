@@ -245,6 +245,50 @@ TEST_CASE("commands::save_project surfaces a publish failure and leaves the sess
   CHECK(state.is_dirty()); // a failed publish never marks the session clean
 }
 
+TEST_CASE("save_project leaves the project directory intact when the publish fails") {
+  // The counterweight to editor.project.save_as_rollback (A26 / Constraint 4). `save_project_as`
+  // removes its target on a failed publish because D27's guard proved the target did not exist
+  // and therefore holds nothing but this call's own bytes. Plain Save has NO such proof: it
+  // publishes into the session's OWN live root, which it did not create and whose contents are
+  // the user's actual project. A future refactor that hoists the rollback down into
+  // `save_project` would silently become data loss, and this test is what stops it.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "live-project";
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  ace::project::OpenedProject& opened = *created;
+  build_saveable_probe(*opened.document);
+  const arbc::Registry registry = builtin_registry();
+
+  // A first, clean save so the root really holds a project worth not deleting.
+  REQUIRE(ace::project::save_project(fs, opened.layout, *opened.document, registry).has_value());
+  const auto before = fs.read_file(opened.layout.canonical);
+  REQUIRE(before.has_value());
+  REQUIRE_FALSE(before.value().empty());
+
+  // Occupy `atomic_replace`'s stable staging sibling with a directory so the temp write — and
+  // hence the publish — faults after a clean serialize (the platform_test trick).
+  std::filesystem::path temp = opened.layout.canonical;
+  temp += ".tmp";
+  std::error_code ec;
+  std::filesystem::create_directory(temp, ec);
+  REQUIRE_FALSE(static_cast<bool>(ec));
+
+  const auto saved = ace::project::save_project(fs, opened.layout, *opened.document, registry);
+  REQUIRE_FALSE(saved.has_value());
+  CHECK(saved.error() == SaveError::IoError);
+
+  // NOTHING was removed: the root, the previously published canonical (whole, byte-identical)
+  // and `assets/` all survive, as does the live workspace.
+  CHECK(fs.exists(root));
+  CHECK(fs.exists(opened.layout.assets_dir));
+  CHECK(fs.exists(opened.layout.workspace_dir));
+  const auto after = fs.read_file(opened.layout.canonical);
+  REQUIRE(after.has_value());
+  CHECK(after.value() == before.value());
+}
+
 TEST_CASE("a fresh create_project session is dirty until the first save") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;

@@ -99,6 +99,13 @@ public:
     return native_.atomic_replace(path, contents);
   }
 
+  // A plain forwarder: `create_project`'s rollback is deferred to
+  // editor.project.create_rollback, so this suite provokes no removal — the override exists
+  // because the A26 primitive is pure (the compiler, not grep, re-signs every double).
+  std::error_code remove_tree(const std::filesystem::path& path) const override {
+    return native_.remove_tree(path);
+  }
+
 private:
   ace::platform::NativeFileSystem native_;
 };

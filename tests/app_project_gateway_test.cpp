@@ -54,11 +54,13 @@ struct ScratchDir {
 class RecordingLauncher final : public ace::platform::ProcessLauncher {
 public:
   mutable bool invoked = false;
+  mutable int spawns = 0; // how MANY, not just whether — a retry must not double-launch
   mutable std::filesystem::path exe;
   mutable std::vector<std::string> args;
   std::error_code spawn_detached(const std::filesystem::path& executable,
                                  const std::vector<std::string>& a) const override {
     invoked = true;
+    ++spawns;
     exe = executable;
     args = a;
     return {};
@@ -87,6 +89,10 @@ public:
 class FaultyFileSystem final : public ace::platform::FileSystem {
 public:
   bool fail_make_directories = false;
+  // Path-scoped, the tests/save_as_test.cpp:135 shape: faulting the copy's canonical publish
+  // (rather than its `make_directories`) is the only way to fail AFTER the target root has been
+  // materialized, which is the state A26's rollback exists to clean up.
+  std::filesystem::path fail_atomic_replace_at;
 
   bool exists(const std::filesystem::path& path) const override { return native_.exists(path); }
 
@@ -113,7 +119,16 @@ public:
 
   std::error_code atomic_replace(const std::filesystem::path& path,
                                  std::string_view contents) const override {
+    if (!fail_atomic_replace_at.empty() && path == fail_atomic_replace_at) {
+      return std::make_error_code(std::errc::io_error);
+    }
     return native_.atomic_replace(path, contents);
+  }
+
+  // Forwarded to the native impl, deliberately never faulted: this suite drives the A26
+  // rollback for real, so the retry case below observes the actual removal.
+  std::error_code remove_tree(const std::filesystem::path& path) const override {
+    return native_.remove_tree(path);
   }
 
 private:
@@ -753,6 +768,53 @@ TEST_CASE("AppProjectGateway::save_as reports publish_failed when the copy canno
   CHECK_FALSE(fs.exists(ace::project::project_layout(scratch.root / "Copy").canonical));
 
   // The current session is untouched on the fault path too (D-save_as-2).
+  CHECK(gateway.is_dirty());
+  CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
+}
+
+TEST_CASE("AppProjectGateway::save_as retried with the same name after a publish fault publishes "
+          "cleanly",
+          "[app_project_gateway]") {
+  // The user-visible payoff of editor.project.save_as_rollback (A26), driven at the level A25
+  // defined the outcome vocabulary on. Before the rollback this sequence was a trap: the first
+  // call reported `publish_failed` — "Could not save a copy there.", a message that invites a
+  // retry — while leaving `<parent>/Copy/` on disk, so the retry hit D27's existing-target
+  // guard and came back `refused_target` — "Enter a project name that does not already exist
+  // here." — forever, for a directory the user never created and was never told about.
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // The fault is armed on the canonical publish of the CANONICALIZED target, mirroring the one
+  // canonicalization `commands::save_project_as` performs — so `assets/` (and therefore the
+  // target root) is really created before the failure, which is the state the retry used to
+  // trip over. Armed after the session's own bootstrap, so exactly the copy's publish faults.
+  const std::filesystem::path target = std::filesystem::weakly_canonical(scratch.root / "Copy");
+  const auto target_layout = ace::project::project_layout(target);
+  fs.fail_atomic_replace_at = target_layout.canonical;
+
+  CHECK(gateway.save_as(scratch.root, "Copy") == ProjectEntryOutcome::publish_failed);
+  CHECK_FALSE(launcher.invoked);
+  CHECK_FALSE(fs.exists(target)); // rolled back — the precondition the retry depends on
+
+  // Clear the fault (the user frees some disk) and retype nothing: the SAME name.
+  fs.fail_atomic_replace_at.clear();
+  CHECK(gateway.save_as(scratch.root, "Copy") == ProjectEntryOutcome::succeeded);
+
+  CHECK(fs.exists(target_layout.canonical));
+  CHECK(fs.exists(target_layout.assets_dir));
+  CHECK(fs.exists(target_layout.gitignore));
+  // Exactly ONE spawn across both calls — the failed attempt execs nothing, the retry execs once.
+  CHECK(launcher.spawns == 1);
+  REQUIRE(launcher.args.size() == 1);
+  CHECK(launcher.args.front() == target.string());
+
+  // A26 changes state, never words: the outcome vocabulary is byte-identical, and the current
+  // session is untouched on both calls (D-save_as-2).
   CHECK(gateway.is_dirty());
   CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
 }

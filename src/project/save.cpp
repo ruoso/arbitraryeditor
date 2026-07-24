@@ -60,6 +60,17 @@ std::string uri_to_path(std::string_view resolved_uri) {
   return std::string(resolved_uri);
 }
 
+// The D27 guard above returned false for `fs.exists(target_root)` immediately
+// before the publish, so every byte under `target_root` was written by THIS
+// call — removing the root can destroy nothing but our own debris (A26). The
+// removal's own error is DISCARDED on purpose: the caller's actionable fact is
+// why the SAVE failed, and a failed cleanup only restores the behaviour that
+// shipped before this leaf.
+void discard_partial_target(const platform::FileSystem& fs,
+                            const std::filesystem::path& target_root) {
+  (void)fs.remove_tree(target_root);
+}
+
 } // namespace
 
 std::error_code make_error_code(SaveError error) noexcept {
@@ -228,6 +239,10 @@ platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
   platform::Result<SaveOutcome> published =
       save_project(fs, layout, doc, registry, post_writer, /*tiles=*/nullptr);
   if (!published.has_value()) {
+    // `save_project` materialized `target_root` on its way to `assets/`, so a failure here
+    // leaves a directory the D27 guard above would refuse forever after — the retry the
+    // caller's own error message invites could never succeed. Remove it (A26).
+    discard_partial_target(fs, target_root);
     return published.error();
   }
 
@@ -235,6 +250,10 @@ platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
   // `create_project`'s scaffold so the copy is a first-class portable project. No
   // `workspace/` is created here — the exec'd sibling rebuilds it from the canonical.
   if (fs.atomic_replace(layout.gitignore, k_gitignore_body)) {
+    // Same rollback as the publish branch, and for the same reason: the bundle we produced is
+    // not a complete portable project (D16), the caller gets a fault rather than a copy, and
+    // leaving the half-made root behind would poison every retry of the same name (A26).
+    discard_partial_target(fs, target_root);
     return make_error_code(SaveError::IoError);
   }
 

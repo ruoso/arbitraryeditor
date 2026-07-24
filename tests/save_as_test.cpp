@@ -133,6 +133,11 @@ class FaultyFileSystem final : public ace::platform::FileSystem {
 public:
   bool fail_make_directories = false;
   std::filesystem::path fail_atomic_replace_at;
+  // A26: the rollback itself can fail (a vanishing mount, a revoked permission), and the
+  // contract is that `save_project_as` still reports the SAVE's error. That branch is only
+  // reachable through injection, which is the whole argument for putting the recursive remove
+  // on the seam rather than calling `std::filesystem::remove_all` inline.
+  bool fail_remove_tree = false;
 
   bool exists(const std::filesystem::path& path) const override { return native_.exists(path); }
 
@@ -163,6 +168,13 @@ public:
       return std::make_error_code(std::errc::io_error);
     }
     return native_.atomic_replace(path, contents);
+  }
+
+  std::error_code remove_tree(const std::filesystem::path& path) const override {
+    if (fail_remove_tree) {
+      return std::make_error_code(std::errc::permission_denied);
+    }
+    return native_.remove_tree(path);
   }
 
 private:
@@ -279,6 +291,9 @@ TEST_CASE("save_project_as surfaces an unwritable target root as a SaveError val
   const auto saved = ace::project::save_project_as(fs, target, doc, registry);
   REQUIRE_FALSE(saved.has_value());
   CHECK(saved.error() == SaveError::IoError);
+  // With `make_directories` faulted the root is never created, so A26's rollback runs against
+  // an absent path and is a silent no-op — the idempotence clause, documented as an assertion.
+  CHECK_FALSE(fs.exists(target));
 }
 
 TEST_CASE("save_project_as surfaces a gitignore write fault after a clean publish") {
@@ -299,10 +314,167 @@ TEST_CASE("save_project_as surfaces a gitignore write fault after a clean publis
   const auto saved = ace::project::save_project_as(fs, target, doc, registry);
   REQUIRE_FALSE(saved.has_value());
   CHECK(saved.error() == SaveError::IoError);
-  // The publish half still landed the canonical (Constraint 7: a partial write is a
-  // returned error value, not a throw); only the gitignore step faulted.
-  CHECK(fs.exists(target_layout.canonical));
+  // FLIPPED by editor.project.save_as_rollback (A26): the publish half really did land the
+  // canonical, and that is exactly why the whole target must go. What the caller gets back is a
+  // fault, not a copy — the bundle has no `.gitignore` and is not the portable project D16
+  // describes — so leaving it on disk would strand a directory D27's guard then refuses
+  // forever. The error-code assertion above is unchanged; only the state is.
+  CHECK_FALSE(fs.exists(target_layout.canonical));
   CHECK_FALSE(fs.exists(target_layout.gitignore));
+  CHECK_FALSE(fs.exists(target));
+}
+
+// --- editor.project.save_as_rollback: a failed Save As leaves nothing behind (A26) ----------
+
+TEST_CASE("save_project_as removes the partial target when the publish fails") {
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  // The canonical publish itself faults, AFTER `save_project` has `make_directories`-ed
+  // `assets/` and thereby materialized the root — the case that used to strand a directory.
+  const std::filesystem::path target = scratch.root / "publish-blocked";
+  const ProjectLayout target_layout = ace::project::project_layout(target);
+  REQUIRE_FALSE(fs.exists(target));
+  fs.fail_atomic_replace_at = target_layout.canonical;
+
+  arbc::Document doc;
+  build_saveable_probe(doc);
+  const arbc::Registry registry = builtin_registry();
+
+  const auto saved = ace::project::save_project_as(fs, target, doc, registry);
+  REQUIRE_FALSE(saved.has_value());
+  CHECK(saved.error() == SaveError::IoError); // the SAVE's error, unchanged by A26
+  // Not just the canonical: the whole root, `assets/` included, is gone.
+  CHECK_FALSE(fs.exists(target));
+  CHECK_FALSE(fs.exists(target_layout.assets_dir));
+}
+
+TEST_CASE("save_project_as removes the partial target when the gitignore write fails") {
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  // The post-publish branch: `project.arbc` + `assets/` land cleanly and the trailing
+  // `.gitignore` write is what faults. The bundle is not a portable project (D16), so the
+  // rollback covers this branch exactly as it covers the publish branch.
+  const std::filesystem::path target = scratch.root / "gitignore-rollback";
+  const ProjectLayout target_layout = ace::project::project_layout(target);
+  REQUIRE_FALSE(fs.exists(target));
+  fs.fail_atomic_replace_at = target_layout.gitignore;
+
+  arbc::Document doc;
+  build_saveable_probe(doc);
+  const arbc::Registry registry = builtin_registry();
+
+  const auto saved = ace::project::save_project_as(fs, target, doc, registry);
+  REQUIRE_FALSE(saved.has_value());
+  CHECK(saved.error() == SaveError::IoError);
+  CHECK_FALSE(fs.exists(target));
+}
+
+TEST_CASE("save_project_as retried with the same name after a failed publish now succeeds") {
+  // THE case this leaf exists for. Before A26 the sequence below ended in a refusal the user
+  // could not escape without leaving the editor: the failed publish left `<parent>/<name>/`
+  // behind, and D27's existing-target guard then answered every retry with
+  // `file_exists` — reported to the rail as "Enter a project name that does not already exist
+  // here.", a false statement produced by the tool's own debris.
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  const std::filesystem::path target = scratch.root / "retry-me";
+  const ProjectLayout target_layout = ace::project::project_layout(target);
+  fs.fail_atomic_replace_at = target_layout.canonical;
+
+  arbc::Document doc;
+  build_saveable_probe(doc);
+  const arbc::Registry registry = builtin_registry();
+
+  const auto failed = ace::project::save_project_as(fs, target, doc, registry);
+  REQUIRE_FALSE(failed.has_value());
+  CHECK(failed.error() == SaveError::IoError);
+  REQUIRE_FALSE(fs.exists(target)); // the precondition the retry depends on
+
+  // The user frees some disk and presses Save Copy again with the IDENTICAL name.
+  fs.fail_atomic_replace_at.clear();
+  const auto retried = ace::project::save_project_as(fs, target, doc, registry);
+  REQUIRE(retried.has_value()); // no longer `file_exists` — the loop is closed
+  CHECK(retried.value().revision == doc.pin()->revision());
+  CHECK(fs.exists(target_layout.canonical));
+  CHECK(fs.exists(target_layout.assets_dir));
+  const auto gitignore = fs.read_file(target_layout.gitignore);
+  REQUIRE(gitignore.has_value());
+  CHECK(gitignore.value() == "workspace/\n");
+
+  // And the retry produced a COMPLETE project, not a repaired one: reopening the copy
+  // (rebuild-from-canonical, no workspace/ present) renders byte-exact against the same probe
+  // golden the first-time copy is held to — the strongest available statement that the
+  // rollback left no poison behind.
+  auto reopened = ace::project::open_project(fs, target);
+  REQUIRE(reopened.has_value());
+  REQUIRE(reopened.value().rebuilt_from_canonical);
+  const ace::render::Srgb8Image image = ace::render::render_document_srgb8(
+      *reopened.value().document, ace::project::k_probe_width, ace::project::k_probe_height);
+  REQUIRE(image.width == ace::project::k_probe_width);
+  REQUIRE(image.height == ace::project::k_probe_height);
+  const std::string golden =
+      "render_probe_" + std::to_string(image.width) + "x" + std::to_string(image.height) + ".rgba8";
+  CHECK(ace_test::compare_golden(golden, image.pixels));
+}
+
+TEST_CASE("save_project_as never removes the target it refuses") {
+  // The single most important test in this leaf: the rollback's licence to delete is D27's
+  // guard returning FALSE, so on the branch where the guard returns TRUE — the target is
+  // somebody else's — nothing may be touched. A rollback wired one line too high would turn
+  // Save As into a directory shredder for any name the user mistypes.
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  const std::filesystem::path target = scratch.root / "someones_documents";
+  std::error_code ec;
+  std::filesystem::create_directories(target / "sub", ec);
+  std::ofstream(target / "notes.txt") << "unrelated work";
+  std::ofstream(target / "sub" / "deep.txt") << "also theirs";
+
+  arbc::Document doc;
+  build_saveable_probe(doc);
+  const arbc::Registry registry = builtin_registry();
+
+  const auto saved = ace::project::save_project_as(fs, target, doc, registry);
+  REQUIRE_FALSE(saved.has_value());
+  CHECK(saved.error() == std::errc::file_exists);
+
+  // Byte-unchanged, top to bottom.
+  REQUIRE(fs.exists(target));
+  const auto notes = fs.read_file(target / "notes.txt");
+  REQUIRE(notes.has_value());
+  CHECK(notes.value() == "unrelated work");
+  const auto deep = fs.read_file(target / "sub" / "deep.txt");
+  REQUIRE(deep.has_value());
+  CHECK(deep.value() == "also theirs");
+  // …and nothing of ours was added to it either (the pre-A26 refusal contract, still true).
+  const ProjectLayout target_layout = ace::project::project_layout(target);
+  CHECK_FALSE(fs.exists(target_layout.canonical));
+  CHECK_FALSE(fs.exists(target_layout.assets_dir));
+  CHECK_FALSE(fs.exists(target_layout.gitignore));
+}
+
+TEST_CASE("save_project_as reports the publish fault, not the rollback fault, when cleanup also "
+          "fails") {
+  // A26 mints no compound error and no `SaveError` enumerator: `SaveError` keeps meaning WHY
+  // THE SAVE FAILED. When the cleanup also fails the caller therefore learns the same
+  // actionable fact it always did, and the surviving debris is precisely the behaviour that
+  // shipped before this leaf — a degradation, never a regression.
+  ScratchDir scratch;
+  FaultyFileSystem fs;
+  const std::filesystem::path target = scratch.root / "double-fault";
+  const ProjectLayout target_layout = ace::project::project_layout(target);
+  fs.fail_atomic_replace_at = target_layout.canonical;
+  fs.fail_remove_tree = true;
+
+  arbc::Document doc;
+  build_saveable_probe(doc);
+  const arbc::Registry registry = builtin_registry();
+
+  const auto saved = ace::project::save_project_as(fs, target, doc, registry);
+  REQUIRE_FALSE(saved.has_value());
+  CHECK(saved.error() == SaveError::IoError);           // the SAVE's fault…
+  CHECK(saved.error() != std::errc::permission_denied); // …never the cleanup's
+  CHECK(fs.exists(target)); // the debris survives: the pre-A26 behaviour, degraded to
 }
 
 TEST_CASE("commands::save_project_as canonicalizes the target, publishes, and execs the sibling") {
@@ -517,8 +689,13 @@ TEST_CASE("commands::save_project_as reports a publish fault after a clean publi
   CHECK(saved.stage == ace::commands::SaveAsStage::publish_failed);
   CHECK(saved.error == SaveError::IoError);
   CHECK_FALSE(launcher.invoked);
-  CHECK(fs.exists(target_layout.canonical)); // the publish half really did land
+  // FLIPPED by editor.project.save_as_rollback, for the same reason as the L1 gitignore case
+  // above and with the STAGE assertion untouched: the publish half did land, which is precisely
+  // what L1 now rolls back, so `publish_failed` at this level means "nothing is on disk" rather
+  // than "an unusable half-bundle is". A26 changes state, never the outcome vocabulary.
+  CHECK_FALSE(fs.exists(target_layout.canonical));
   CHECK_FALSE(fs.exists(target_layout.gitignore));
+  CHECK_FALSE(fs.exists(resolved));
 }
 
 TEST_CASE("save_project_as's copy reloads and renders byte-exact against the probe golden") {

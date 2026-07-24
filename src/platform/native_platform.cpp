@@ -93,6 +93,22 @@ std::error_code NativeFileSystem::make_directories(const std::filesystem::path& 
   return ec;
 }
 
+std::error_code NativeFileSystem::remove_tree(const std::filesystem::path& path) const {
+  // An empty path is refused before touching disk: `remove_all("")` has no useful
+  // meaning and the one input whose recursive-delete semantics are least defined
+  // should not reach the OS (A26, mirroring `commands::save_project_as`'s own
+  // empty-target guard).
+  if (path.empty()) {
+    return std::make_error_code(std::errc::invalid_argument);
+  }
+  std::error_code ec;
+  // The count is deliberately ignored: `remove_all` leaves `ec` clear for a path
+  // that was never there, which is exactly the idempotence the rollback relies on
+  // when the publish failed before creating anything.
+  std::filesystem::remove_all(path, ec);
+  return ec;
+}
+
 std::error_code NativeFileSystem::atomic_replace(const std::filesystem::path& path,
                                                  std::string_view contents) const {
   // Stage into a sibling temp (same directory → same filesystem, so the rename

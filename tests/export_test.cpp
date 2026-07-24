@@ -148,6 +148,19 @@ public:
                                  std::string_view contents) const override {
     return write_file(path, contents);
   }
+  // In-memory prefix erase (A26). Export never deletes — "wrote nothing" stays the assertion
+  // here — so this only re-signs the double against the seam's new pure virtual.
+  std::error_code remove_tree(const std::filesystem::path& path) const override {
+    if (path.empty()) {
+      return std::make_error_code(std::errc::invalid_argument);
+    }
+    std::erase_if(files, [&path](const auto& entry) {
+      const std::string key = entry.first.string();
+      const std::string prefix = path.string();
+      return key == prefix || key.rfind(prefix + "/", 0) == 0;
+    });
+    return {};
+  }
 };
 
 // A stub renderer producing a well-formed (uniform, half-transparent) image of the

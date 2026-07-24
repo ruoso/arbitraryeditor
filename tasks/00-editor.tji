@@ -171,8 +171,15 @@ task editor "Editor — host GUI over libarbc" {
     task save_as_rollback "Remove a partially published Save As target when the publish fails" {
       effort 1d
       allocate team
+      complete 100
       depends !save_as_outcome
-      note "project::save_project_as creates the target tree before it can fail (src/project/save.cpp:195-239): a SaveError from the publish (:230) or from the gitignore write (:237) leaves a directory behind, and D27's guard (:205) then refuses the same name forever. save_as_outcome makes the message honest ('Could not save a copy there.'); making the state recoverable needs a recursive-remove faculty on platform::FileSystem (native impl + test double + A3 WASM seam), which is a new L0 method outside the 0.5d reporting change. Source-of-debt: tasks/refinements/editor/save_as_outcome.md. Design: D27, arch A3/A12/A13."
+      note "project::save_project_as creates the target tree before it can fail (src/project/save.cpp:195-239): a SaveError from the publish (:230) or from the gitignore write (:237) leaves a directory behind, and D27's guard (:205) then refuses the same name forever. save_as_outcome makes the message honest ('Could not save a copy there.'); making the state recoverable needs a recursive-remove faculty on platform::FileSystem (native impl + test double + A3 WASM seam), which is a new L0 method outside the 0.5d reporting change. Source-of-debt: tasks/refinements/editor/save_as_outcome.md. Design: D27, arch A3/A12/A13. Refinement: tasks/refinements/editor.project/save_as_rollback.md"
+    }
+    task create_rollback "Remove a partial project scaffold when create_project fails after its existence guard" {
+      effort 0.5d
+      allocate team
+      depends !save_as_rollback
+      note "project::create_project (src/project/project_open.cpp:301-352) has the identical shape as save_project_as: it refuses an existing target at :312-314, then scaffolds with four early returns (:321 mkdir loop, :327 gitignore write, :335 workspace-document mint, :339 checkpoint), each leaving a partial directory that D27's guard refuses forever. Deferred from save_as_rollback because two of the four failure branches occur after an mmap-backed arbc::Document has been minted over workspace/ (:332-340), so the rollback must destroy the Document before removing the tree — a destruction-ordering constraint the pure-write Save As path does not have. The primitive (platform::FileSystem::remove_tree), its native impl, and all six doubles shipped with save_as_rollback; this leaf adds the two call sites plus tests in tests/project_open_test.cpp. Source-of-debt: tasks/refinements/editor.project/save_as_rollback.md. Design: D27, arch A3."
     }
     task dir_is_project "Project = directory: New and Save As refuse any existing target" {
       effort 1d

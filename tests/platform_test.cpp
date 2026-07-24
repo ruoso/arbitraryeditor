@@ -138,6 +138,43 @@ TEST_CASE("NativeFileSystem: a failed atomic_replace leaves the old content inta
   CHECK(read.value() == "OLD"); // either old or new — here old, never truncated
 }
 
+TEST_CASE("NativeFileSystem: remove_tree deletes a populated directory recursively") {
+  ScratchDir scratch;
+  NativeFileSystem fs;
+  const auto root = scratch.root / "root";
+  REQUIRE_FALSE(static_cast<bool>(fs.make_directories(root / "a" / "b")));
+  REQUIRE_FALSE(static_cast<bool>(fs.write_file(root / "a" / "b" / "c.txt", "deep")));
+  REQUIRE_FALSE(static_cast<bool>(fs.write_file(root / "d.txt", "shallow")));
+
+  REQUIRE_FALSE(static_cast<bool>(fs.remove_tree(root)));
+  CHECK_FALSE(fs.exists(root));
+  // Only the named subtree goes: the parent it lived in survives.
+  CHECK(fs.exists(scratch.root));
+}
+
+TEST_CASE("NativeFileSystem: remove_tree on a missing path succeeds") {
+  ScratchDir scratch;
+  NativeFileSystem fs;
+  const auto ghost = scratch.root / "never-existed";
+  REQUIRE_FALSE(fs.exists(ghost));
+
+  // The idempotence contract that makes a rollback safe when the publish failed before
+  // creating anything (A26, mirroring make_directories over an existing tree).
+  CHECK_FALSE(static_cast<bool>(fs.remove_tree(ghost)));
+  CHECK_FALSE(fs.exists(ghost));
+}
+
+TEST_CASE("NativeFileSystem: remove_tree refuses an empty path") {
+  ScratchDir scratch;
+  NativeFileSystem fs;
+  REQUIRE_FALSE(static_cast<bool>(fs.write_file(scratch.root / "keep.txt", "x")));
+
+  const auto ec = fs.remove_tree({});
+  CHECK(ec == std::errc::invalid_argument); // a value, refused before touching disk
+  CHECK(fs.exists(scratch.root / "keep.txt"));
+  CHECK(std::filesystem::exists(std::filesystem::current_path()));
+}
+
 TEST_CASE("NativeClock: successive now() reads are monotonic") {
   NativeClock clock;
   const auto a = clock.now();
@@ -212,6 +249,21 @@ public:
     files[path] = std::string(contents);
     return {};
   }
+  // The A26 destructive faculty, implemented the way the WASM port will implement it: there
+  // are no directories in an OPFS-shaped store, so "remove the tree" IS "drop every key under
+  // the prefix". Idempotent (erasing nothing is success, mirroring make_directories) and
+  // refuses an empty path, exactly as the seam's contract states.
+  std::error_code remove_tree(const std::filesystem::path& path) const override {
+    if (path.empty()) {
+      return std::make_error_code(std::errc::invalid_argument);
+    }
+    const std::string prefix = path.string();
+    std::erase_if(files, [&prefix](const auto& entry) {
+      const std::string key = entry.first.string();
+      return key == prefix || key.rfind(prefix + "/", 0) == 0;
+    });
+    return {};
+  }
 };
 
 // A consumer written against the interface, oblivious to the concrete impl.
@@ -245,6 +297,19 @@ TEST_CASE("PlatformServices seam is injectable — a fake filesystem satisfies i
   const auto listing = services.filesystem().list_directory("/vfs");
   REQUIRE(listing.has_value());
   CHECK(listing.value().size() == 1);
+
+  // The A26 destructive faculty is injectable too, and the in-memory (i.e. WASM-shaped)
+  // implementation is EXERCISED rather than merely compiled: a prefix erase drops the whole
+  // subtree, spares a sibling that merely shares a name prefix, and is idempotent.
+  REQUIRE_FALSE(
+      static_cast<bool>(services.filesystem().write_file("/vfs/nested/deep.json", "deep")));
+  REQUIRE_FALSE(static_cast<bool>(services.filesystem().write_file("/vfs-other/keep", "keep")));
+  CHECK_FALSE(static_cast<bool>(services.filesystem().remove_tree("/vfs")));
+  CHECK_FALSE(services.filesystem().exists("/vfs/layout.json"));
+  CHECK_FALSE(services.filesystem().exists("/vfs/nested/deep.json"));
+  CHECK(services.filesystem().exists("/vfs-other/keep")); // a prefix is not a parent
+  CHECK_FALSE(static_cast<bool>(services.filesystem().remove_tree("/vfs"))); // idempotent
+  CHECK(services.filesystem().remove_tree("") == std::errc::invalid_argument);
 }
 
 TEST_CASE("NativePlatformServices exposes the three native faculties") {

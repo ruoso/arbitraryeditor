@@ -183,6 +183,19 @@ public:
                                  std::string_view contents) const override {
     return write_file(path, contents);
   }
+  // In-memory prefix erase (A26). A contact sheet never deletes, so this exists to satisfy the
+  // pure virtual — and it stays honest rather than becoming a silent no-op.
+  std::error_code remove_tree(const std::filesystem::path& path) const override {
+    if (path.empty()) {
+      return std::make_error_code(std::errc::invalid_argument);
+    }
+    std::erase_if(files, [&path](const auto& entry) {
+      const std::string key = entry.first.string();
+      const std::string prefix = path.string();
+      return key == prefix || key.rfind(prefix + "/", 0) == 0;
+    });
+    return {};
+  }
 };
 
 // A renderer whose pixels are a KNOWN per-pixel gradient, keyed by the requested size
