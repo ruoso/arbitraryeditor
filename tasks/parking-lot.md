@@ -47,6 +47,7 @@ for a human to weigh; no WBS task was created.
 ## arbc Registry per-kind insert-schema hook
 
 **Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-2.
+**Tracking:** ruoso/arbitrarycomposer#21 (filed 2026-07-24).
 
 `arbc::Registry` advertises `factory`/`metadata`/`codec`/`binder`/`state_walker` but no per-kind field-descriptor for `ContentConfig` inputs (the config is `std::string_view`, opaque). The editor therefore carries a grammar-adapter table in `scene::build_config` that encodes the built-in grammars (raster `"<w>x<h>"`, solid `"r,g,b,a"`, nested decimal id). A future `KindInsertSchema` hook on `Registry` would let that table shrink to zero and allow plugins to advertise their own insert fields automatically. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
 
@@ -55,6 +56,7 @@ for a human to weigh; no WBS task was created.
 ## org.arbc.solid factory grammar admits no bounds field
 
 **Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-3.
+**Tracking:** ruoso/arbitrarycomposer#22 (filed 2026-07-24).
 
 `org.arbc.solid`'s registered factory config grammar is `"r,g,b,a"` with no bounds (`builtin_kinds.cpp:90-104`), so a Registry-constructed solid cell is always unbounded — Constraint 11 forbids bypassing the factory to name the concrete `SolidContent` type directly. The consequence (solid placement affine is a no-op, solid fills everywhere) is accepted and documented; the bounded-solid use case would require the library to extend the grammar. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
 
@@ -63,22 +65,16 @@ for a human to weigh; no WBS task was created.
 ## arbc Document lacks atomic create-content-and-attach
 
 **Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-7. Also noted in `tasks/refinements/cameras/model.md`.
+**Tracking:** ruoso/arbitrarycomposer#20 (filed 2026-07-24 — one issue with the batch-removal mirror below).
 
 `arbc::Document::add_content` self-commits (it is the only vtable-binding call), so every cell or camera create costs two journal entries: content first, then `transact` → `add_layer` → `attach_layer` → `commit`. The mirror verb `remove_content` (document.hpp:131) is atomic in one entry. A future `create_content_and_attach` on `Document` would collapse the two-entry create to one, making undo semantics uniform. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
-## scene/ charter still lists "selection" but Selection lives in commands/
-
-**Source:** `tasks/refinements/editor.cells/selection.md` (cells.selection, 2026-07-23) — Open questions #1.
-
-`docs/01-architecture.md:167` charters `scene/` as "cells · cameras · **selection** · z-order", but the shipped `commands::Selection` lives in `src/commands/` (D-app_state-3). This leaf follows the shipped reality — `commands` is the better home (selection is app state that sits beside `AppState`, not a document projection) and moving the type across components for a one-line charter would be churn with no behavioural change. Whether to correct the §7 charter line is an editorial call for a human; A17 added in this commit documents where hit-testing lives.
 
 ---
 
 ## arbc::Content::bounds() thread-safety guarantee absent from contract
 
 **Source:** `tasks/refinements/editor.cells/selection.md` (cells.selection, 2026-07-23) — Open questions #2.
+**Tracking:** ruoso/arbitrarycomposer#23 (filed 2026-07-24).
 
 `pick_targets` calls `arbc::Content::bounds()` from the UI thread while the render thread walks the same document. The lock-free `pin()` seam covers the record walk, and `bounds()` is an immutable property for every kind shipped today — but `contract/content.hpp:487` states no thread-safety guarantee. A future kind whose bounds change under an `Editable` edit (e.g. a growing raster, per `editor.cells.resolution`'s "resample to crisp") would make it a live read/write pair. The TSan case in `tests/canvas_host_test.cpp` is the tripwire. If it ever fires, the fix is a libarbc-side contract statement, not an editor-side lock — upstream-issue candidate for `ruoso/arbitrarycomposer`.
 
@@ -87,6 +83,7 @@ for a human to weigh; no WBS task was created.
 ## arbc batch removal verb (remove_contents / CoalesceKey on remove_content)
 
 **Source:** `tasks/refinements/editor.cells/remove.md` (cells.remove, 2026-07-23) — D-cells_remove-2 / Open questions #1.
+**Tracking:** ruoso/arbitrarycomposer#20 (filed 2026-07-24 — one issue with the create mirror above).
 
 `Document::remove_content` self-commits with no coalesce hook, so an N-object delete produces N journal entries and requires N undo presses to reverse (D-cells_remove-2). A `remove_contents(std::span<const Removal>)` — or a `CoalesceKey` parameter on `remove_content` — would collapse a multi-select delete to one undo unit. This is the exact mirror of the already-parked `create_content_and_attach` ask (see above). Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
 
@@ -95,6 +92,7 @@ for a human to weigh; no WBS task was created.
 ## arbc runtime.removed_content_reclaim (memory growth on insert/delete cycles)
 
 **Source:** `tasks/refinements/editor.cells/remove.md` (cells.remove, 2026-07-23) — Open questions #2.
+**Tracking:** ruoso/arbitrarycomposer#26 (filed 2026-07-24).
 
 `remove_content` deliberately retains the content's binding row and live `Content*` while the journal holds the removal; teardown happens only at document close (or "once `runtime.removed_content_reclaim` lands, the moment the removal leaves history", `document.hpp:123-130`). A long session that repeatedly inserts and deletes large rasters therefore grows monotonically in memory even after history trims. The named library follow-up already exists upstream; the editor cannot fix it host-side. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task.
 
@@ -111,6 +109,7 @@ for a human to weigh; no WBS task was created.
 ## arbc::Journal entry_at()/byte_cost() — upstream any-thread publication
 
 **Source:** `tasks/refinements/canvas/arbc_v030.md` (arbc_v030, 2026-07-23) — Open questions.
+**Tracking:** ruoso/arbitrarycomposer#24 (filed 2026-07-24).
 
 `arbc::Journal::entry_at()` and `byte_cost()` remain writer-thread-only at v0.3.0 by
 explicit upstream decision (arbc#15 covered `can_undo`/`can_redo`/`depth`/`cursor` and
@@ -146,6 +145,7 @@ that warrants real use before deciding.
 ## HostViewport settler attach/detach split (upstream library ask)
 
 **Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — D-writer_thread-8 / Open questions #2.
+**Tracking:** ruoso/arbitrarycomposer#25 (filed 2026-07-24).
 
 D-writer_thread-8 posts the `HostViewport` constructor and destructor to the writer thread (via `submit_sync` from the render thread) because the settler slot install (`Document::set_external_load_settler`) is writer-thread-only and lives in the `HostViewport` ctor/dtor. If upstream adds an explicit writer-thread `attach`/`detach` pair for the settler — decoupled from object construction — the render thread could manage the full viewport lifecycle itself, the posted ctor/dtor would retire, and D-8 would simplify substantially. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
 
@@ -159,23 +159,11 @@ D-writer_thread-8 posts the `HostViewport` constructor and destructor to the wri
 
 ---
 
-## CanvasHost pending_removes drop window (D-canvas_host-pending_removes-drop)
-
-**Source:** fixer fix during `editor.canvas.accent_palette` (2026-07-23).
-
-`CanvasHost::drive_once` step 3 consumes `pending_resizes`/`pending_cameras` per-id
-(erasing only those applied to a live entry), but `pending_removes` still uses a bulk
-`clear()`. A `remove` arriving after the iteration's `pending_adds.swap` but before the
-entry-map lock is released is cleared, and the later `add` then resurrects the entry without
-honouring the removal. Whether a remove should pre-empt a still-queued add (the entry never
-surfaces) or whether such a race is a caller error is a design call the fixer correctly left
-unresolved. No WBS task was registered; fix this when the call is made.
-
----
-
 ## Deferred-external nested child composites blank under real WorkerPool
 
 **Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — tech debt note.
+**Tracking:** ruoso/arbitrarycomposer#17 (filed 2026-07-24). This entry is the
+`editor.canvas.nested_real_pool` follow-up that `tests/canvas_host_test.cpp:1628` names.
 
 Under the inline degenerate `WriterThread` (headless fixtures) a deferred-external nested child composites correctly (byte-exact). Under the real interactive `WorkerPool`, a deferred-external nested child composites blank even pre-settled — a pre-existing behaviour not introduced by this change. The root cause is in libarbc's worker-pool dispatch path for nested child arrivals, not in the editor. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the library fix exists.
 
@@ -184,6 +172,8 @@ Under the inline degenerate `WriterThread` (headless fixtures) a deferred-extern
 ## arbc workspace-map reopen binds no Content — the seam that would restore the fast path
 
 **Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (cameras.reopen_slab_adopt, 2026-07-23) — Open questions (1).
+**Tracking:** ruoso/arbitrarycomposer#19 (filed 2026-07-24 — carries the secondary
+`recovered_content_state()` ask too).
 
 `arbc::Document::open(path, housekeeping)` takes **no `Registry`** and runs **no factory**
 (`arbc/runtime/document.hpp:76-85`), so a workspace-mapped reopen restores the record graph
@@ -204,43 +194,12 @@ through `Document` rather than `Model`. Upstream-issue candidates for
 
 ---
 
-## Should the workspace-map fast path stay in open_project at all?
-
-**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (cameras.reopen_slab_adopt, 2026-07-23) — Open questions (2).
-
-After the map-then-inspect guard, the fast path survives only for **content-free**
-workspaces and for the never-saved fallback — a narrow slice. Deleting it would simplify
-`open_project` and remove a branch that has never delivered its advertised benefit for a
-real project; keeping it preserves A13's crash-recovery of unpublished **record-level** edits
-(layer transforms, z-order, composition size) where that is harmless, keeps
-`rebuilt_from_canonical` a live signal rather than a constant, and leaves the seam ready
-should the library item above land. How much dead-ish machinery to carry against a possible
-upstream fix is a human judgment call, not implementable work. No WBS task was created.
-
----
-
-## A never-saved project still loses its cameras and cells — autosave vs. warn vs. accept
-
-**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (cameras.reopen_slab_adopt, 2026-07-23) — Open questions (3); D-slab-3's residual.
-
-`OpenedProject::unbindable_content_records` closes the **silence** (the reopen now reports
-how many objects the map could not bind) but not the **loss**: with no `project.arbc` there
-is nothing to rebuild from, and no in-repo change fixes that. Publishing a canonical floor at
-`create_project` does not work — content is added *after* create, so an empty floor loses it
-just as thoroughly, and making it work means re-dumping on every mutation, i.e. autosave,
-which contradicts D16's explicit "Save = re-dump `project.arbc`" model. Whether the product
-should autosave, or should warn at camera/cell-creation time in a never-saved project, or
-should simply accept the loss now that it is announced, is a product decision. No WBS task
-was created; the UI half of the *announcement* is the scheduled leaf
-`editor.project.reopen_degradation_notice`.
-
----
-
 ## A magnified raster cell never lets the canvas go idle
 
 **Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (fixer, 2026-07-23) — surfaced while
 diagnosing a `ci-gcc-release` hang; NOT caused by that refinement (reproduced 6/6 on clean
 `ac321f0`).
+**Tracking:** ruoso/arbitrarycomposer#18 (filed 2026-07-24).
 
 After `editor.canvas.nav_aids`' Shift+F frames a 32×32 `org.arbc.raster` cell into the pane
 (a ~10× magnification: the scale bar goes 50 → 5 composition units), the render loop **never
@@ -277,6 +236,7 @@ a 566 s failure).
 ## render_offline version-addressed offline render (exact batch-export coherence)
 
 **Source:** `tasks/refinements/editor.cameras/export.md` (cameras.export, 2026-07-23) — Open questions / D-export-8.
+**Tracking:** ruoso/arbitrarycomposer#27 (filed 2026-07-24).
 
 `render_offline(const Document&, const Viewport&, Backend&)` (`arbc/runtime/offline.hpp:20-21`)
 pins the **current** version per call, so an edit landing mid-batch can make item 3 reflect a
@@ -324,19 +284,3 @@ pool's lifetime moves below `render` (an A4/A5 amendment) or whether cold-open l
 large raster projects is simply accepted. A null dispatch is byte-identical to the serial
 path, so nothing is incorrect today — this is a latency/architecture judgment, not a kernel to
 write. No WBS task was created.
-
----
-
-## Should new editor projects author `Rgba32fLinearPremul` instead of libarbc's 16f default?
-
-**Source:** `tasks/refinements/editor/raster_tile_store.md` (project.raster_tile_store, 2026-07-24) — Open questions 2 / D-raster_tile_store-3.
-
-`save_project` now honours `doc.storage_format()` (the precondition that makes the tile memo
-hit, and independently a fix for silently re-authoring a 32f project at 16f), but the editor
-deliberately **authors** nothing: a new `Document` keeps libarbc's `Rgba16fLinearPremul`
-default. Choosing 32f would be lossless against the rgba32f working space; it also roughly
-doubles `assets/` and changes every shipped project's bytes. libarbc left the call to the host
-on purpose (`tests/raster_tile_store_golden.t.cpp:378-379`, *"Lossy from an rgba32f working
-space, by the user's authored choice"*), and it interacts with D10's colour boundary and D13's
-portability story — a product/quality decision, possibly a per-project setting rather than a
-constant. No WBS task was created.
