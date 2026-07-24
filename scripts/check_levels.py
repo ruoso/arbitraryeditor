@@ -48,12 +48,18 @@ EXTERNAL_ALLOWED = {
     "gl_api": {"gl", "render", "views", "dock", "app"},
     "arbc": {"project", "scene", "interact", "commands", "render",
              "views", "dock", "app"},
+    # The editor's ENCODE line (A20 / editor.cameras.export): the ONE vendored
+    # stb-class dependency, confined to the single `commands` TU that instantiates
+    # it (src/commands/png_encode.cpp). Containment is CI-enforced here rather than
+    # conventional — the editor's mirror of libarbc's codec line.
+    "stb_write": {"commands"},
 }
 EXTERNAL_RE = {
     "imgui": re.compile(r'#\s*include\s*[<"]imgui'),
     "sdl": re.compile(r'#\s*include\s*[<"]SDL'),
     "gl_api": re.compile(r'#\s*include\s*[<"](GL/|GLES|glad|SDL_opengl)'),
     "arbc": re.compile(r'#\s*include\s*[<"]arbc/'),
+    "stb_write": re.compile(r'#\s*include\s*[<"](stb/)?stb_image_write'),
 }
 ACE_INCLUDE_RE = re.compile(r'#\s*include\s*<ace/([a-z_]+)/')
 

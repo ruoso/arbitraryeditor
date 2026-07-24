@@ -4,14 +4,17 @@
 #include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/export.hpp>
 #include <ace/dock/dock.hpp>
 #include <ace/dockmodel/recent_projects.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/dockmodel/workspaces.hpp>
 #include <ace/gl/gl.hpp>
+#include <ace/interact/interact.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
 #include <ace/platform/threads.hpp>
+#include <ace/render/render.hpp>
 #include <ace/views/views.hpp>
 #include <ace/writer/writer_thread.hpp>
 
@@ -358,6 +361,50 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
       project_gateway = app_gateway.get();
     }
     dockspace.set_project_gateway(project_gateway);
+    // The Export view body (editor.cameras.export; D14/A20) — the last empty slot in
+    // the catalogued view set, one of two panes in the built-in Review preset. The L1
+    // kernel owns the plan, the filenames, the batch loop, the encode and the report;
+    // the IMPURE steps are bound here, at the only level that sees both `render` (L2)
+    // and `interact` (L1, beside `commands`):
+    //
+    //   * the renderer — `render::render_document_srgb8`, or its filled-background
+    //     sibling, which composites in the LINEAR working space (D-export-5). The
+    //     transparent DEFAULT takes the plain function, so the common case is
+    //     byte-identical to what the canvas and the goldens already render.
+    //   * the render-camera derivation — `interact::viewport_camera_for_shot`
+    //     VERBATIM (Constraint 1), the same function `look_through` previews with,
+    //     which is what makes an export reproduce exactly what the pane showed.
+    //   * the destination picker — the SHIPPED `FolderDialog` folder seam (A12 /
+    //     D-export-10); the user picks a directory, never a filename.
+    //
+    // Declared AFTER `folder_dialog` and inside the canvas scope, so it destructs
+    // (cancel + join) before the dialog it borrows and long before `session.reset()`
+    // releases the `Document` a running export is reading (Constraint 8). The explicit
+    // join below makes that ordering visible rather than incidental.
+    ace::commands::ExportService export_service(threads, filesystem);
+    export_service.set_renderer([&app_state](const arbc::Affine& camera, int width, int height,
+                                             const std::optional<ace::commands::Rgba8>& background)
+                                    -> ace::render::Srgb8Image {
+      if (!background) {
+        return ace::render::render_document_srgb8(app_state.document(), width, height, camera);
+      }
+      return ace::render::render_document_srgb8_over(
+          app_state.document(), width, height, camera,
+          {background->r, background->g, background->b, background->a});
+    });
+    export_service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
+    export_service.set_revision([&app_state] { return app_state.document().pin()->revision(); });
+    if (folder_dialog) {
+      ace::app::FolderDialog& dialog = *folder_dialog;
+      export_service.set_destination_picker(
+          [&dialog](const std::function<void(std::optional<std::filesystem::path>)>& on_pick) {
+            dialog.show(on_pick);
+          });
+    }
+    ace::views::register_view_body(ace::dockmodel::ViewType::Export,
+                                   [&export_service, &app_state](std::string_view view_id) {
+                                     ace::views::draw_export(export_service, app_state, view_id);
+                                   });
     // After the dock draws every open view body (each canvas#N pane lazily registering its
     // host entry), reconcile the canvas subsystem against the authoritative layout: a
     // canvas#N that was closed leaves DockLayout::view_ids(), so its host entry + GL texture
@@ -386,6 +433,13 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Inspector, {});
+    ace::views::register_view_body(ace::dockmodel::ViewType::Export, {});
+    // The export job reads the one owned `Document`, so it must be off the road before
+    // anything below runs (Constraint 8): cancel between items, then JOIN — never
+    // detach. The destructor does the same at the closing brace; doing it here makes
+    // the teardown contract explicit and puts the join ahead of `canvas.destroy()`.
+    export_service.cancel();
+    export_service.join();
     // Disarm the writer's idle poll BEFORE the canvas it pokes goes out of scope, then tear the
     // canvas down. `destroy()` stops and joins the render thread; the `CanvasView` destructor at
     // the closing brace then destroys the host, whose entries and per-document DamageRouter post

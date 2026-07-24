@@ -9,8 +9,10 @@
 // to the offline reference + the committed golden. The final case drives the REAL shared
 // WorkerPool (worker threads) through the full add->render->edit->remove->teardown
 // lifecycle on a spawned render thread — the escalated ASan/TSan concurrency target.
+#include <ace/commands/export.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/interact/pick.hpp>
+#include <ace/platform/filesystem.hpp>
 #include <ace/platform/threads.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/canvas_host.hpp>
@@ -34,14 +36,18 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -138,6 +144,21 @@ LoadCounters load_counters(ace::writer::WriterThread& writer, const arbc::Docume
 
 // Deadline-based pump for the off-thread lifecycle case — holds under a sanitizer build's
 // slowdown (no fixed iteration count).
+// A temp dir wiped on entry and exit — the export TSan anchor below writes real files
+// through the real `NativeFileSystem`, so a short/malformed one is observable.
+struct ScratchDir {
+  std::filesystem::path root;
+  ScratchDir() : root(std::filesystem::temp_directory_path() / "ace_canvas_host_export_test") {
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root, ec);
+  }
+  ~ScratchDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+  }
+};
+
 template <class Ready> bool pump_until(Ready ready) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (std::chrono::steady_clock::now() < deadline) {
@@ -1613,4 +1634,97 @@ TEST_CASE("canvas_host: streamed edits + a live render loop + a canvas added/rem
   CHECK(static_cast<std::uint64_t>(idle_installs.load()) + host.settles_installed() +
             counters.auto_settled ==
         1);
+}
+
+TEST_CASE("canvas_host: an export job renders the live document clean against the writer and the "
+          "render loop (cameras.export TSan anchor)") {
+  // editor.cameras.export adds the editor's SECOND long-lived auxiliary thread, so its
+  // coverage is named rather than inherited. This is the direct test of Constraint 7's
+  // claim that export is a PURE READER: a real `WriterThread` + a real `CanvasHost`
+  // (real shared WorkerPool, real render thread) over ONE document, while a
+  // `platform::Threads`-spawned export job renders that same document through
+  // `render::render_document_srgb8` and UI-thread camera edits land throughout.
+  //
+  // The export side opens no transaction, adds no journal entry and posts NOTHING to
+  // the writer — if it did, this case would deadlock or race rather than merely pass.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem filesystem;
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  auto doc = build_on_writer(writer, [] { return build_raster_doc(); });
+  std::vector<arbc::ObjectId> camera_ids;
+  writer.submit_sync([&] {
+    for (int i = 0; i < 6; ++i) {
+      camera_ids.push_back(ace::scene::add_camera(*doc, registry, "shot " + std::to_string(i),
+                                                  ace::scene::Resolution{24, 24},
+                                                  arbc::Affine::translation(4.0 * i, 4.0)));
+    }
+  });
+  REQUIRE(camera_ids.size() == 6);
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+  host.add("canvas#1", *doc, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  ace::commands::ExportService service(threads, filesystem);
+  service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
+  service.set_revision([&doc] { return doc->pin()->revision(); });
+  // The SHIPPED renderer, reading the live document off the export thread.
+  service.set_renderer([&doc](const arbc::Affine& camera, int width, int height,
+                              const std::optional<ace::commands::Rgba8>& background) {
+    if (!background) {
+      return ace::render::render_document_srgb8(*doc, width, height, camera);
+    }
+    return ace::render::render_document_srgb8_over(
+        *doc, width, height, camera, {background->r, background->g, background->b, background->a});
+  });
+
+  ace::commands::ExportOptions options;
+  options.destination = scratch.root / "exports";
+  REQUIRE(service.start(
+      ace::commands::plan_export(*doc, camera_ids, options, service.shot_camera()), options));
+
+  // UI-thread edits landing WHILE the export renders: a rename (a content edit) and a
+  // fresh mint (a structural add), both through the writer identity.
+  for (int i = 0; i < 24; ++i) {
+    apply_edit(writer, host, [&] {
+      ace::scene::rename_camera(*doc, registry, camera_ids[i % camera_ids.size()],
+                                "shot " + std::to_string(i));
+      if (i % 8 == 0) {
+        ace::scene::add_camera(*doc, registry, "extra " + std::to_string(i),
+                               ace::scene::Resolution{16, 16}, arbc::Affine::identity());
+      }
+    });
+  }
+
+  service.join();
+  host.stop();
+  handle->join();
+
+  const std::shared_ptr<const ace::commands::ExportReport> report = service.report();
+  REQUIRE(report != nullptr);
+  CHECK(report->state == ace::commands::ExportState::Finished);
+  CHECK(report->written == 6);
+  // Every produced file is a real, signature-valid PNG — a racy read would show up as a
+  // short or malformed one.
+  for (const ace::commands::ExportItemResult& item : report->items) {
+    INFO(item.path.string());
+    REQUIRE(item.written);
+    const std::vector<std::uint8_t> bytes = ace_test::read_file_bytes(item.path);
+    REQUIRE(bytes.size() > 8);
+    static constexpr std::array<std::uint8_t, 8> k_sig{0x89, 0x50, 0x4E, 0x47,
+                                                       0x0D, 0x0A, 0x1A, 0x0A};
+    CHECK(std::equal(k_sig.begin(), k_sig.end(), bytes.begin()));
+  }
+  // D-export-8: batch coherence is REPORTED, not enforced — the flag is exactly the
+  // start/end revision comparison, never a guess about what the user was doing.
+  CHECK(report->document_changed_during_export == (report->start_revision != report->end_revision));
 }

@@ -188,6 +188,14 @@ target_link_libraries(ace_project PRIVATE nlohmann_json::nlohmann_json)
 ace_component(scene DEPENDS base project)
 ace_component(interact DEPENDS base scene)
 ace_component(commands DEPENDS base project scene)
+# editor.cameras.export's PNG encoder (A20 / D-export-3): the editor's ONE vendored
+# stb-class dependency, a single public-domain header instantiated by exactly one TU
+# (src/commands/png_encode.cpp, with STBI_WRITE_NO_STDIO so no FILE* path exists to
+# bypass platform::FileSystem). PRIVATE include dir — the exact header-only idiom the
+# nlohmann line below documents for ace_project — so no downstream component inherits
+# the encoder, and scripts/check_levels.py pins the same containment as a rule
+# (EXTERNAL_ALLOWED["stb_write"] = {"commands"}).
+target_include_directories(ace_commands PRIVATE "${CMAKE_SOURCE_DIR}/third_party")
 ace_component(dockmodel DEPENDS base platform)
 # L2 — render posts its HostViewport ctor/dtor (the document's WRITER-THREAD-ONLY settler and
 # damage-sink slots) to the writer thread, hence the L2 -> L1 `writer` edge (D-writer_thread-8).
@@ -241,6 +249,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/frame_selection_test.cpp
                          tests/new_shot_from_view_test.cpp
                          tests/history_publish_test.cpp
+                         tests/export_test.cpp
                          tests/writer_thread_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
@@ -277,6 +286,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/multi_canvas_mint_e2e_test.cpp
                               tests/focused_canvas_indicator_e2e_test.cpp
                               tests/accent_palette_test.cpp
+                              tests/export_e2e_test.cpp
                               tests/view_id_natural_order_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)

@@ -1,0 +1,7 @@
+# Vendored third-party source is carried VERBATIM (docs/01-architecture.md A20):
+# reformatting it would make every upstream bump an unreviewable diff and would
+# obscure exactly what was vendored. `scripts/gate` selects `*.h` as well as
+# `*.cpp`/`*.hpp`, so the exclusion has to live where clang-format looks for it —
+# a directory-scoped config — rather than in the gate's file selection.
+DisableFormat: true
+SortIncludes: Never

@@ -7,10 +7,12 @@
 #include <arbc/base/transform.hpp>
 #include <arbc/compositor/compositor.hpp>
 #include <arbc/media/pixel_format.hpp>
+#include <arbc/media/pixel_traits.hpp>
 #include <arbc/media/surface_format.hpp>
 #include <arbc/runtime/offline.hpp>
 #include <arbc/surface/surface.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -39,6 +41,47 @@ Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int 
     image.height = height;
     image.pixels.assign(bytes.begin(), bytes.end());
   }
+  return image;
+}
+
+Srgb8Image render_document_srgb8_over(const arbc::Document& document, int width, int height,
+                                      const arbc::Affine& camera,
+                                      std::array<std::uint8_t, 4> background) {
+  arbc::CpuBackend backend;
+  const arbc::Viewport viewport{width, height, camera};
+  const auto frame = arbc::render_offline(document, viewport, backend);
+  const auto srgb = backend.make_surface(width, height, arbc::k_fast_rgba8srgb);
+
+  Srgb8Image image;
+  if (!frame.has_value() || !srgb.has_value()) {
+    return image;
+  }
+  // A second surface in the SAME working space the frame came back in (whatever the
+  // composition configured), so the background fill and the source-over blend both
+  // happen in linear premultiplied floats — never over the encoded sRGB8 bytes
+  // (D10 / D-export-5).
+  const auto filled = backend.make_surface(width, height, (*frame)->format());
+  if (!filled.has_value()) {
+    return image;
+  }
+  // The library owns the transfer: sRGB8 -> linear for the colour channels, a plain
+  // unorm decode for alpha, then libarbc's one tested `premultiply` — because
+  // `Backend::clear` takes a PREMULTIPLIED working-space sample.
+  const arbc::WorkingPixel straight{
+      arbc::srgb8_to_linear(background[0]), arbc::srgb8_to_linear(background[1]),
+      arbc::srgb8_to_linear(background[2]), arbc::unorm8_decode(background[3])};
+  const arbc::WorkingPixel premultiplied = arbc::premultiply(straight);
+  backend.clear(**filled, premultiplied[0], premultiplied[1], premultiplied[2], premultiplied[3]);
+  // Source-over at identity: the CPU backend's Catmull-Rom tap is interpolating, so an
+  // integer-aligned composite reproduces the incumbent texel byte-for-byte — this adds
+  // a blend, not a resample.
+  backend.composite(**filled, **frame, arbc::Affine::identity(), 1.0);
+
+  backend.convert(**srgb, **filled);
+  const std::span<const std::uint8_t> bytes = (*srgb)->span<arbc::PixelFormat::Rgba8Srgb>();
+  image.width = width;
+  image.height = height;
+  image.pixels.assign(bytes.begin(), bytes.end());
   return image;
 }
 

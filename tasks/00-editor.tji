@@ -374,11 +374,18 @@ task editor "Editor — host GUI over libarbc" {
       depends !new_shot_from_view
       note "CanvasView::primary_framing() (src/app/canvas_view.cpp:523-534) always returns the lowest-id sized presenter, so with two canvases open 'New Shot From View' promotes canvas#1 even when the user works in canvas#2. Add focused-canvas view id to CanvasView (set from ImGui::IsWindowFocused at draw time, fallback to lowest-id), expose focused_framing(), bind the gateway's framing provider to it, move insert_cell's provisional placement to the same source, and add a multi_canvas e2e. Source-of-debt: tasks/refinements/cameras/new_shot_from_view.md. Design: docs/00-design.md D23, D18. Refinement: tasks/refinements/cameras/mint_from_focused_canvas.md"
     }
-    task export "Export via cameras (render_offline); PNG; batch; contact sheet" {
+    task export "Export via cameras (render_offline); PNG; batch" {
       effort 3d
       allocate team
+      complete 100
       depends !model
-      note "A camera IS the export spec: pick camera(s) -> library render_offline each at its resolution -> file(s). PNG (working->sRGB8); batch (one file per camera) + contact sheet fall out; transparent/filled bg, N-times scale multiplier; async with progress. Design: D14. Refinement: tasks/refinements/export.md. Decided (pre-exec 2026-07-19): default background TRANSPARENT (preserves alpha; filled bg is a deliberate opt-in); N× multiplier default 1×; on filename collision OVERWRITE in place (batch export is idempotent, mirroring Save's re-dump — no auto-suffix, no prompt); contact sheet = uniform grid, each camera rendered then scaled to fit a common tile box preserving aspect, ceil(sqrt(N)) columns, thin gutters, a small per-tile camera-name caption, on the chosen background. NOTE: render_offline binds nested-composition operators as of libarbc v0.2.0 (ruoso/arbitrarycomposer#6, fixed) — nested children export correctly with the v0.2.0 pin (editor.canvas.arbc_v020)."
+      note "A camera IS the export spec: pick camera(s) -> library render_offline each at its resolution -> file(s). PNG (working->sRGB8); batch (one file per camera) + contact sheet fall out; transparent/filled bg, N-times scale multiplier; async with progress. Design: D14. Refinement: tasks/refinements/editor.cameras/export.md. Decided (pre-exec 2026-07-19): default background TRANSPARENT (preserves alpha; filled bg is a deliberate opt-in); N× multiplier default 1×; on filename collision OVERWRITE in place (batch export is idempotent, mirroring Save's re-dump — no auto-suffix, no prompt); contact sheet = uniform grid, each camera rendered then scaled to fit a common tile box preserving aspect, ceil(sqrt(N)) columns, thin gutters, a small per-tile camera-name caption, on the chosen background. NOTE: render_offline binds nested-composition operators as of libarbc v0.2.0 (ruoso/arbitrarycomposer#6, fixed) — nested children export correctly with the v0.2.0 pin (editor.canvas.arbc_v020)."
+    }
+    task contact_sheet "Contact sheet: all cameras tiled into one PNG" {
+      effort 1.5d
+      allocate team
+      depends !export
+      note "Tile the same ExportPlan into one additional PNG: uniform grid, ceil(sqrt(N)) columns, each tile scaled to fit a common tile box preserving aspect (linear-working-space resample via arbc/media/image_resampler.hpp in L2 render, not an sRGB8 box filter), thin gutters, a small per-tile camera-name caption via an embedded fixed-width bitmap glyph table (ImGui font is L3-only, unavailable to a headless job). Chosen background matches the Export panel bg option. Source-of-debt: tasks/refinements/editor.cameras/export.md. Design: docs/00-design.md D14, :362; docs/01-architecture.md A20."
     }
   }
 

@@ -10,6 +10,9 @@ namespace ace::commands {
 // loops the shipped undo/redo verbs. Forward-declared to keep this header light —
 // views.cpp includes <ace/commands/app_state.hpp> for the definition.
 class AppState;
+// The async export job (A20 / D-export-7); the Export body drives it and reads its
+// published progress snapshot. Forward-declared for the same reason.
+class ExportService;
 } // namespace ace::commands
 
 namespace ace::views {
@@ -135,5 +138,29 @@ void draw_view(std::string_view view_id);
 // (the dockspace owns Begin/End). The L4 shell registers it capturing the one AppState&
 // and clears it on exit (D-history-3).
 void draw_history(commands::AppState& state, std::string_view view_id);
+
+// The Export view body (D14 / D-export-9 / A20): a camera tick-list, the two D14
+// knobs (an integer N x scale multiplier and a transparent-vs-filled background),
+// the destination, and a live progress readout with Export / Cancel.
+//
+// A PANEL, not a rail modal, and deliberately so: export carries persistent state,
+// which is the inverse of A16's "inserting is a one-shot confirmed op" reasoning.
+// It also adds no `ProjectGateway` virtual — `views` already reaches `commands`,
+// `scene` and `interact`, so the A12/A13/A16 inversion (which exists because `dock`
+// may not see `commands`) simply does not apply here.
+//
+// A pure READER of the document (Constraint 7): it opens no transaction, adds no
+// journal entry, and posts nothing to the writer. It reads `scene::cameras()` per
+// frame and the service's A18-published progress snapshot once per frame; the job
+// itself runs on the service's own `platform::Threads` thread.
+//
+// Every interactive widget carries an explicit `###id` so the ImGui Test Engine can
+// drive it. `ExportState` is per-panel-instance but the Export view is a singleton,
+// so the tick-list lives in the body's own file-local state, keyed by nothing.
+// Draws into the CURRENT window (the dockspace owns Begin/End). The L4 shell
+// registers it capturing the one `AppState&` + `ExportService&` and clears it before
+// they die — the seam is process-global.
+void draw_export(commands::ExportService& service, commands::AppState& state,
+                 std::string_view view_id);
 
 } // namespace ace::views

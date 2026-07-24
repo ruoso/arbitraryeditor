@@ -1,18 +1,27 @@
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/export.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/render/render.hpp>
+#include <ace/scene/camera.hpp>
 #include <ace/views/views.hpp>
+
+#include <arbc/base/ids.hpp>
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ace::views {
 namespace {
@@ -25,6 +34,52 @@ constexpr const char* k_probe_pane_title = "Render Probe";
 std::array<ViewBody, dockmodel::k_view_type_count> g_bodies{};
 
 std::size_t body_index(dockmodel::ViewType type) { return static_cast<std::size_t>(type); }
+
+// The Export panel's persistent UI state (D-export-9: export is NOT a one-shot
+// confirmed op, so it has state to keep). UI-thread-only, and file-local because
+// `ViewType::Export` is a SINGLETON in the catalog — there is never a second
+// instance to key it by. It is reset whenever the panel is drawn against a
+// different `ExportService`, so a second session in the same process (every e2e in
+// the one `ace_shell_test` binary) starts clean rather than inheriting stale ticks.
+constexpr std::size_t k_destination_capacity = 1024;
+struct ExportPanel {
+  const commands::ExportService* owner = nullptr;
+  std::vector<arbc::ObjectId> ticked;
+  int scale = 1;
+  bool filled_background = false;
+  // Opaque black: an opaque default is what makes "tick filled, run" produce a fully
+  // opaque PNG without the panel guessing a colour for the user.
+  std::array<float, 4> background{0.0F, 0.0F, 0.0F, 1.0F};
+  std::array<char, k_destination_capacity> destination{};
+  bool destination_seeded = false;
+};
+ExportPanel g_export_panel{};
+
+void set_destination(ExportPanel& panel, const std::string& value) {
+  const std::size_t n = std::min(value.size(), k_destination_capacity - 1);
+  std::memcpy(panel.destination.data(), value.data(), n);
+  panel.destination[n] = '\0';
+}
+
+std::uint8_t to_srgb8(float channel) {
+  return static_cast<std::uint8_t>(std::clamp(channel, 0.0F, 1.0F) * 255.0F + 0.5F);
+}
+
+const char* state_label(commands::ExportState state) {
+  switch (state) {
+  case commands::ExportState::Idle:
+    return "Idle";
+  case commands::ExportState::Running:
+    return "Exporting";
+  case commands::ExportState::Finished:
+    return "Finished";
+  case commands::ExportState::Cancelled:
+    return "Cancelled";
+  case commands::ExportState::Failed:
+    return "Failed";
+  }
+  return "Idle";
+}
 
 } // namespace
 
@@ -242,6 +297,138 @@ void draw_history(commands::AppState& state, std::string_view /*view_id*/) {
   // still never mutates the journal directly (Constraint 1).
   if (target) {
     commands::navigate_to(state, *target);
+  }
+}
+
+void draw_export(commands::ExportService& service, commands::AppState& state,
+                 std::string_view /*view_id*/) {
+  ExportPanel& panel = g_export_panel;
+  if (panel.owner != &service) {
+    panel = ExportPanel{};
+    panel.owner = &service;
+  }
+  if (!panel.destination_seeded) {
+    // D16 / D-export-10: exports default into the project's own `exports/` — the
+    // directory the scaffold has always created and nothing has ever written into.
+    set_destination(panel, state.layout().exports_dir.string());
+    panel.destination_seeded = true;
+  }
+
+  // A pure READ of the document (Constraint 7): layer order, over the lock-free
+  // `pin()` seam, every frame. No transaction, no journal entry, no writer post.
+  const std::vector<scene::Camera> cameras = scene::cameras(state.document());
+  const bool running = service.running();
+
+  ImGui::TextUnformatted("Cameras");
+  ImGui::Separator();
+  if (cameras.empty()) {
+    // The affordance that exists rather than a dead end (the empty-state lesson
+    // `editor.cameras.new_shot_from_view` closed at camera_inspector.cpp:41).
+    ImGui::TextDisabled("No cameras — mint one with New Shot From View or Frame Selection.");
+  }
+  for (std::size_t i = 0; i < cameras.size(); ++i) {
+    const arbc::ObjectId id = cameras[i].id;
+    const auto found = std::find(panel.ticked.begin(), panel.ticked.end(), id);
+    bool ticked = found != panel.ticked.end();
+    // Stable ###ids keep the rows drivable by the e2e regardless of (legitimately
+    // duplicate) camera names — the same reason the History and Inspector lists use them.
+    const std::string label = cameras[i].name + "###export_cam_" + std::to_string(i);
+    if (ImGui::Checkbox(label.c_str(), &ticked)) {
+      if (ticked) {
+        panel.ticked.push_back(id);
+      } else {
+        panel.ticked.erase(found);
+      }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d x %d", cameras[i].resolution.width, cameras[i].resolution.height);
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Options");
+  // D14's two knobs. The multiplier is an integer >= 1 (Constraint 2): `out = N *
+  // native`, genuinely composed at the higher resolution, never a post-hoc resample.
+  ImGui::InputInt("Scale (N x)###export_scale", &panel.scale);
+  panel.scale = std::max(1, panel.scale);
+  // Transparent is the DEFAULT (it preserves alpha); a filled background is a
+  // deliberate opt-in, and on the transparent path the render is byte-identical to
+  // the shipped `render_document_srgb8`.
+  ImGui::Checkbox("Filled background###export_bg_filled", &panel.filled_background);
+  if (panel.filled_background) {
+    ImGui::ColorEdit4("Background###export_bg_color", panel.background.data());
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Destination");
+  ImGui::InputText("###export_destination", panel.destination.data(), panel.destination.size());
+  if (service.can_pick_destination()) {
+    // The SHIPPED folder seam (A12 / D-export-10), injected by L4. Asynchronous: the
+    // callback fires on a later UI-thread frame, so capturing the file-local panel is
+    // safe — it outlives every frame.
+    if (ImGui::Button("Browse…###export_browse")) {
+      service.pick_destination([&panel](std::optional<std::filesystem::path> dir) {
+        if (dir) {
+          set_destination(panel, dir->string());
+        }
+      });
+    }
+    ImGui::SameLine();
+  }
+
+  // Refuse rather than guess: with nothing ticked (or no destination, or no bound
+  // derivation) Export is DISABLED, not silently interpreted as "everything".
+  const bool can_run = !running && !panel.ticked.empty() && panel.destination[0] != '\0' &&
+                       static_cast<bool>(service.shot_camera());
+  ImGui::BeginDisabled(!can_run);
+  if (ImGui::Button("Export###export_run")) {
+    commands::ExportOptions options;
+    options.destination = std::filesystem::path(panel.destination.data());
+    options.scale = panel.scale;
+    if (panel.filled_background) {
+      options.background =
+          commands::Rgba8{to_srgb8(panel.background[0]), to_srgb8(panel.background[1]),
+                          to_srgb8(panel.background[2]), to_srgb8(panel.background[3])};
+    }
+    service.start(
+        commands::plan_export(state.document(), panel.ticked, options, service.shot_camera()),
+        options);
+  }
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!running);
+  if (ImGui::Button("Cancel###export_cancel")) {
+    service.cancel();
+  }
+  ImGui::EndDisabled();
+
+  // ONE published snapshot per frame (A18), so `done`/`total`/`current_name` are
+  // always the same generation — never a half-written struct read under no lock.
+  const std::shared_ptr<const commands::ExportProgress> progress = service.progress();
+  std::string status = state_label(progress->state);
+  if (progress->total > 0) {
+    status += " " + std::to_string(progress->done) + "/" + std::to_string(progress->total);
+  }
+  if (!progress->current_name.empty()) {
+    status += " — " + progress->current_name;
+  }
+  ImGui::SmallButton((status + "###export_status").c_str());
+
+  if (const std::shared_ptr<const commands::ExportReport> report = service.report()) {
+    ImGui::TextDisabled("%zu written, %zu failed, %zu refused", report->written, report->failed,
+                        report->refused);
+    if (!report->reason.empty()) {
+      ImGui::TextWrapped("%s", report->reason.c_str());
+    }
+    for (const commands::ExportItemResult& item : report->items) {
+      if (!item.message.empty()) {
+        ImGui::TextWrapped("%s", item.message.c_str());
+      }
+    }
+    // D-export-8: batch coherence is REPORTED, not enforced — an edit that landed
+    // mid-batch is stated rather than silently mixed in.
+    if (report->document_changed_during_export) {
+      ImGui::TextDisabled("The document changed during this export.");
+    }
   }
 }
 

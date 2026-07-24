@@ -263,3 +263,21 @@ editor-side mitigation already landed: `tests/canvas_nav_e2e_test.cpp`'s `settle
 wall-clock bounded, so a non-idling canvas can no longer hang a lane (unbounded, it tripped
 the ImGui Test Engine's 60 s `ConfigWatchdogKillTest` and turned a 16 s `ace_shell_test` into
 a 566 s failure).
+
+---
+
+## render_offline version-addressed offline render (exact batch-export coherence)
+
+**Source:** `tasks/refinements/editor.cameras/export.md` (cameras.export, 2026-07-23) — Open questions / D-export-8.
+
+`render_offline(const Document&, const Viewport&, Backend&)` (`arbc/runtime/offline.hpp:20-21`)
+pins the **current** version per call, so an edit landing mid-batch can make item 3 reflect a
+document state item 1 did not. D-export-8 chose to record and report the incoherence
+(`ExportReport::document_changed_during_export`) rather than block it, because the two
+host-side alternatives are untenable: blocking the writer for the full batch contradicts D14's
+async promise; snapshotting the document requires a full parse-and-rebuild of a serialisation
+snapshot per export. Whether libarbc should offer a version-addressed offline render
+(`render_offline(const Document&, RevisionId, …)` backed by the library's internal retained
+versions) is a **library** design judgement for the `arbitrarycomposer` maintainer — the
+editor has no host-side fix that is not a full second document load. Upstream-issue candidate
+for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
