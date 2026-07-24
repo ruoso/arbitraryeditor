@@ -119,10 +119,16 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
 // copy: it captures the current in-memory state and writes only the bytes the
 // document actually references. It creates NO `workspace/` (the exec'd sibling
 // rebuilds it from the canonical core) and NO `exports/`, and it does NOT touch the
-// source project. Refuses to clobber: if `target_root` already holds a
-// `project.arbc` it returns `std::errc::file_exists` and writes nothing
-// (D-save_as-4). Errors are values (the `SaveError` publish faults ride through
-// unchanged); never throws.
+// source project.
+//
+// `target_root` must NOT exist (D27 / D-dir_is_project-1). Save As under D16 CREATES a new
+// project directory — the same act New performs — so it takes the same targets New takes:
+// any existing path, empty directory included, returns `std::errc::file_exists` and writes
+// nothing. This supersedes the narrower "refuses only a target that already holds a
+// `project.arbc`" guard this function shipped with (D-save_as-4): that predicate answered
+// "would I destroy another project?" when D16's question is "is this a directory I am
+// creating?", and it let a populated non-project directory be silently half-adopted. Errors
+// are values (the `SaveError` publish faults ride through unchanged); never throws.
 //
 // Save As takes NO tile store, and that is a correctness rule rather than an oversight (A23
 // clause 2, with the full argument at the `save_project` call in `save.cpp`): the raster codec

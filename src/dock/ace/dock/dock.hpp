@@ -114,14 +114,21 @@ public:
   // rail draws the dirty indicator when true. Conservative — never a false clean.
   virtual bool is_dirty() const = 0;
 
-  // Save As (A13 / D-save_as): publish a COPY of the in-process session into a
-  // newly chosen directory and open that copy in a sibling editor, leaving THIS
-  // process on its original project (process-per-project, D19/A7). Like the
-  // New/Open picker this is ASYNCHRONOUS — the L4 impl opens the native folder
-  // dialog and, on a later frame, drives `commands::save_project_as` with the
-  // chosen target — so it returns void (no synchronous outcome to render). A
-  // cancelled pick publishes nothing and execs nothing.
-  virtual void save_as() = 0;
+  // Save As (A13 / D-save_as / D27): publish a COPY of the in-process session into a
+  // NOT-YET-EXISTING directory composed from `parent` + `name`, and open that copy in a
+  // sibling editor, leaving THIS process on its original project (process-per-project,
+  // D19/A7).
+  //
+  // SYNCHRONOUS, and composed exactly as `new_project` above is (D-dir_is_project-4). Save As
+  // creates a project directory, so under D27 it takes the same not-yet-existing target New
+  // takes — which a native folder dialog structurally cannot return, so the picker moved to
+  // the rail's own `pick_folder` call for the PARENT and the name is typed into the shared
+  // compose modal. Returning `bool` rather than `void` is what that buys: the outcome lands in
+  // the rail's inline feedback on the same frame, closing the "error value swallowed across
+  // the async pick" hole the previous shape documented against itself. False means nothing was
+  // published and nothing was spawned — an invalid name, a target that already exists, a
+  // failed publish, or a failed exec.
+  virtual bool save_as(const std::filesystem::path& parent, const std::string& name) = 0;
 
   // Clean up (GC): reclaim the in-process session's on-disk `assets/` orphans
   // (D13/§8/A13). Like `save()` this acts on THIS process's one owned session, not
@@ -275,15 +282,37 @@ private:
   bool open_ = false;            // the modal is showing
 };
 
-// Draw one frame of the New Project compose modal against `modal`'s state,
-// composing the not-yet-existing target through `gateway.new_project` on Create —
-// which spawns the sibling whose bootstrap create-branch scaffolds it (no second
-// Document minted here, D19/A7). Must be called EVERY frame by its host so
-// BeginPopupModal stays balanced. Refusals are values: an invalid name leaves the
-// modal open and writes "Enter a valid project name." into `feedback`.
+// What distinguishes ONE compose-target modal from another (D-dir_is_project-5): its popup
+// id, the label on its submit button, and what submitting actually does. A dock-local POD in
+// the `GcSummary`/`InsertKindSpec` family — the `std::function` keeps the modal a pure
+// parent-plus-text buffer that knows NOTHING about which gateway verbs exist, so a third host
+// (the WASM port, A3) can bind whatever it has, and it adds no include (`<functional>` is
+// already here for `pick_folder`'s callback).
+struct ComposeModalSpec {
+  const char* popup_id = "New Project"; // the BeginPopupModal title AND the e2e's ref prefix
+  const char* submit_label = "Create";  // the submit button's visible label
+  std::function<bool(const std::filesystem::path&, const std::string&)> submit; // parent + name
+};
+
+// Draw one frame of a parent-plus-typed-name compose modal against `modal`'s state,
+// composing the not-yet-existing target through `spec.submit` on the submit button (A22's
+// "one implementation of 'parent + typed name'", now with two submits: New spawns the sibling
+// whose bootstrap create-branch scaffolds the target, Save As publishes a copy there and
+// spawns on it). Must be called EVERY frame by its host so BeginPopupModal stays balanced.
+// Refusals are values: a refused submit leaves the modal open and writes the ONE refusal
+// string, "Enter a project name that does not already exist here.", into `feedback` — one
+// string for both causes, because an invalid name and a taken name call for the identical
+// corrective act (D-dir_is_project-6).
 //
-// Returns whether a project was actually created this frame — the rail ignores it
-// (the project window stays up), the welcome latches its exit on it (D-welcome-8).
+// Returns whether the submit succeeded this frame — the rail ignores it (the project window
+// stays up), the welcome latches its exit on it (D-welcome-8).
+bool draw_compose_target_modal(NewProjectModal& modal, std::string& feedback,
+                               const ComposeModalSpec& spec);
+
+// The New Project binding of the above, kept as a one-line forwarder so the extraction is
+// invisible to `WelcomeWindow` and to every shipped e2e ref ("New Project/Name",
+// "New Project/Create", "New Project/Cancel") — the same additive-diff tactic D-welcome-7
+// used when it extracted the modal in the first place.
 bool draw_new_project_modal(NewProjectModal& modal, ProjectGateway& gateway, std::string& feedback);
 
 // The default starter arrangement (the eight-type catalog is opened lazily by
@@ -373,6 +402,17 @@ public:
   // call (the welcome holds its own instance).
   NewProjectModal& new_project_modal() { return new_project_; }
 
+  // The SECOND compose modal on this host: Save As's (D27 / D-dir_is_project-4). Same value
+  // type and same draw routine as New's — only the popup id, the submit label and the submit
+  // verb differ (`ComposeModalSpec`) — but a distinct INSTANCE, because the two are separate
+  // popups with separate parents and a user may have one open while the other is not. Opened
+  // only after the rail's `pick_folder` resolves a parent location, exactly as New's is. The
+  // welcome hosts no Save As at all: it has no session to copy (A22).
+  bool save_as_modal_open() const { return save_as_.open(); }
+  const std::filesystem::path& save_as_parent() const { return save_as_.parent(); }
+  void open_save_as_modal(std::filesystem::path parent) { save_as_.open_on(std::move(parent)); }
+  NewProjectModal& save_as_modal() { return save_as_; }
+
   // The Clean up (GC) confirm-modal state the rail drives (D-gc-3 / D15). Opened
   // once a dry-run preview resolves the reclaim counts; the modal shows them and
   // commits a real sweep on confirm. The scripted preview lives on the Dockspace so
@@ -445,6 +485,7 @@ private:
   ProjectGateway* project_gateway_ = nullptr; // project-entry seam (app-wired, may be null)
   std::array<char, 64> save_name_{};          // "Save current as…" name buffer
   NewProjectModal new_project_;               // the shared New Project compose modal
+  NewProjectModal save_as_;                   // Save As's compose modal (same value, D27)
   std::string project_feedback_;              // inline feedback for the last action
   GcSummary gc_preview_;                      // the last Clean up dry-run reclaim counts
   std::vector<InsertKindSpec> insert_kinds_;  // the Insert Cell kind list, snapshot at open

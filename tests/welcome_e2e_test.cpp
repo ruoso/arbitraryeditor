@@ -96,7 +96,7 @@ public:
   // session-free ProjectEntryGateway answers them (app_project_gateway_test.cpp).
   bool save() override { return false; }
   bool is_dirty() const override { return false; }
-  void save_as() override {}
+  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
   ace::dock::GcSummary clean_up(bool) override { return {}; }
   bool undo() override { return false; }
   bool redo() override { return false; }
@@ -246,7 +246,9 @@ TEST_CASE("welcome e2e: the three verbs drive the gateway and surface every refu
     ctx->ItemClick("New Project/Create"); // empty name -> refused, modal persists
     ctx->Yield(2);
     IM_CHECK(gateway.created.empty());
-    IM_CHECK(welcome.feedback() == "Enter a valid project name.");
+    // The ONE refusal string (D27 / D-dir_is_project-6) — the launcher and the rail refuse
+    // the same targets and say the same thing about it (D26).
+    IM_CHECK(welcome.feedback() == "Enter a project name that does not already exist here.");
     IM_CHECK(ctx->ItemExists("New Project/Create"));
     IM_CHECK(!welcome.exit_requested());
 

@@ -117,6 +117,10 @@ enum class OpenError {
   NoProject,         // neither a usable workspace nor a `project.arbc` is present
   CorruptDocument,   // a `project.arbc` is present but failed to parse
   IoError,           // a filesystem fault, or a workspace file this build cannot mint
+  // `create_project`'s target already exists — an empty directory, a populated one, another
+  // project, or a regular file (D27 / D-dir_is_project-1/-2). APPENDED deliberately so no
+  // existing enumerator's integer moves.
+  TargetExists,
 };
 
 // Bridge `OpenError` into `std::error_code` so it rides `platform::Result<T>`'s
@@ -191,6 +195,16 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
 // `workspace/`-excluding `.gitignore`) and mint a fresh workspace-backed
 // `Document`, durable by default via checkpoint (D-open-4/5). Does NOT write
 // `project.arbc` — the canonical dump is `editor.project.save`'s publish step.
+//
+// CREATION MEANS CREATION (D27 / D-dir_is_project-1): `root` must NOT exist. Any existing
+// target — an empty directory, a directory of unrelated files, another project, or a regular
+// file — returns `OpenError::TargetExists` and writes NOTHING, so a refused create leaves the
+// target byte-for-byte as it was. Adoption is `open_project`'s verb, with its own validation
+// (`is_project_directory`); a creation verb handed an existing directory is being asked to
+// merge the project into something that already means something else. The check lives HERE,
+// in the primitive, so the invariant travels with the verb — every host (the rail, the
+// welcome launcher, the bootstrap create branch, a future CLI or WASM port) inherits it
+// without restating it.
 platform::Result<OpenedProject> create_project(const platform::FileSystem& fs,
                                                const std::filesystem::path& root);
 

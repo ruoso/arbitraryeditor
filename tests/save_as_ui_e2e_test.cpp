@@ -12,38 +12,54 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <GLES3/gl3.h>
 
-// editor.project.save_as — the rail's Save As… UI e2e (Acceptance / §9), mirroring
-// tests/save_ui_e2e_test.cpp: offscreen SDL + software GL, driving the rail BY
-// STABLE WIDGET ID. A fake ProjectGateway (records save_as()) is injected so the
-// Save As… button is exercised without a real folder dialog or session — the
-// pick→publish→exec follow-up is the L4 AppProjectGateway's job, unit-tested
-// headless in app_project_gateway_test.cpp. No byte-exact golden (software-GL pixels
-// are flaky, per the open_ui/save e2e precedent); the assertion is on the recorded
-// save_as() call driven by the rail button.
+// editor.project.save_as + editor.project.dir_is_project — the rail's Save As… UI e2e
+// (Acceptance / §9), mirroring tests/save_ui_e2e_test.cpp: offscreen SDL + software GL,
+// driving the rail BY STABLE WIDGET ID. A fake ProjectGateway (scripts pick_folder, records
+// save_as(parent, name)) is injected so the flow is exercised without a real folder dialog or
+// session — the publish→exec follow-up is the L4 AppProjectGateway's job, unit-tested headless
+// in app_project_gateway_test.cpp.
+//
+// Under D27 Save As runs the SAME two-step New runs: pick a PARENT location, then type a
+// project name into the shared compose modal ("Save Project As", submit "Save Copy"), because
+// the target must not exist and a native folder dialog can only return one that does. So the
+// assertions are on the composed (parent, name) pair the button drives, on the refusal string
+// left in the rail's inline feedback when the gateway says no, and on the cancel paths. No
+// byte-exact golden (software-GL pixels are flaky, per the open_ui/save e2e precedent).
 
 using ace::app::Shell;
 using ace::app::ShellOptions;
 
 namespace {
 
-// Records save_as(); the other actions are inert (this e2e is scoped to the Save As…
-// button wiring, the fork verb of A13/D-save_as).
+// Scripts the folder pick and records save_as(parent, name); the other actions are inert
+// (this e2e is scoped to the Save As… wiring, the fork verb of A13/D-save_as).
 class FakeGateway final : public ace::dock::ProjectGateway {
 public:
-  int save_as_calls = 0;
+  std::optional<std::filesystem::path> next; // what the scripted pick resolves to
+  bool cancel_next = false;                  // …or a cancelled pick
+  bool save_as_ok = true;                    // whether the composed target is accepted
+  int picks = 0;
+  std::vector<std::pair<std::filesystem::path, std::string>> save_as_calls;
 
   bool open_project(const std::filesystem::path&) override { return true; }
   bool new_project(const std::filesystem::path&, const std::string&) override { return true; }
   bool open_recent(const std::filesystem::path&) override { return true; }
-  void pick_folder(std::function<void(std::optional<std::filesystem::path>)>) override {}
+  void pick_folder(std::function<void(std::optional<std::filesystem::path>)> on_pick) override {
+    ++picks;
+    on_pick(cancel_next ? std::nullopt : next);
+  }
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
-  void save_as() override { ++save_as_calls; }
+  bool save_as(const std::filesystem::path& parent, const std::string& name) override {
+    save_as_calls.emplace_back(parent, name);
+    return save_as_ok;
+  }
   ace::dock::GcSummary clean_up(bool) override { return {}; } // inert (see gc_ui_e2e_test)
   // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
   // undo_ui_e2e_test.cpp.
@@ -66,7 +82,7 @@ bool capture_pixels(ImGuiID /*viewport_id*/, int x, int y, int w, int h, unsigne
 
 } // namespace
 
-TEST_CASE("save_as e2e: the rail's Save As… button drives the gateway's save_as") {
+TEST_CASE("save_as e2e: the rail's Save As… runs the parent-pick + typed-name compose") {
   Shell shell;
   ShellOptions opts;
   opts.headless = true;
@@ -94,13 +110,69 @@ TEST_CASE("save_as e2e: the rail's Save As… button drives the gateway's save_a
     FakeGateway& gateway = *state->gateway;
     const std::string rail = ace::dock::tool_rail_title();
     const auto rail_ref = [&rail](const char* label) { return rail + "/" + label; };
+    const std::filesystem::path parent = "/tmp/ace_save_as_e2e/a_parent_location";
+    const std::string refusal = "Enter a project name that does not already exist here.";
 
-    // Clicking Save As… drives the gateway's save_as() exactly once (the async
-    // pick→publish→exec follow-up is owned by the L4 impl, not asserted here).
-    IM_CHECK(gateway.save_as_calls == 0);
+    // 1. A CANCELLED pick opens no modal at all — and records no save_as.
+    gateway.cancel_next = true;
     ctx->ItemClick(rail_ref("###save_as").c_str());
     ctx->Yield(2);
-    IM_CHECK(gateway.save_as_calls == 1);
+    IM_CHECK(gateway.picks == 1);
+    IM_CHECK(gateway.save_as_calls.empty());
+    IM_CHECK(!state->dockspace->save_as_modal_open());
+    IM_CHECK(!ctx->ItemExists("Save Project As/Save Copy"));
+
+    // 2. A resolved pick seeds the parent and opens the compose modal — the SAME widget New
+    //    uses (A22 / D-dir_is_project-5), differing only in popup id and submit label.
+    gateway.cancel_next = false;
+    gateway.next = parent;
+    ctx->ItemClick(rail_ref("###save_as").c_str());
+    ctx->Yield(2);
+    IM_CHECK(state->dockspace->save_as_modal_open());
+    IM_CHECK(state->dockspace->save_as_parent() == parent); // the pick seeded the parent
+    IM_CHECK(ctx->ItemExists("Save Project As/Save Copy"));
+
+    // 3. A REFUSED copy (the gateway says no — an invalid name, or a target that already
+    //    exists): the modal STAYS OPEN and the rail's inline feedback carries the one refusal
+    //    string (D-dir_is_project-6/-7), the same channel Save/Open/Recent write.
+    gateway.save_as_ok = false;
+    ctx->ItemInput("Save Project As/Name");
+    ctx->KeyCharsReplace("Taken");
+    ctx->ItemClick("Save Project As/Save Copy");
+    ctx->Yield(2);
+    IM_CHECK(gateway.save_as_calls.size() == 1);
+    IM_CHECK(gateway.save_as_calls.back().first == parent);
+    IM_CHECK(gateway.save_as_calls.back().second == std::string("Taken"));
+    IM_CHECK(ctx->ItemExists("Save Project As/Save Copy")); // still open
+    IM_CHECK(state->dockspace->save_as_modal_open());
+    IM_CHECK(state->dockspace->project_feedback() == refusal);
+
+    // 4. An accepted copy records exactly one more save_as(parent, name) with the TYPED
+    //    values and closes the modal.
+    gateway.save_as_ok = true;
+    ctx->ItemInput("Save Project As/Name");
+    ctx->KeyCharsReplace("Copy");
+    ctx->ItemClick("Save Project As/Save Copy");
+    ctx->Yield(2);
+    IM_CHECK(gateway.save_as_calls.size() == 2);
+    IM_CHECK(gateway.save_as_calls.back().first == parent);
+    IM_CHECK(gateway.save_as_calls.back().second == std::string("Copy"));
+    IM_CHECK(!ctx->ItemExists("Save Project As/Save Copy")); // the modal closed
+    IM_CHECK(!state->dockspace->save_as_modal_open());
+    IM_CHECK(state->dockspace->project_feedback().empty()); // …and the feedback cleared
+
+    // 5. Cancel records zero save_as calls and closes the modal.
+    ctx->ItemClick(rail_ref("###save_as").c_str());
+    ctx->Yield(2);
+    IM_CHECK(ctx->ItemExists("Save Project As/Cancel"));
+    ctx->ItemClick("Save Project As/Cancel");
+    ctx->Yield(2);
+    IM_CHECK(gateway.save_as_calls.size() == 2); // unchanged
+    IM_CHECK(!state->dockspace->save_as_modal_open());
+    IM_CHECK(!ctx->ItemExists("Save Project As/Save Copy"));
+
+    // The New modal's own refs are untouched by all of this — one implementation, two specs.
+    IM_CHECK(!ctx->ItemExists("New Project/Create"));
   };
   ImGuiTestEngine_QueueTest(engine, test);
 

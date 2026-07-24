@@ -63,6 +63,18 @@ bool ProjectEntryGateway::new_project(const std::filesystem::path& parent,
   if (!target.has_value()) {
     return false; // empty / invalid / traversing name
   }
+  // Pre-check the target HERE, before the spawn (D27 / D-dir_is_project-3). `project::
+  // create_project` refuses an existing target too, and that L1 guard is the invariant — but
+  // New creates nothing in this process: it spawns a DETACHED sibling (D19/A7) whose bootstrap
+  // create-branch would raise the refusal in a window that never appears, leaving the user
+  // staring at an unchanged screen having burned a process launch. So this is the entire
+  // user-visible half of the rule on the New path, and it is cheap — `filesystem_` is already
+  // here for `open_project`'s and `recent_projects`'s validation. The L1 check still stands
+  // behind it: between this check and the child's create the directory can appear, and L1 is
+  // what guarantees nothing is written into it.
+  if (filesystem_.exists(*target)) {
+    return false;
+  }
   // Do NOT record: the target does not exist yet — the child's create-branch
   // scaffolds it (D-open_ui-4), and it lands in the recent list on its own open.
   return spawn(*target);
@@ -179,21 +191,30 @@ ace::dock::GcSummary AppProjectGateway::clean_up(bool preview) {
   return ace::dock::GcSummary{outcome.value().deleted, outcome.value().bytes_reclaimed, true};
 }
 
-void AppProjectGateway::save_as() {
-  // Save As is New/Open's async-pick shape (D-save_as-3) applied to THIS session:
-  // pick a target folder, then publish a copy there and exec a sibling on it. The
-  // orchestrator leaves the current session untouched (D-save_as-2), so this process
-  // keeps running on its original project. A cancelled pick does nothing. The
-  // callback captures only `this`, whose collaborators (dialog_/launcher_/filesystem_/
-  // app_state_) all outlive the gateway; a returned error value from the orchestrator
-  // is swallowed here (no rail feedback channel across the async pick this leaf).
-  dialog_.show([this](std::optional<std::filesystem::path> picked) {
-    if (!picked.has_value()) {
-      return;
-    }
-    ace::commands::save_project_as(app_state_, filesystem_, launcher_, executable_, *picked,
-                                   writer_post_);
-  });
+bool AppProjectGateway::save_as(const std::filesystem::path& parent, const std::string& name) {
+  // Save As is NEW's compose shape applied to THIS session (D27 / D-dir_is_project-4): the
+  // rail picks the parent through `pick_folder` and types the name into the shared compose
+  // modal, so what arrives here is already a parent-plus-name pair and this call is
+  // SYNCHRONOUS. That is the whole repair: the previous shape opened the folder dialog itself
+  // and dropped the orchestrator's error value on the far side of the async pick, with no rail
+  // feedback channel to put it on. Now the outcome is this function's return value and lands
+  // in `project_feedback_` on the same frame.
+  //
+  // The same L1 compose the New path uses — `nullopt` for an empty parent, an empty/blank
+  // name, or a name that is not a single path component, so no name can escape `parent` by
+  // traversal (D-open_ui-4). No `filesystem_.exists` pre-check is needed (unlike
+  // `new_project`'s, D-dir_is_project-3): the publish happens IN THIS PROCESS, so
+  // `project::save_project_as`'s own D27 guard refuses an existing target as a value that
+  // reaches the user directly — and it refuses before writing anything or touching the
+  // launcher. The current session is left untouched either way (D-save_as-2).
+  const std::optional<std::filesystem::path> target =
+      ace::project::compose_new_project_target(parent, name);
+  if (!target.has_value()) {
+    return false; // empty / invalid / traversing name: nothing published, nothing spawned
+  }
+  return ace::commands::save_project_as(app_state_, filesystem_, launcher_, executable_, *target,
+                                        writer_post_)
+      .has_value();
 }
 
 void AppProjectGateway::set_view_framing(std::function<ViewFraming()> framing) {

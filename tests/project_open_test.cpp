@@ -20,6 +20,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -192,6 +193,101 @@ TEST_CASE("create_project scaffolds the bundle and mints a workspace-backed docu
   CHECK_FALSE(created.value().rebuilt_from_canonical);
   // No project.arbc is written — that is editor.project.save's publish step.
   CHECK_FALSE(fs.exists(layout.canonical));
+}
+
+// --- editor.project.dir_is_project: creation means creation (D27 / D-dir_is_project-1) -----
+
+TEST_CASE("create_project refuses a target that already exists, scaffolding nothing") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  std::error_code ec;
+
+  // Each SECTION makes the target exist in a different way; the rule is exists-at-all, so
+  // all four land on the same refusal and — the load-bearing half — leave the target
+  // byte-for-byte as it was.
+  std::filesystem::path root;
+  SECTION("an EMPTY existing directory") {
+    root = scratch.root / "empty_dir";
+    REQUIRE(!fs.make_directories(root));
+  }
+  SECTION("a populated non-project directory") {
+    root = scratch.root / "someones_documents";
+    REQUIRE(!fs.make_directories(root));
+    REQUIRE(!fs.write_file(root / "notes.txt", "unrelated work"));
+  }
+  SECTION("an existing project directory") {
+    root = scratch.root / "already_a_project";
+    REQUIRE(!fs.make_directories(root));
+    write_probe_canonical(fs, ace::project::project_layout(root));
+  }
+  SECTION("a regular file") {
+    root = scratch.root / "a_file";
+    REQUIRE(!fs.write_file(root, "not a directory at all"));
+  }
+
+  // Snapshot the target's entire contents BEFORE, so "scaffolding nothing" is asserted
+  // against what was there rather than against a hand-listed set of absences.
+  std::vector<std::filesystem::path> before;
+  if (std::filesystem::is_directory(root, ec)) {
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(root)) {
+      before.push_back(entry.path());
+    }
+    std::sort(before.begin(), before.end());
+  }
+  const bool was_file = std::filesystem::is_regular_file(root, ec);
+  std::string file_bytes;
+  if (was_file) {
+    const auto read = fs.read_file(root);
+    REQUIRE(read.has_value());
+    file_bytes = read.value();
+  }
+
+  const auto created = ace::project::create_project(fs, root);
+  REQUIRE_FALSE(created.has_value());
+  CHECK(created.error() == ace::project::make_error_code(OpenError::TargetExists));
+
+  // Nothing was scaffolded: no assets/, no workspace/, no exports/, no .gitignore, and the
+  // directory listing is exactly what it was.
+  const ProjectLayout layout = ace::project::project_layout(root);
+  CHECK_FALSE(fs.exists(layout.assets_dir));
+  CHECK_FALSE(fs.exists(layout.workspace_dir));
+  CHECK_FALSE(fs.exists(layout.exports_dir));
+  CHECK_FALSE(fs.exists(layout.gitignore));
+  if (was_file) {
+    // A regular file at the target keeps its bytes — the refusal never truncated it.
+    const auto after = fs.read_file(root);
+    REQUIRE(after.has_value());
+    CHECK(after.value() == file_bytes);
+    CHECK(std::filesystem::is_regular_file(root, ec));
+  } else {
+    std::vector<std::filesystem::path> after;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(root)) {
+      after.push_back(entry.path());
+    }
+    std::sort(after.begin(), after.end());
+    CHECK(after == before);
+  }
+}
+
+TEST_CASE("create_project still scaffolds a target that does not exist") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  // The guard must not be over-eager: a NOT-YET-EXISTING target under an existing parent is
+  // the ordinary New/bootstrap case and still scaffolds. The parent exists (ScratchDir made
+  // it) — only the project root itself must be absent.
+  const std::filesystem::path root = scratch.root / "nested" / "still_fresh";
+  REQUIRE_FALSE(fs.exists(root));
+
+  const auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  const ProjectLayout layout = ace::project::project_layout(root);
+  CHECK(fs.exists(layout.assets_dir));
+  CHECK(fs.exists(layout.workspace_dir));
+  CHECK(fs.exists(layout.exports_dir));
+  CHECK(fs.exists(layout.gitignore));
+  CHECK(created.value().document->workspace_backed());
 }
 
 TEST_CASE("open_project maps the crash-durable workspace on reopen") {
@@ -509,6 +605,7 @@ TEST_CASE("OpenError messages are populated for every value") {
   CHECK_FALSE(ace::project::make_error_code(OpenError::NoProject).message().empty());
   CHECK_FALSE(ace::project::make_error_code(OpenError::CorruptDocument).message().empty());
   CHECK_FALSE(ace::project::make_error_code(OpenError::IoError).message().empty());
+  CHECK_FALSE(ace::project::make_error_code(OpenError::TargetExists).message().empty());
 }
 
 TEST_CASE("a canonical-rebuilt document reconstructs pixel-identically (load fidelity)") {

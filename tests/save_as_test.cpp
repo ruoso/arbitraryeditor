@@ -34,6 +34,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -116,6 +117,53 @@ public:
 
 const std::filesystem::path k_exe = "/usr/bin/arbitraryeditor";
 
+// Delegates to NativeFileSystem but can be told to fault one chosen operation (the
+// project_open_test FaultyFileSystem pattern). Once `save_project_as` refuses ANY existing
+// target (D27 / D-dir_is_project-1), a publish-half fault can no longer be staged by
+// pre-creating the target on disk — the guard would refuse before reaching it — so the fault
+// has to be INJECTED through the seam instead, against a target that does not exist.
+// `fail_atomic_replace_at` is path-scoped so the `project.arbc` publish can succeed while the
+// trailing `.gitignore` write fails, which is the only way to reach the post-publish branch.
+class FaultyFileSystem final : public ace::platform::FileSystem {
+public:
+  bool fail_make_directories = false;
+  std::filesystem::path fail_atomic_replace_at;
+
+  bool exists(const std::filesystem::path& path) const override { return native_.exists(path); }
+
+  ace::platform::Result<std::vector<std::filesystem::path>>
+  list_directory(const std::filesystem::path& dir) const override {
+    return native_.list_directory(dir);
+  }
+
+  ace::platform::Result<std::string> read_file(const std::filesystem::path& path) const override {
+    return native_.read_file(path);
+  }
+
+  std::error_code write_file(const std::filesystem::path& path,
+                             std::string_view contents) const override {
+    return native_.write_file(path, contents);
+  }
+
+  std::error_code make_directories(const std::filesystem::path& dir) const override {
+    if (fail_make_directories) {
+      return std::make_error_code(std::errc::io_error);
+    }
+    return native_.make_directories(dir);
+  }
+
+  std::error_code atomic_replace(const std::filesystem::path& path,
+                                 std::string_view contents) const override {
+    if (!fail_atomic_replace_at.empty() && path == fail_atomic_replace_at) {
+      return std::make_error_code(std::errc::io_error);
+    }
+    return native_.atomic_replace(path, contents);
+  }
+
+private:
+  ace::platform::NativeFileSystem native_;
+};
+
 } // namespace
 
 TEST_CASE("save_project_as publishes the portable core under a fresh root, source untouched") {
@@ -161,16 +209,32 @@ TEST_CASE("save_project_as publishes the portable core under a fresh root, sourc
   CHECK_FALSE(fs.exists(source_layout.canonical));
 }
 
-TEST_CASE("save_project_as refuses to clobber a directory that already holds a project") {
+// --- editor.project.dir_is_project: any existing target is refused (D27) -------------------
+
+TEST_CASE("save_project_as refuses ANY existing target directory") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
-  const std::filesystem::path target = scratch.root / "occupied";
   std::error_code ec;
-  std::filesystem::create_directories(target, ec);
-  // A pre-existing (foreign) project.arbc under the target — clobbering it would
-  // destroy unrelated work (D-save_as-4).
-  const ProjectLayout target_layout = ace::project::project_layout(target);
-  std::ofstream(target_layout.canonical) << "existing-project";
+
+  // Save As CREATES a project directory (D16/D27), so it takes exactly the targets New takes:
+  // nothing that already exists. Each SECTION is one shape of "already exists"; the empty one
+  // is the direct reversal witness — under the shipped narrow `project.arbc`-only guard
+  // (D-save_as-4) it SUCCEEDED and half-adopted the directory.
+  std::filesystem::path target;
+  SECTION("an EMPTY existing directory") {
+    target = scratch.root / "empty_dir";
+    std::filesystem::create_directories(target, ec);
+  }
+  SECTION("a populated non-project directory") {
+    target = scratch.root / "someones_documents";
+    std::filesystem::create_directories(target, ec);
+    std::ofstream(target / "notes.txt") << "unrelated work";
+  }
+  SECTION("a directory holding a foreign project.arbc") {
+    target = scratch.root / "occupied";
+    std::filesystem::create_directories(target, ec);
+    std::ofstream(ace::project::project_layout(target).canonical) << "existing-project";
+  }
 
   arbc::Document doc;
   build_saveable_probe(doc);
@@ -180,18 +244,29 @@ TEST_CASE("save_project_as refuses to clobber a directory that already holds a p
   REQUIRE_FALSE(saved.has_value());
   CHECK(saved.error() == std::errc::file_exists); // a value, never a throw
 
-  // The existing canonical is untouched — not atomically replaced by our snapshot.
-  const auto bytes = fs.read_file(target_layout.canonical);
-  REQUIRE(bytes.has_value());
-  CHECK(bytes.value() == "existing-project");
+  // NOTHING was written under the target: no assets/, no .gitignore, and no canonical of
+  // ours. A foreign canonical that WAS there keeps its own bytes — never atomically
+  // replaced by our snapshot.
+  const ProjectLayout target_layout = ace::project::project_layout(target);
+  CHECK_FALSE(fs.exists(target_layout.assets_dir));
+  CHECK_FALSE(fs.exists(target_layout.gitignore));
+  if (fs.exists(target_layout.canonical)) {
+    const auto bytes = fs.read_file(target_layout.canonical);
+    REQUIRE(bytes.has_value());
+    CHECK(bytes.value() == "existing-project");
+  }
 }
 
 TEST_CASE("save_project_as surfaces an unwritable target root as a SaveError value") {
   ScratchDir scratch;
-  ace::platform::NativeFileSystem fs;
-  // The target root is a regular file, so ensuring `assets/` beneath it faults.
-  const std::filesystem::path target = scratch.root / "root-as-file";
-  REQUIRE_FALSE(static_cast<bool>(fs.write_file(target, "x")));
+  FaultyFileSystem fs;
+  // A target that does NOT exist (D27 refuses one that does, before any publish), with the
+  // fault injected through the seam instead: ensuring `assets/` beneath the root faults, so
+  // the publish half's IoError branch keeps its coverage.
+  const std::filesystem::path target = scratch.root / "unwritable-root";
+  REQUIRE_FALSE(fs.exists(target));
+  fs.fail_make_directories = true;
+
   arbc::Document doc;
   build_saveable_probe(doc);
   const arbc::Registry registry = builtin_registry();
@@ -203,14 +278,14 @@ TEST_CASE("save_project_as surfaces an unwritable target root as a SaveError val
 
 TEST_CASE("save_project_as surfaces a gitignore write fault after a clean publish") {
   ScratchDir scratch;
-  ace::platform::NativeFileSystem fs;
+  FaultyFileSystem fs;
+  // Again a NOT-YET-EXISTING target, with the fault scoped to the `.gitignore` path only: the
+  // publish (project.arbc + assets/) succeeds, then the trailing atomic write of .gitignore
+  // faults — the only route to the post-publish branch now that the target cannot pre-exist.
   const std::filesystem::path target = scratch.root / "gitignore-blocked";
-  std::error_code ec;
-  std::filesystem::create_directories(target, ec);
-  // A DIRECTORY sitting at the .gitignore path: the publish (project.arbc + assets/)
-  // succeeds, then the atomic rename-over of .gitignore fails (can't replace a dir).
   const ProjectLayout target_layout = ace::project::project_layout(target);
-  std::filesystem::create_directories(target_layout.gitignore, ec);
+  REQUIRE_FALSE(fs.exists(target));
+  fs.fail_atomic_replace_at = target_layout.gitignore;
 
   arbc::Document doc;
   build_saveable_probe(doc);
@@ -222,6 +297,7 @@ TEST_CASE("save_project_as surfaces a gitignore write fault after a clean publis
   // The publish half still landed the canonical (Constraint 7: a partial write is a
   // returned error value, not a throw); only the gitignore step faulted.
   CHECK(fs.exists(target_layout.canonical));
+  CHECK_FALSE(fs.exists(target_layout.gitignore));
 }
 
 TEST_CASE("commands::save_project_as canonicalizes the target, publishes, and execs the sibling") {
@@ -298,6 +374,37 @@ TEST_CASE("commands::save_project_as short-circuits a publish failure and never 
   REQUIRE_FALSE(saved.has_value());
   CHECK(saved.error() == std::errc::file_exists);
   CHECK_FALSE(launcher.invoked); // a failed publish execs nothing
+}
+
+TEST_CASE("commands::save_project_as short-circuits a refused target and never execs") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "session";
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  AppState state(std::move(*created));
+  build_saveable_probe(state.document());
+  const bool dirty_before = state.is_dirty();
+
+  // An EMPTY existing directory — the target D27 newly refuses and the shipped narrow guard
+  // happily adopted. The orchestrator surfaces the refusal as a value and stops there.
+  const std::filesystem::path target = scratch.root / "already_there";
+  std::error_code ec;
+  std::filesystem::create_directories(target, ec);
+
+  RecordingLauncher launcher;
+  const auto saved = ace::commands::save_project_as(state, fs, launcher, k_exe, target);
+  REQUIRE_FALSE(saved.has_value());
+  CHECK(saved.error() == std::errc::file_exists);
+  CHECK_FALSE(launcher.invoked); // ZERO launches: a refused target execs nothing
+
+  // Nothing was published into the target, and the CURRENT session is untouched
+  // (D-save_as-2): same dirty state, same layout.
+  const ProjectLayout target_layout = ace::project::project_layout(target);
+  CHECK_FALSE(fs.exists(target_layout.canonical));
+  CHECK_FALSE(fs.exists(target_layout.assets_dir));
+  CHECK(state.is_dirty() == dirty_before);
+  CHECK(state.layout().canonical == root / "project.arbc");
 }
 
 TEST_CASE("commands::save_project_as leaves the published copy on disk when the exec fails") {

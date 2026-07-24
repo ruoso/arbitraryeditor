@@ -45,6 +45,8 @@ public:
       return "project.arbc failed to parse";
     case OpenError::IoError:
       return "project I/O error";
+    case OpenError::TargetExists:
+      return "the target path already exists";
     }
     return "unknown project open error";
   }
@@ -299,6 +301,17 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
 platform::Result<OpenedProject> create_project(const platform::FileSystem& fs,
                                                const std::filesystem::path& root) {
   const ProjectLayout layout = project_layout(root);
+
+  // Creation means creation (D27 / D-dir_is_project-1): the project directory IS the project
+  // (D16), so a target that exists AT ALL — empty, populated, another project, or a regular
+  // file — is a request to ADOPT rather than to create, and adoption is `open_project`'s verb.
+  // Refused as a value BEFORE the scaffold below, so nothing is written and the target is left
+  // byte-for-byte as it was. "Empty is fine" is deliberately not an exception: it would leave
+  // New and Save As accepting different targets and put us in the business of deciding what
+  // "empty" means.
+  if (fs.exists(root)) {
+    return make_error_code(OpenError::TargetExists);
+  }
 
   // Scaffold the canonical subdirectories (mkdir -p, idempotent). Creating each
   // leaf also materializes `root` (D16 layout, D-open-5).

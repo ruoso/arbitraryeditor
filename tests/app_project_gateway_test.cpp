@@ -135,7 +135,7 @@ public:
   std::vector<std::filesystem::path> recent_projects() const override { return {}; }
   bool save() override { return false; }
   bool is_dirty() const override { return false; }
-  void save_as() override {}
+  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
   ace::dock::GcSummary clean_up(bool) override { return {}; }
   bool undo() override { return false; }
   bool redo() override { return false; }
@@ -245,7 +245,9 @@ TEST_CASE("a session-free gateway answers every session verb inertly", "[app_pro
     CHECK(summary.reclaimed_bytes == 0);
     CHECK_FALSE(summary.ran); // no sweep ran — never a phantom reclaim
   }
-  seam.save_as(); // a no-op: no pick is opened and nothing is published
+  // Save As on the new synchronous compose signature (D27 / D-dir_is_project-4): still inert,
+  // because a launcher has no session to copy. No pick is opened and nothing is published.
+  CHECK_FALSE(seam.save_as(scratch.root, "Copy"));
   CHECK_FALSE(dialog.shown);
 
   // The non-pure virtuals keep their inherited neutral defaults too, so a welcome
@@ -331,6 +333,39 @@ TEST_CASE("AppProjectGateway::new_project composes a non-existent target and spa
   REQUIRE_FALSE(launcher.invoked);
 }
 
+TEST_CASE("AppProjectGateway::new_project refuses an existing target without spawning",
+          "[app_project_gateway]") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  RecordingLauncher launcher;
+  ScriptedFolderDialog dialog;
+  RecentProjects recent(scratch.root / "prefs", fs);
+  auto session = make_session(fs, scratch.root / "session");
+  AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
+
+  // New spawns a DETACHED sibling (D19/A7), so a refusal raised only inside the child would be
+  // a window that never appears. The L4 pre-check (D-dir_is_project-3) is therefore the entire
+  // user-visible half of D27's rule on this path: composed target exists -> `false`, before
+  // the spawn.
+  const std::filesystem::path taken = scratch.root / "Taken";
+  std::error_code ec;
+  std::filesystem::create_directories(taken, ec);
+  std::ofstream(taken / "someones_file.txt") << "unrelated";
+
+  REQUIRE_FALSE(gateway.new_project(scratch.root, "Taken"));
+  CHECK_FALSE(launcher.invoked);            // zero launches: no process burned on a mistake
+  CHECK(gateway.recent_projects().empty()); // the MRU is not touched on a refusal
+  CHECK(std::filesystem::exists(taken / "someones_file.txt")); // the directory is untouched
+  CHECK_FALSE(fs.exists(ace::project::project_layout(taken).assets_dir));
+
+  // …and an EMPTY existing directory is refused just the same — exists-at-all, no "empty is
+  // fine" exception (D-dir_is_project-1).
+  const std::filesystem::path empty_dir = scratch.root / "Empty";
+  std::filesystem::create_directories(empty_dir, ec);
+  REQUIRE_FALSE(gateway.new_project(scratch.root, "Empty"));
+  CHECK_FALSE(launcher.invoked);
+}
+
 TEST_CASE("AppProjectGateway::open_recent re-orders MRU-front and spawns",
           "[app_project_gateway]") {
   ScratchDir scratch;
@@ -411,7 +446,8 @@ TEST_CASE("AppProjectGateway::reopen_unbindable_count reports the session's carr
   }
 }
 
-TEST_CASE("AppProjectGateway::save_as picks a target, publishes a copy, and execs a sibling",
+TEST_CASE("AppProjectGateway::save_as composes parent + name, publishes a copy, and execs a "
+          "sibling",
           "[app_project_gateway]") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
@@ -421,16 +457,20 @@ TEST_CASE("AppProjectGateway::save_as picks a target, publishes a copy, and exec
   auto session = make_session(fs, scratch.root / "session");
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
-  // The folder pick resolves to a fresh, not-yet-existing target: save_as publishes
-  // the in-process session's copy there (D-save_as-1) and execs a sibling on it.
-  const std::filesystem::path target = scratch.root / "copy";
-  dialog.next = target;
-  gateway.save_as();
+  // Save As now takes a parent + a typed name, exactly as New does (D27 / D-dir_is_project-4),
+  // and is SYNCHRONOUS: the rail owns the `pick_folder` half, so this verb opens no dialog of
+  // its own and its outcome is its return value.
+  REQUIRE(gateway.save_as(scratch.root, "Copy"));
+  CHECK_FALSE(dialog.shown); // save_as itself opens no folder dialog any more
 
-  REQUIRE(dialog.shown);
-  // project.arbc appears at the target — the copy was published (not a sibling on the
-  // source), and the sibling exec was fired with that same absolute path.
-  CHECK(fs.exists(ace::project::project_layout(target).canonical));
+  // The composed target now exists and holds the portable core — project.arbc + assets/ +
+  // the workspace/-excluding .gitignore — and the sibling exec was fired on that same
+  // absolute path.
+  const std::filesystem::path target = scratch.root / "Copy";
+  const auto target_layout = ace::project::project_layout(target);
+  CHECK(fs.exists(target_layout.canonical));
+  CHECK(fs.exists(target_layout.assets_dir));
+  CHECK(fs.exists(target_layout.gitignore));
   REQUIRE(launcher.invoked);
   REQUIRE(launcher.args.size() == 1);
   CHECK(launcher.args.front() == std::filesystem::weakly_canonical(target).string());
@@ -440,7 +480,8 @@ TEST_CASE("AppProjectGateway::save_as picks a target, publishes a copy, and exec
   CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
 }
 
-TEST_CASE("AppProjectGateway::save_as on a cancelled pick publishes nothing and execs nothing",
+TEST_CASE("AppProjectGateway::save_as refuses an existing target and an invalid name without "
+          "publishing or spawning",
           "[app_project_gateway]") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
@@ -450,11 +491,28 @@ TEST_CASE("AppProjectGateway::save_as on a cancelled pick publishes nothing and 
   auto session = make_session(fs, scratch.root / "session");
   AppProjectGateway gateway(recent, fs, dialog, launcher, k_exe, session);
 
-  dialog.next = std::nullopt; // the user cancelled the folder picker
-  gateway.save_as();
+  // (i) A composed target that already exists — an EMPTY directory, the case the shipped
+  //     narrow clobber guard let through (D27's direct reversal). Refused as a `false` the
+  //     rail renders on the same frame; nothing published, nothing spawned.
+  const std::filesystem::path taken = scratch.root / "Taken";
+  std::error_code ec;
+  std::filesystem::create_directories(taken, ec);
+  CHECK_FALSE(gateway.save_as(scratch.root, "Taken"));
+  CHECK_FALSE(launcher.invoked);
+  CHECK_FALSE(fs.exists(ace::project::project_layout(taken).canonical));
+  CHECK_FALSE(fs.exists(ace::project::project_layout(taken).assets_dir));
 
-  REQUIRE(dialog.shown);
-  REQUIRE_FALSE(launcher.invoked); // a cancelled pick spawns nothing (D-save_as)
+  // (ii) A name `compose_new_project_target` refuses — empty, and one that would traverse out
+  //      of the parent. Same `false`, still zero writes and zero launches.
+  for (const std::string& bad :
+       {std::string(""), std::string("  "), std::string("bad/name"), std::string("..")}) {
+    CHECK_FALSE(gateway.save_as(scratch.root, bad));
+    CHECK_FALSE(launcher.invoked);
+  }
+
+  // The session is untouched throughout (D-save_as-2).
+  CHECK(gateway.is_dirty());
+  CHECK(session.layout().canonical == (scratch.root / "session" / "project.arbc"));
 }
 
 TEST_CASE("AppProjectGateway::undo/redo run their mutation inside the edit runner (A13, "

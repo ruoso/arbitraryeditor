@@ -71,7 +71,7 @@ public:
   // the dedicated coverage lives in save_ui_e2e_test.cpp / save_as_ui_e2e_test.cpp.
   bool save() override { return true; }
   bool is_dirty() const override { return false; }
-  void save_as() override {}
+  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
   ace::dock::GcSummary clean_up(bool) override { return {}; } // inert (see gc_ui_e2e_test)
   // Undo/redo (editor.project.undo) — inert here; the chord coverage lives in
   // undo_ui_e2e_test.cpp.
@@ -192,6 +192,10 @@ TEST_CASE("open_ui e2e: rail New / Open / Recent drive the gateway; cancel spawn
     ctx->ItemClick("New Project/Create"); // empty name → rejected, modal persists
     ctx->Yield(2);
     IM_CHECK(gateway.created.size() == created_before);
+    // The ONE refusal string both compose failures render (D27 / D-dir_is_project-6): an
+    // invalid name and a target that already exists call for the same corrective act.
+    IM_CHECK(state->dockspace->project_feedback() ==
+             std::string("Enter a project name that does not already exist here."));
     ctx->ItemClick("New Project/Cancel");
     ctx->Yield(2);
   };

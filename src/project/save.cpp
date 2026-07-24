@@ -194,12 +194,15 @@ platform::Result<SaveOutcome> save_project_as(const platform::FileSystem& fs,
                                               const WriterPost& post_writer) {
   const ProjectLayout layout = project_layout(target_root);
 
-  // Refuse to clobber an existing project (D-save_as-4): silently `atomic_replace`-ing
-  // a *different* project's canonical is the one Save-As error that destroys unrelated
-  // work. An existing `project.arbc` under the target is a data-loss footgun — return
-  // `file_exists` (a value, house style) and leave the target untouched. A populated
-  // directory WITHOUT a `project.arbc` is a fine destination, so the guard is narrow.
-  if (fs.exists(layout.canonical)) {
+  // Refuse ANY existing target (D27 / D-dir_is_project-1). Save As creates a new project
+  // directory, so it accepts exactly the targets New accepts: nothing that already exists —
+  // not another project's canonical (clobbering it destroys unrelated work), not a directory
+  // of unrelated files (publishing `project.arbc` + `assets/` into it silently merges two
+  // things D16 says are one), and not an empty directory either, because "empty is fine" is
+  // what made New and Save As accept different targets in the first place. Returned as a
+  // value (`file_exists` — the precise POSIX meaning, and house style beside `SaveError` on
+  // this same `std::error_code` channel), with the target left untouched.
+  if (fs.exists(target_root)) {
     return std::make_error_code(std::errc::file_exists);
   }
 

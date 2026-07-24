@@ -324,7 +324,10 @@ platform::Result<project::SaveOutcome> save_project(AppState& state, const platf
 // and nothing is written (Constraint 5, mirroring `open_another_project`).
 // Otherwise canonicalizes the target to an absolute path ONCE and uses that same
 // path for both the publish and the exec, so the child never depends on the
-// parent's CWD. The CURRENT session is left untouched: `save_project_as` never
+// parent's CWD. `target_root` must NOT already exist (D27): `project::save_project_as`
+// refuses any existing path with `std::errc::file_exists`, which short-circuits here before
+// the launcher is touched, so a refused target publishes nothing and execs nothing. The
+// CURRENT session is left untouched: `save_project_as` never
 // calls `mark_saved`, never re-points `layout_`, never tears down the window —
 // process-per-project owns one `Document` for its lifetime (D19/A7, Constraint 4);
 // a fresh sibling process owns the copy. Errors are values: a failed publish execs

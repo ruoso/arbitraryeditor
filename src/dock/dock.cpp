@@ -267,11 +267,20 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   }
   // Save As sits beside Save — the other in-process verb (A13), but it forks: it
   // publishes a COPY elsewhere and opens that copy in a sibling `exec`, leaving this
-  // session put (D-save_as-2). The native folder pick is async, so the gateway owns
-  // the whole pick→publish→exec follow-up; the rail just fires the action (no
-  // synchronous feedback to render). Stable slash-free `###` id for the e2e.
+  // session put (D-save_as-2). It runs the SAME two-step New runs (D27 /
+  // D-dir_is_project-4): pick a parent location, then type a project name into the compose
+  // modal, because under D27 the target must not exist and a native folder dialog can only
+  // return one that does. The dialog is still reached only through `pick_folder`, so A12's
+  // "sole holder of the SDL dialog" statement is unchanged. Stable slash-free `###` id for
+  // the e2e.
   if (ImGui::Selectable("Save As…###save_as")) {
-    gateway.save_as();
+    ProjectGateway* gw = &gateway;
+    gw->pick_folder([&dockspace](std::optional<std::filesystem::path> picked) {
+      if (picked.has_value()) {
+        dockspace.open_save_as_modal(*picked);
+      }
+      // A cancelled pick opens no modal, publishes nothing and execs nothing.
+    });
   }
   // Clean up (GC) sits beside Save As — another in-process verb (A13). It reclaims
   // the on-disk `assets/` orphans the grow-only save sink left behind (D13/§8). A
@@ -331,6 +340,20 @@ void draw_project_section(Dockspace& dockspace, ProjectGateway& gateway) {
   // window stays up after spawning a sibling (D19); only the launcher exits on it.
   (void)draw_new_project_modal(dockspace.new_project_modal(), gateway,
                                dockspace.project_feedback());
+  // Save As's compose modal: the SAME draw routine and the same value type, differing only in
+  // its spec (D-dir_is_project-5). Its `false` writes the same refusal string into the same
+  // inline `project_feedback_` channel Save/Open/Recent write — feedback on an action the user
+  // just took, which is exactly the split dock.cpp:83-97 draws against the one-shot notice.
+  // Also drawn every frame so BeginPopupModal stays balanced.
+  {
+    ProjectGateway* gw = &gateway;
+    (void)draw_compose_target_modal(
+        dockspace.save_as_modal(), dockspace.project_feedback(),
+        ComposeModalSpec{"Save Project As", "Save Copy",
+                         [gw](const std::filesystem::path& parent, const std::string& name) {
+                           return gw->save_as(parent, name);
+                         }});
+  }
   draw_gc_modal(dockspace, gateway);
   draw_reopen_notice_modal(dockspace, gateway);
 }
@@ -387,39 +410,44 @@ void handle_delete_shortcut(ProjectGateway& gateway) {
 
 const char* name() { return "dock"; }
 
-// The New Project modal (D-open_ui-4): opened once a folder pick resolves a parent
-// location, it collects a project name and, on Create, composes the not-yet-existing
-// target through the gateway — which spawns the sibling whose bootstrap create-branch
-// scaffolds it (no second Document minted here, D19/A7). Drawn every frame by its host
-// so BeginPopupModal stays balanced; the name buffer + parent live in the caller's
-// `NewProjectModal` so the state survives the async pick.
+// The compose-target modal (D-open_ui-4 / D27): opened once a folder pick resolves a parent
+// location, it collects a project name and, on submit, composes the NOT-YET-EXISTING target
+// through `spec.submit`. Drawn every frame by its host so BeginPopupModal stays balanced; the
+// name buffer + parent live in the caller's `NewProjectModal` so the state survives the async
+// pick.
 //
-// Extracted verbatim from the Dockspace-bound version (D-welcome-7) once the welcome
-// became a second host: one implementation, so `editor.project.dir_is_project` tightens
-// the parent-plus-name flow once. The popup id, its three refs and its behaviour are
-// unchanged, which is why no shipped test churns.
-bool draw_new_project_modal(NewProjectModal& modal, ProjectGateway& gateway,
-                            std::string& feedback) {
-  const char* popup_id = "New Project";
-  if (modal.open() && !ImGui::IsPopupOpen(popup_id)) {
-    ImGui::OpenPopup(popup_id);
+// Extracted from the Dockspace-bound version (D-welcome-7) once the welcome became a second
+// host, and PARAMETERIZED here (D-dir_is_project-5) once Save As became a second submit: A22
+// asks for one implementation of "parent + typed name → a new project directory", so this
+// leaf adds a submit to that one widget rather than a second widget. The spec carries a
+// `std::function`, never a gateway, which is what keeps the modal ignorant of which verbs
+// exist — and keeps `dock`'s includes inside its own header + std.
+bool draw_compose_target_modal(NewProjectModal& modal, std::string& feedback,
+                               const ComposeModalSpec& spec) {
+  if (modal.open() && !ImGui::IsPopupOpen(spec.popup_id)) {
+    ImGui::OpenPopup(spec.popup_id);
   }
-  bool created = false;
+  bool submitted = false;
   const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
   ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-  if (ImGui::BeginPopupModal(popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+  if (ImGui::BeginPopupModal(spec.popup_id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextWrapped("Location: %s", modal.parent().string().c_str());
     ImGui::InputText("Name", modal.name_buffer(),
                      static_cast<std::size_t>(modal.name_buffer_size()));
     const std::string name(modal.name_buffer());
-    if (ImGui::Button("Create")) {
-      if (gateway.new_project(modal.parent(), name)) {
+    if (ImGui::Button(spec.submit_label)) {
+      if (spec.submit && spec.submit(modal.parent(), name)) {
         feedback.clear();
         modal.close();
-        created = true;
+        submitted = true;
         ImGui::CloseCurrentPopup();
       } else {
-        feedback = "Enter a valid project name.";
+        // ONE string for both refusals (D-dir_is_project-6): an invalid name and a name whose
+        // directory already exists call for the identical corrective act — type a different
+        // name — and the seam is a `bool`, so there is nothing here to tell them apart. The
+        // shipped "Enter a valid project name." would now be actively misleading, because
+        // after D27 the DOMINANT refusal is a perfectly valid name that is already taken.
+        feedback = "Enter a project name that does not already exist here.";
       }
     }
     ImGui::SameLine();
@@ -429,7 +457,20 @@ bool draw_new_project_modal(NewProjectModal& modal, ProjectGateway& gateway,
     }
     ImGui::EndPopup();
   }
-  return created;
+  return submitted;
+}
+
+bool draw_new_project_modal(NewProjectModal& modal, ProjectGateway& gateway,
+                            std::string& feedback) {
+  // A one-line forwarder binding New's submit (D-dir_is_project-5). The popup id, its three
+  // refs and its behaviour are unchanged, which is why no shipped New e2e churns.
+  ProjectGateway* gw = &gateway;
+  return draw_compose_target_modal(
+      modal, feedback,
+      ComposeModalSpec{"New Project", "Create",
+                       [gw](const std::filesystem::path& parent, const std::string& name) {
+                         return gw->new_project(parent, name);
+                       }});
 }
 
 std::vector<ViewType> default_initial_views() {

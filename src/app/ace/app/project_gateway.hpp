@@ -50,7 +50,9 @@ public:
   // zero-`Document` invariant. `AppProjectGateway` overrides every one of them.
   bool save() override { return false; }
   bool is_dirty() const override { return false; }
-  void save_as() override {}
+  // Still inert on the new synchronous signature (D-dir_is_project-4): the launcher has no
+  // session to copy, so there is nothing to publish anywhere.
+  bool save_as(const std::filesystem::path&, const std::string&) override { return false; }
   ace::dock::GcSummary clean_up(bool /*preview*/) override { return {}; }
   bool undo() override { return false; }
   bool redo() override { return false; }
@@ -100,7 +102,7 @@ public:
   // `AppState`, which carried the count off the bootstrap `OpenedProject`. Nothing is
   // recomputed and nothing is cached — the number never changes for the life of a session.
   std::size_t reopen_unbindable_count() const override;
-  void save_as() override;
+  bool save_as(const std::filesystem::path& parent, const std::string& name) override;
   ace::dock::GcSummary clean_up(bool preview) override;
   bool undo() override;
   bool redo() override;
