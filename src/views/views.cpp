@@ -241,33 +241,30 @@ void draw_view(std::string_view view_id) {
 }
 
 void draw_history(commands::AppState& state, std::string_view /*view_id*/) {
-  // Render from ONE published snapshot per frame (A18 / D-history_published_reads-1/2).
-  // The journal's entry vector is writer-owned and libarbc's entry-inspection accessor is
-  // writer-thread only — it hands out a reference INTO a vector a concurrent commit may
-  // reallocate — so this panel never touches it, and reads no journal internals at all.
-  // Instead the writer publishes an immutable `HistorySnapshot` at each writer-turn
-  // boundary and the panel loads it by pointer, from any thread, lock-free. This
-  // deliberately reverses D-history-6's "no shadow copy": the copy is not a cache the
-  // panel maintains but a publication the writer performs, which is the only shape libarbc
-  // doc 15 permits for cross-thread structure — and it is strictly cheaper, one vector
-  // build per EDIT rather than three journal reads plus a concatenation per row per FRAME.
-  //
-  // Names and cursor come from the SAME loaded pointer, never mixed with a live re-read
-  // of the journal's published cursor atomic: a cursor from a later generation can exceed
-  // this snapshot's name count and index out of range at the "Redo <name>" affordance
-  // (Constraint 2). Applied entries are [0, cursor); [cursor, depth) is the
-  // redoable/future tail.
-  const std::shared_ptr<const commands::HistorySnapshot> history = state.history().load();
-  const std::size_t depth = history->names.size();
-  const std::size_t cursor = history->cursor;
+  // Render from ONE published model per frame (A18, as amended by
+  // editor.canvas.history_snapshot_adopt). The journal's entry vector stays writer-owned and its
+  // per-entry inspection accessor writer-thread-only; this panel reads the LIBRARY's any-thread
+  // published projection through the L1 accessor `state.history()`, held by `auto`, so it names no
+  // journal internals at all — the A18 grep invariant (this file includes no journal header and
+  // calls no writer-thread-only entry read) is preserved. The cursor is a second published atom,
+  // clamped against the model's
+  // OWN row count inside `commands`, so every index below is provably in-bounds despite the two
+  // independent loads (Constraint 2/3). Applied entries are [0, cursor); [cursor, depth) is the
+  // redoable/future tail. Each row also carries `byte_cost`; showing it is editor.panels.history.
+  const auto history = state.history();
+  const auto& rows = *history.rows;
+  const std::size_t depth = rows.size();
+  const std::size_t cursor = history.cursor;
 
   // Affordance labels — the entries the Ctrl+Z / Ctrl+Shift+Z chord acts on next:
-  // the head entry to undo, the tip entry to redo (D-history / Constraint 7).
+  // the head entry to undo, the tip entry to redo (D-history / Constraint 7). Derived from
+  // the clamped cursor against `rows` — never from `journal().can_undo()/can_redo()`, which are
+  // published from a possibly-different generation (D-history_snapshot_adopt-3).
   if (cursor > 0) {
-    ImGui::TextDisabled("Undo %s", history->names[cursor - 1].c_str());
+    ImGui::TextDisabled("Undo %s", rows[cursor - 1]->name.c_str());
   }
   if (cursor < depth) {
-    ImGui::TextDisabled("Redo %s", history->names[cursor].c_str());
+    ImGui::TextDisabled("Redo %s", rows[cursor]->name.c_str());
   }
   ImGui::Separator();
 
@@ -289,7 +286,7 @@ void draw_history(commands::AppState& state, std::string_view /*view_id*/) {
     if (!applied) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
     }
-    const std::string label = history->names[i] + "###entry" + std::to_string(i);
+    const std::string label = rows[i]->name + "###entry" + std::to_string(i);
     if (ImGui::Selectable(label.c_str(), is_head)) {
       target = i + 1;
     }

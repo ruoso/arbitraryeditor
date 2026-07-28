@@ -28,25 +28,16 @@ namespace {
 // for free.
 void register_editor_kinds(arbc::Registry& registry) { scene::register_camera_kind(registry); }
 
-// The raw single-step navigations, WITHOUT the publish epilogue. `undo`/`redo` are these
-// plus one `publish_history`; `navigate_to` walks them directly and publishes ONCE at the
-// end, so a jump across a long journal rebuilds the snapshot once rather than per step
-// (D-history_published_reads-4 (iv)).
-UndoOutcome undo_step(AppState& state) {
-  arbc::Document& doc = state.document();
-  const bool moved = doc.journal().undo();
-  return UndoOutcome{moved, doc.pin()->revision(), doc.journal().can_undo(),
-                     doc.journal().can_redo()};
-}
-
-UndoOutcome redo_step(AppState& state) {
-  arbc::Document& doc = state.document();
-  const bool moved = doc.journal().redo();
-  return UndoOutcome{moved, doc.pin()->revision(), doc.journal().can_undo(),
-                     doc.journal().can_redo()};
-}
-
 } // namespace
+
+std::size_t clamp_history_cursor(const arbc::HistoryView& rows, std::size_t raw_cursor) {
+  // The whole correctness-critical branch (Constraint 3): `raw_cursor` is a second, independent
+  // atomic load off `journal().cursor()` and `rows` a separate load off `journal().history()`,
+  // so `raw_cursor` may name a generation whose depth exceeds `rows.size()`. Clamp against THIS
+  // snapshot's own size; a stale-but-bounded cursor is a one-frame cosmetic glitch, an
+  // out-of-bounds index is a crash.
+  return raw_cursor > rows.size() ? rows.size() : raw_cursor;
+}
 
 AppState::AppState(project::OpenedProject opened)
     // The document's raster hash memo, taken over from the `OpenedProject` that minted it
@@ -59,8 +50,7 @@ AppState::AppState(project::OpenedProject opened)
       // `project::open_project` produces it once at bootstrap and this is the only place
       // the UI can reach it — the dock's open verbs spawn SIBLING processes and never see
       // an `OpenedProject`, so the in-process session owns the fact for its own window.
-      unbindable_content_records_(opened.unbindable_content_records),
-      history_(std::make_unique<HistoryPublisher>()) {
+      unbindable_content_records_(opened.unbindable_content_records) {
   // The persistent, lifetime-scoped kind Registry (D-open-7): seeded once here,
   // not rebuilt per open. `save`/export and the future A6 plugin seam reuse it.
   arbc::register_builtin_kinds(registry_);
@@ -83,13 +73,10 @@ AppState::AppState(project::OpenedProject opened)
   if (rebuilt_from_canonical_) {
     saved_revision_.store(document_->pin()->revision());
   }
-  // The initial publication (A18): a reopened session may already carry journal entries,
-  // and a fresh one publishes an empty snapshot — either way the History panel loads a
-  // valid, non-null pointer on frame 0, before any edit has run a refresh.
-  history_->refresh(document_->journal());
+  // No host-side history publication to seed (A18, as amended by history_snapshot_adopt): the
+  // library publishes `journal().history()` on every commit and returns a non-null empty snapshot
+  // for a journal with no entries, so the History panel already loads a valid pointer on frame 0.
 }
-
-void publish_history(AppState& state) { state.history().refresh(state.document().journal()); }
 
 DispatchOutcome dispatch(AppState& state, const Command& command) {
   arbc::Document& doc = state.document();
@@ -100,11 +87,9 @@ DispatchOutcome dispatch(AppState& state, const Command& command) {
   DispatchOutcome outcome;
   outcome.journal_entries_added = doc.journal().depth() - before;
   outcome.revision = doc.pin()->revision();
-  // The writer-turn epilogue (A18): republish the entry-name snapshot the History panel
-  // reads, so `commands` is self-consistent with no L4 present (the headless / Catch2
-  // path, where no `CanvasHost` post-edit hook exists). Stamp-guarded, so a command that
-  // journals nothing costs two atomic loads.
-  publish_history(state);
+  // No writer-turn republish (A18, as amended by history_snapshot_adopt): the library
+  // republishes `journal().history()` inside the commit, so the History panel already sees this
+  // entry through `state.history()` on any thread. The host mirror is retired.
   return outcome;
 }
 
@@ -112,19 +97,20 @@ UndoOutcome undo(AppState& state) {
   // Undo IS the library journal (D15 / Constraint 1): drive the cursor and report
   // whether it moved plus the resulting revision / can-undo / can-redo state. No
   // editor-side inverse list — `journal().undo()` republishes the touched objects at
-  // their *before* edge as a forward publish. Writer-thread (A4); `mark_saved` is
-  // deliberately NOT called (D-undo-4 / Constraint 4). The published history snapshot is
-  // refreshed on the way out (A18): navigation moves the cursor, which is half the
-  // panel's model.
-  const UndoOutcome outcome = undo_step(state);
-  publish_history(state);
-  return outcome;
+  // their *before* edge as a forward publish, and republishes `journal().history()` with the
+  // moved cursor. Writer-thread (A4); `mark_saved` is deliberately NOT called
+  // (D-undo-4 / Constraint 4).
+  arbc::Document& doc = state.document();
+  const bool moved = doc.journal().undo();
+  return UndoOutcome{moved, doc.pin()->revision(), doc.journal().can_undo(),
+                     doc.journal().can_redo()};
 }
 
 UndoOutcome redo(AppState& state) {
-  const UndoOutcome outcome = redo_step(state);
-  publish_history(state);
-  return outcome;
+  arbc::Document& doc = state.document();
+  const bool moved = doc.journal().redo();
+  return UndoOutcome{moved, doc.pin()->revision(), doc.journal().can_undo(),
+                     doc.journal().can_redo()};
 }
 
 NavigateOutcome navigate_to(AppState& state, std::size_t target_cursor) {
@@ -133,22 +119,21 @@ NavigateOutcome navigate_to(AppState& state, std::size_t target_cursor) {
   // lands on the tip, and the loops below are their own defence anyway: each stops the
   // moment its verb reports no move, so a rare writer-path allocation failure ends the
   // jump rather than spinning. Navigation goes ONLY through the library's single-step
-  // verbs; nothing here reimplements a stack (Constraint 1 / D15).
+  // verbs; nothing here reimplements a stack (Constraint 1 / D15). Each step's `undo`/`redo`
+  // republishes `journal().history()` internally, so no explicit publish is needed
+  // (D-history_snapshot_adopt-5).
   arbc::Document& doc = state.document();
   const std::size_t depth = doc.journal().depth();
   const std::size_t target = target_cursor > depth ? depth : target_cursor;
 
   std::size_t steps = 0;
-  while (doc.journal().cursor() > target && undo_step(state).moved) {
+  while (doc.journal().cursor() > target && undo(state).moved) {
     ++steps;
   }
-  while (doc.journal().cursor() < target && redo_step(state).moved) {
+  while (doc.journal().cursor() < target && redo(state).moved) {
     ++steps;
   }
 
-  // ONE publication for the whole jump, not one per step (D-history_published_reads-4):
-  // the intermediate cursors are never observable, so republishing them is pure cost.
-  publish_history(state);
   return NavigateOutcome{steps, doc.journal().cursor(), doc.pin()->revision(),
                          doc.journal().can_undo(), doc.journal().can_redo()};
 }

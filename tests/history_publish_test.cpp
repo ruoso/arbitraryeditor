@@ -1,17 +1,19 @@
-// editor.canvas.history_published_reads — L1 headless units for the published
-// history snapshot (arch A18). libarbc v0.3.0 publishes the journal's cursor and
-// depth as any-thread atomics but deliberately NOT its entry vector: `entry_at`
-// hands out a reference into writer-owned memory a concurrent commit may
-// reallocate. These cases pin the host-side publication that replaces it — the
-// refresh points (the `commands` verbs AND the L4 writer-turn epilogue, which
-// is the only one a bare `scene::` transaction passes through), the stamp guard, the
-// immutability of a held snapshot, and `navigate_to`'s clamped end-stopped walk.
-// The concurrent-reader case gives the whole thing TSan/ASan coverage on every lane
-// (there is no per-test sanitizer tagging). Mirrors the ScratchDir + create_project
-// fixture pattern of undo_test.cpp / camera_model_test.cpp.
+// editor.canvas.history_snapshot_adopt — L1 headless units for the History panel's read
+// of the LIBRARY's published history projection (arch A18, as amended). v0.4.0's
+// `arbc::Journal::history()` publishes an any-thread immutable snapshot of the projection a
+// panel draws — one `HistoryRow{name, byte_cost}` per stored entry, rows shared by pointer —
+// so the host-side `HistoryPublisher`/`HistorySnapshot` mirror is retired. These cases pin the
+// EDITOR-owned half of that read: the `commands` verbs (dispatch/undo/redo) produce the right
+// rows+cursor through `state.history()`, `navigate_to`'s clamped end-stopped walk, the
+// bypassing-`scene`-edit path (which the retired post-edit hook used to cover and the library now
+// covers structurally), the pure `clamp_history_cursor` bounds helper fed synthetic
+// out-of-bounds inputs, and the concurrent-reader case that gives the two-atomic-loads-plus-clamp
+// read TSan/ASan coverage on every lane. The host-publisher mechanics (refresh stamp-guard,
+// pointer-identity on an unchanged journal, held-snapshot immutability) retired WITH the mirror —
+// their subject is now a libarbc guarantee, pinned for existence by arbc_pin_test.cpp.
+// Mirrors the ScratchDir + create_project fixture pattern of undo_test.cpp / camera_model_test.cpp.
 
 #include <ace/commands/app_state.hpp>
-#include <ace/commands/history.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/project/project.hpp>
 #include <ace/scene/camera.hpp>
@@ -25,12 +27,10 @@
 #include <arbc/model/journal.hpp>
 #include <arbc/model/model.hpp>
 #include <arbc/runtime/document.hpp>
-#include <arbc/runtime/worker_pool.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -40,14 +40,13 @@
 #include <system_error>
 #include <thread>
 #include <utility>
-#include <vector>
 
 using ace::commands::AppState;
+using ace::commands::clamp_history_cursor;
 using ace::commands::Command;
 using ace::commands::dispatch;
-using ace::commands::HistorySnapshot;
+using ace::commands::HistoryModel;
 using ace::commands::navigate_to;
-using ace::commands::publish_history;
 
 namespace {
 
@@ -71,6 +70,12 @@ AppState fresh_session(const ScratchDir& scratch, const ace::platform::FileSyste
   auto created = ace::project::create_project(fs, scratch.root / leaf);
   REQUIRE(created.has_value());
   return AppState(std::move(*created));
+}
+
+// The entry name at index `i` of a history model — the payload the panel renders. The rows
+// are shared_ptrs into the library's immutable snapshot.
+const std::string& row_name(const HistoryModel& model, std::size_t i) {
+  return (*model.rows)[i]->name;
 }
 
 // A session carrying one content + one layer to drive NAMED transactions against.
@@ -128,22 +133,28 @@ arbc::Registry camera_registry() {
   return registry;
 }
 
+// A hand-built history row — the synthetic input the clamp unit is fed, independent of any
+// live journal.
+std::shared_ptr<const arbc::HistoryRow> make_row(std::string name) {
+  return std::make_shared<const arbc::HistoryRow>(arbc::HistoryRow{std::move(name), 0});
+}
+
 } // namespace
 
-TEST_CASE("history publish: a fresh session publishes a non-null empty snapshot") {
+TEST_CASE("history model: a fresh session yields a non-null empty snapshot") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   AppState state = fresh_session(scratch, fs, "fresh");
 
-  // Frame 0, before any edit: the panel must still get a valid pointer, so the
-  // AppState constructor publishes.
-  const std::shared_ptr<const HistorySnapshot> snapshot = state.history().load();
-  REQUIRE(snapshot != nullptr);
-  CHECK(snapshot->names.empty());
-  CHECK(snapshot->cursor == 0);
+  // Frame 0, before any edit: the panel must still get a valid pointer. The library publishes a
+  // non-null empty snapshot for a journal with no entries, so no host-side seed is needed.
+  const HistoryModel model = state.history();
+  REQUIRE(model.rows != nullptr);
+  CHECK(model.rows->empty());
+  CHECK(model.cursor == 0);
 }
 
-TEST_CASE("history publish: dispatch appends the entry name and advances the published cursor") {
+TEST_CASE("history model: dispatch appends the entry name and advances the clamped cursor") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   Session session = make_session(scratch, fs, "dispatch");
@@ -151,19 +162,19 @@ TEST_CASE("history publish: dispatch appends the entry name and advances the pub
 
   seed(session, 3);
 
-  const std::shared_ptr<const HistorySnapshot> snapshot = session.state.history().load();
-  REQUIRE(snapshot != nullptr);
-  REQUIRE(snapshot->names.size() == base + 3);
-  CHECK(snapshot->names[base + 0] == "edit#0");
-  CHECK(snapshot->names[base + 1] == "edit#1");
-  CHECK(snapshot->names[base + 2] == "edit#2");
-  CHECK(snapshot->cursor == base + 3);
+  const HistoryModel model = session.state.history();
+  REQUIRE(model.rows != nullptr);
+  REQUIRE(model.rows->size() == base + 3);
+  CHECK(row_name(model, base + 0) == "edit#0");
+  CHECK(row_name(model, base + 1) == "edit#1");
+  CHECK(row_name(model, base + 2) == "edit#2");
+  CHECK(model.cursor == base + 3);
   // The published shape agrees with the live journal it was built from.
-  CHECK(snapshot->names.size() == session.state.document().journal().depth());
-  CHECK(snapshot->cursor == session.state.document().journal().cursor());
+  CHECK(model.rows->size() == session.state.document().journal().depth());
+  CHECK(model.cursor == session.state.document().journal().cursor());
 }
 
-TEST_CASE("history publish: undo and redo move the published cursor and leave the names") {
+TEST_CASE("history model: undo and redo move the cursor and leave the rows") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   Session session = make_session(scratch, fs, "navverbs");
@@ -173,24 +184,24 @@ TEST_CASE("history publish: undo and redo move the published cursor and leave th
 
   REQUIRE(ace::commands::undo(session.state).moved);
   {
-    // The applied/redoable split the panel dims on: the names are untouched, only the
+    // The applied/redoable split the panel dims on: the rows are untouched, only the
     // cursor moved.
-    const std::shared_ptr<const HistorySnapshot> snapshot = session.state.history().load();
-    REQUIRE(snapshot->names.size() == base + 3);
-    CHECK(snapshot->names[base + 2] == "edit#2");
-    CHECK(snapshot->cursor == base + 2);
+    const HistoryModel model = session.state.history();
+    REQUIRE(model.rows->size() == base + 3);
+    CHECK(row_name(model, base + 2) == "edit#2");
+    CHECK(model.cursor == base + 2);
   }
 
   REQUIRE(ace::commands::redo(session.state).moved);
   {
-    const std::shared_ptr<const HistorySnapshot> snapshot = session.state.history().load();
-    CHECK(snapshot->names.size() == base + 3);
-    CHECK(snapshot->names[base + 2] == "edit#2");
-    CHECK(snapshot->cursor == base + 3);
+    const HistoryModel model = session.state.history();
+    CHECK(model.rows->size() == base + 3);
+    CHECK(row_name(model, base + 2) == "edit#2");
+    CHECK(model.cursor == base + 3);
   }
 }
 
-TEST_CASE("history publish: a commit after an undo republishes the truncated name list") {
+TEST_CASE("history model: a commit after an undo republishes the truncated row list") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   Session session = make_session(scratch, fs, "truncate");
@@ -202,67 +213,52 @@ TEST_CASE("history publish: a commit after an undo republishes the truncated nam
   REQUIRE(session.state.document().journal().cursor() == base + 1);
 
   // A fresh commit off a rewound cursor DROPS the redo tail before appending, so the
-  // published list must SHRINK — the snapshot tracks trimming, not just growth.
+  // published list must SHRINK — the snapshot tracks trimming, not just growth. This is
+  // exactly why `depth()` is non-monotonic and the read must clamp (D-history_snapshot_adopt-3).
   dispatch(session.state, named_edit(session, "edit#3", 0.25));
 
-  const std::shared_ptr<const HistorySnapshot> snapshot = session.state.history().load();
-  REQUIRE(snapshot->names.size() == base + 2);
-  CHECK(snapshot->names[base + 0] == "edit#0");
-  CHECK(snapshot->names.back() == "edit#3");
-  CHECK(snapshot->cursor == base + 2);
+  const HistoryModel model = session.state.history();
+  REQUIRE(model.rows->size() == base + 2);
+  CHECK(row_name(model, base + 0) == "edit#0");
+  CHECK(model.rows->back()->name == "edit#3");
+  CHECK(model.cursor == base + 2);
 }
 
-TEST_CASE("history publish: a held snapshot is immutable across later commits") {
-  ScratchDir scratch;
-  ace::platform::NativeFileSystem fs;
-  Session session = make_session(scratch, fs, "immutable");
-  const std::size_t base = session.base;
+TEST_CASE("history clamp: clamp_history_cursor lands in [0, rows.size()] and keeps affordances "
+          "in-bounds") {
+  // The correctness-critical branch, exercised with SYNTHETIC out-of-bounds inputs a
+  // single-threaded live-journal test cannot otherwise reach (Constraint 3): the cursor and the
+  // row list are two independent published atoms, so a cursor from a later generation can name a
+  // depth larger than this snapshot's size.
+  const arbc::HistoryView empty;
+  CHECK(clamp_history_cursor(empty, 0) == 0);
+  CHECK(clamp_history_cursor(empty, 5) == 0); // out-of-range against an empty snapshot
 
-  seed(session, 2);
+  arbc::HistoryView rows;
+  rows.push_back(make_row("a"));
+  rows.push_back(make_row("b"));
+  rows.push_back(make_row("c"));
 
-  // Hold the pointer, exactly as a reader mid-frame would.
-  const std::shared_ptr<const HistorySnapshot> held = session.state.history().load();
-  REQUIRE(held != nullptr);
-  const std::vector<std::string> names_before = held->names;
-  const std::size_t cursor_before = held->cursor;
+  CHECK(clamp_history_cursor(rows, 0) == 0);
+  CHECK(clamp_history_cursor(rows, 2) == 2);
+  CHECK(clamp_history_cursor(rows, 3) == 3);    // the tip is a valid cursor (redo tail empty)
+  CHECK(clamp_history_cursor(rows, 4) == 3);    // one past the tip clamps down
+  CHECK(clamp_history_cursor(rows, 1000) == 3); // a far-future generation clamps to the tip
+  CHECK(clamp_history_cursor(rows, SIZE_MAX) == 3);
 
-  seed(session, 3); // three further commits land under the holder
-
-  // THIS is the assertion that retires the `entry_at` reallocation hazard: refresh
-  // REPLACES the published pointer, it never mutates the pointee, so the value a reader
-  // is holding cannot move under it no matter how many commits land.
-  CHECK(held->names == names_before);
-  CHECK(held->cursor == cursor_before);
-  CHECK(held->names.size() == base + 2);
-  // The publisher has genuinely let go of this generation — the holder is now its SOLE
-  // owner and the value is still perfectly readable, which is only true because the
-  // snapshot is a self-contained value and not a view into writer-owned memory.
-  CHECK(held.use_count() == 1);
-  CHECK(session.state.history().load() != held);
-  CHECK(session.state.history().load()->names.size() == base + 5);
-}
-
-TEST_CASE("history publish: refresh is stamp-guarded and republishes nothing on an unchanged "
-          "journal") {
-  ScratchDir scratch;
-  ace::platform::NativeFileSystem fs;
-  Session session = make_session(scratch, fs, "stamp");
-
-  seed(session, 2);
-  const std::shared_ptr<const HistorySnapshot> before = session.state.history().load();
-
-  // Two back-to-back refreshes on an unmoved journal: pointer identity is preserved,
-  // which is what makes the deliberate double refresh (verb AND writer-turn hook) free.
-  publish_history(session.state);
-  CHECK(session.state.history().load() == before);
-  publish_history(session.state);
-  CHECK(session.state.history().load() == before);
-
-  // A command with no `apply` journals nothing, so dispatch's own refresh is a
-  // stamp-hit too.
-  const auto outcome = dispatch(session.state, Command{"inert", {}});
-  CHECK(outcome.journal_entries_added == 0);
-  CHECK(session.state.history().load() == before);
+  // Whatever raw cursor arrives, the clamped value keeps both affordance reads in-bounds:
+  // the "Undo <name>" row is `rows[c-1]` (c>0), the "Redo <name>" row is `rows[c]` (c<size).
+  for (std::size_t raw :
+       {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{9}, SIZE_MAX}) {
+    const std::size_t c = clamp_history_cursor(rows, raw);
+    REQUIRE(c <= rows.size());
+    if (c > 0) {
+      CHECK(rows[c - 1] != nullptr); // Undo affordance indexes a real row
+    }
+    if (c < rows.size()) {
+      CHECK(rows[c] != nullptr); // Redo affordance indexes a real row
+    }
+  }
 }
 
 TEST_CASE("history navigate_to: walks the cursor to an arbitrary target in both directions") {
@@ -281,14 +277,14 @@ TEST_CASE("history navigate_to: walks the cursor to an arbitrary target in both 
   CHECK(back.cursor == 1);
   CHECK(back.can_undo);
   CHECK(back.can_redo);
-  CHECK(state.history().load()->cursor == 1);
-  CHECK(state.history().load()->names.size() == depth); // names survive navigation
+  CHECK(state.history().cursor == 1);
+  CHECK(state.history().rows->size() == depth); // rows survive navigation
 
   const auto forward = navigate_to(state, depth);
   CHECK(forward.steps == depth - 1);
   CHECK(forward.cursor == depth);
   CHECK_FALSE(forward.can_redo);
-  CHECK(state.history().load()->cursor == depth);
+  CHECK(state.history().cursor == depth);
 }
 
 TEST_CASE("history navigate_to: clamps out-of-range targets and end-stops") {
@@ -312,7 +308,7 @@ TEST_CASE("history navigate_to: clamps out-of-range targets and end-stops") {
   CHECK_FALSE(low.can_undo);
   CHECK(low.can_redo);
   CHECK_FALSE(state.document().journal().can_undo());
-  CHECK(state.history().load()->cursor == 0);
+  CHECK(state.history().cursor == 0);
 
   // And back up past the tip from the base — the clamp works from below too.
   const auto up = navigate_to(state, depth + 10);
@@ -339,7 +335,7 @@ TEST_CASE("history navigate_to: targeting the current cursor is a zero-step no-o
   CHECK(state.document().journal().depth() == cursor);
 }
 
-TEST_CASE("history publish: a bare scene transaction refreshes through the writer-turn hook") {
+TEST_CASE("history model: a bare scene transaction shows up in state.history() with no verb") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   AppState state = fresh_session(scratch, fs, "hook");
@@ -356,38 +352,32 @@ TEST_CASE("history publish: a bare scene transaction refreshes through the write
   REQUIRE(camera.value != 0);
 
   // The edit seam exactly as `CanvasView::apply_edit` now assembles it
-  // (editor.canvas.writer_thread, D-writer_thread-11): ONE unit of writer-thread work carrying
-  // the mutation AND the A18 epilogue, so the epilogue reads the writer-owned journal structure
-  // the edit just changed. The epilogue moved off `CanvasHost` with the edit seam — `render` no
-  // longer owns the document write path — so the seam under test is the closure shape, not a
-  // host method. Inline-degenerate writer: this thread is the identity that built the document
-  // above, which is precisely the invariant (D-writer_thread-5).
+  // (D-history_snapshot_adopt-4): ONE unit of writer-thread work carrying JUST the mutation — the
+  // retired post-edit hook is gone, because the library republishes `journal().history()` inside
+  // the commit regardless of path. This is the case that PROVES the retirement is sound: a bare
+  // `scene::` transaction that never touches a `commands` verb still shows up in `state.history()`.
   ace::writer::WriterThread writer;
-  const std::function<void()> post_edit_hook = [&state] { publish_history(state); };
   const auto apply_edit = [&](const std::function<void()>& edit) {
-    writer.submit_sync([&] {
-      edit();
-      post_edit_hook();
-    });
+    writer.submit_sync([&] { edit(); });
   };
 
-  const std::size_t names_before = state.history().load()->names.size();
+  const std::size_t rows_before = state.history().rows->size();
 
   // A BARE scene transaction inside a raw apply_edit closure — the camera-inspector
-  // shape (src/app/camera_inspector.cpp). It never touches a `commands` verb, so
-  // verb-only refresh would leave the panel stale; only the writer-turn hook covers it.
+  // shape (src/app/camera_inspector.cpp). No verb, no hook; only the library's per-commit
+  // republish covers it.
   apply_edit([&] {
     ace::scene::set_camera_resolution(state.document(), registry, camera,
                                       ace::scene::Resolution{32, 24});
   });
 
-  const std::shared_ptr<const HistorySnapshot> after = state.history().load();
-  REQUIRE(after->names.size() > names_before);
-  CHECK(after->names.back() == "set_camera_resolution");
-  CHECK(after->cursor == after->names.size());
+  const HistoryModel after = state.history();
+  REQUIRE(after.rows->size() > rows_before);
+  CHECK(after.rows->back()->name == "set_camera_resolution");
+  CHECK(after.cursor == after.rows->size());
 }
 
-TEST_CASE("history publish: a spawned reader walks published snapshots while the writer commits") {
+TEST_CASE("history model: a spawned reader walks published snapshots while the writer commits") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   Session session = make_session(scratch, fs, "concurrent");
@@ -396,30 +386,31 @@ TEST_CASE("history publish: a spawned reader walks published snapshots while the
 
   seed(session, 2);
 
-  // The inverted control: the PRE-change panel could not be written this way at all —
-  // a reader thread calling `entry_at` IS the race this leaf removes. Here the reader
-  // touches nothing but the atomic pointer and the immutable value behind it, so the
-  // whole loop is clean under TSan (this file runs on every lane, gcc-tsan included).
+  // The inverted control: the PRE-change panel could not be written this way at all — a reader
+  // thread calling `entry_at` IS the race this leaf's ancestor removed. Here the reader does two
+  // independent atomic loads (`journal().history()` + `journal().cursor()`) and a clamp, touching
+  // nothing but atomics and the immutable values behind them, so the whole loop is clean under
+  // TSan (this file runs on every lane, gcc-tsan included).
   std::atomic<bool> done{false};
   std::atomic<std::size_t> reads{0};
   std::atomic<bool> consistent{true};
 
   std::thread reader([&] {
     while (!done.load(std::memory_order_relaxed)) {
-      const std::shared_ptr<const HistorySnapshot> snapshot = state.history().load();
-      if (!snapshot) {
+      const HistoryModel model = state.history();
+      if (!model.rows) {
         consistent.store(false, std::memory_order_relaxed);
         continue;
       }
-      // Every loaded snapshot is self-consistent: the cursor indexes into its OWN name
-      // list, and every named entry is a fully built string. (Indices below `base` are
-      // the fixture's anonymous setup entries — the Document's self-committing wrappers
-      // journal no name.)
-      if (snapshot->cursor > snapshot->names.size()) {
+      // Every observation satisfies `cursor <= rows->size()` — the clamp guarantees it even
+      // though the two loads came from possibly-different generations — and every named entry is
+      // a fully built string. (Indices below `base` are the fixture's anonymous setup entries —
+      // the Document's self-committing wrappers journal no name.)
+      if (model.cursor > model.rows->size()) {
         consistent.store(false, std::memory_order_relaxed);
       }
-      for (std::size_t i = 0; i < snapshot->names.size(); ++i) {
-        if (i >= base && snapshot->names[i].empty()) {
+      for (std::size_t i = 0; i < model.rows->size(); ++i) {
+        if (i >= base && (*model.rows)[i]->name.empty()) {
           consistent.store(false, std::memory_order_relaxed);
         }
       }
@@ -441,6 +432,6 @@ TEST_CASE("history publish: a spawned reader walks published snapshots while the
 
   CHECK(consistent.load());
   CHECK(reads.load() > 0);
-  CHECK(state.history().load()->cursor == state.document().journal().cursor());
-  CHECK(state.history().load()->names.size() == state.document().journal().depth());
+  CHECK(state.history().cursor == state.document().journal().cursor());
+  CHECK(state.history().rows->size() == state.document().journal().depth());
 }

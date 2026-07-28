@@ -419,22 +419,16 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
       // History republish, no canvas wake). The serialize + atomic publish stay off the writer.
       app_gateway->set_writer_post(
           [&canvas](const std::function<void()>& work) { canvas.on_writer(work); });
-      // The writer-turn epilogue (A18 / D-history_published_reads-3): republish the History
-      // panel's entry-name snapshot after EVERY edit that passes through apply_edit, ON the
-      // writer thread and inside the same posted closure — so it reads the writer-owned journal
-      // structure the edit just changed. The `commands` verbs already refresh themselves, but
-      // they are not the only writers — the camera inspector and the frame manipulator commit
-      // bare `scene::` transactions inside raw apply_edit closures that no verb ever observes,
-      // and without this hook the panel would go stale after each of them. Same lifetime argument
-      // as the edit runner above: the canvas is stopped and joined before `app_state` is
-      // destroyed.
-      canvas.set_post_edit_hook([&app_state] { ace::commands::publish_history(app_state); });
-      // The ONE framing source both framing-derived verbs read (D-mint_from_focused_canvas-4):
-      // `insert_cell`'s provisional placement (editor.cells.model, Constraint 7) and
-      // `new_shot_from_view`'s mint (D23) both go through this provider, so binding it to the
-      // FOCUSED canvas moves both at once — an inserted cell lands where the canvas the user is
-      // working in is looking, and a mint promotes that same pane rather than canvas#1. Read by
-      // value at verb time. Same lifetime argument as the edit runner above.
+      // No history post-edit hook to bind (A18, as amended by
+      // editor.canvas.history_snapshot_adopt): the library republishes `journal().history()` on
+      // EVERY commit regardless of path — the `commands` verbs, this class's manipulator commits,
+      // and the camera inspector's bare `scene::` transactions alike — so the vestigial writer-turn
+      // epilogue is retired. The ONE framing source both framing-derived verbs read
+      // (D-mint_from_focused_canvas-4): `insert_cell`'s provisional placement (editor.cells.model,
+      // Constraint 7) and `new_shot_from_view`'s mint (D23) both go through this provider, so
+      // binding it to the FOCUSED canvas moves both at once — an inserted cell lands where the
+      // canvas the user is working in is looking, and a mint promotes that same pane rather than
+      // canvas#1. Read by value at verb time. Same lifetime argument as the edit runner above.
       app_gateway->set_view_framing([&canvas] { return canvas.focused_framing(); });
       project_gateway = app_gateway.get();
     }

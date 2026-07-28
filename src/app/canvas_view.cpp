@@ -585,9 +585,10 @@ std::optional<arbc::ObjectId> CanvasView::look_through(std::string_view view_id)
 }
 
 void CanvasView::apply_edit(const std::function<void()>& edit) {
-  // ONE unit of writer-thread work: the mutation plus the A18 epilogue, so the epilogue reads the
-  // writer-owned structure the edit just changed without a second round trip and without any
-  // window in which another submitter could interleave.
+  // ONE unit of writer-thread work carrying just the mutation: the History panel's snapshot is
+  // published library-side inside the commit (A18, as amended by
+  // editor.canvas.history_snapshot_adopt), so there is no host-side post-edit epilogue to run here
+  // any more.
   writer_.submit_sync([&] {
     // The identity tripwire, at the ONE point every document mutation passes through
     // (D-writer_thread-1): libarbc's own predicate, asserted rather than commented. It fires if
@@ -595,9 +596,6 @@ void CanvasView::apply_edit(const std::function<void()>& edit) {
     // removes, and the one a `SlotStore::allocate` assert would otherwise report much deeper in.
     assert(state_.document().on_writer_thread() && "edits must run on the document's writer");
     edit();
-    if (post_edit_hook_) {
-      post_edit_hook_();
-    }
   });
   // Then wake every live entry to re-render the damage (one writer, N observers — Constraint 4).
   // A refused submission (the writer is stopping) ran nothing, and a poke on a stopping host is
@@ -606,10 +604,6 @@ void CanvasView::apply_edit(const std::function<void()>& edit) {
 }
 
 void CanvasView::on_writer(const std::function<void()>& work) { writer_.submit_sync(work); }
-
-void CanvasView::set_post_edit_hook(std::function<void()> hook) {
-  post_edit_hook_ = std::move(hook);
-}
 
 void CanvasView::poke() { host_.poke(); }
 

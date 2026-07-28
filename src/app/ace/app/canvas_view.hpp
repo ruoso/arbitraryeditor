@@ -96,16 +96,6 @@ public:
   // as `apply_edit`, WITHOUT the epilogue and the canvas wake, both of which would be pure cost.
   void on_writer(const std::function<void()>& work);
 
-  // Install the writer-turn epilogue (arch A18): run at the end of every `apply_edit`, ON THE
-  // WRITER THREAD, so it may read writer-owned document structure the edit just changed
-  // (libarbc's `Journal::entry_at`, for one) and publish it for the UI thread. The shell binds it
-  // to `commands::publish_history`, so EVERY document mutation — including this class's own
-  // manipulator commits and the camera inspector's bare `scene::` transactions, neither of which
-  // passes through a `commands` verb — republishes the History panel's snapshot. It moved here
-  // from `CanvasHost` with the edit seam: `render` no longer owns the document write path.
-  // Set once at wiring time, before edits start.
-  void set_post_edit_hook(std::function<void()> hook);
-
   // Wake the render thread to re-render EVERY live canvas after a UI-thread edit (the
   // fan-out poke seam the edit points drive; D-frame_sync-2 / Constraint 4). Thread-safe.
   // NOTE: a bare poke does NOT serialize the preceding mutation against the render read —
@@ -276,9 +266,6 @@ private:
   render::CanvasHost host_;
   platform::NativeThreads threads_;
   std::unique_ptr<platform::JoinHandle> render_thread_;
-  // The writer-turn epilogue (A18), run inside every posted edit closure. Set once at wiring
-  // time from the thread that wires; read on the writer thread.
-  std::function<void()> post_edit_hook_;
   std::map<std::string, Presenter, std::less<>> presenters_;
   // The sticky focused-canvas hint (D-mint_from_focused_canvas-1/-2): UI-thread session
   // state, written only in `draw_content`, cleared only in `reconcile` when that pane's

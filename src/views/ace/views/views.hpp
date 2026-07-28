@@ -128,12 +128,13 @@ void draw_view(std::string_view view_id);
 // head highlighted and future/redoable entries dimmed — and navigates it when a row
 // is clicked, through the L1 commands::navigate_to verb (D-history-4/5).
 //
-// A pure reader/navigator that touches NO journal internals (arch A18 /
-// D-history_published_reads-1/2): it renders from ONE `commands::HistorySnapshot`
-// loaded per frame off `AppState::history()` — the immutable value the writer thread
-// publishes at each writer-turn boundary — never from the writer-owned entry vector
-// libarbc's `entry_at` hands out. Names and cursor come from that same loaded pointer,
-// so a frame's list, highlight and dim-split are always one self-consistent generation.
+// A pure reader/navigator that touches NO journal internals (arch A18, as amended by
+// editor.canvas.history_snapshot_adopt): it renders from ONE `commands::HistoryModel`
+// read per frame off `AppState::history()` — the LIBRARY's any-thread published
+// `journal().history()` projection plus its separately-published cursor, clamped in
+// `commands` — never from the writer-owned entry vector libarbc's `entry_at` hands out.
+// The rows are an immutable shared snapshot and the cursor is clamped against their own
+// count, so a frame's list, highlight and dim-split are always in-bounds and self-consistent.
 // It never mutates the journal directly (Constraint 1). Draws into the CURRENT window
 // (the dockspace owns Begin/End). The L4 shell registers it capturing the one AppState&
 // and clears it on exit (D-history-3).

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <ace/commands/history.hpp>
 #include <ace/commands/selection.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
@@ -10,6 +9,7 @@
 #include <ace/project/save.hpp>
 
 #include <arbc/contract/registry.hpp>
+#include <arbc/model/journal.hpp> // arbc::HistoryView / HistoryRow (the library's published projection, A18)
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp> // arbc::KindBridge (the document-scoped bridge)
 #include <arbc/runtime/raster_tile_store.hpp> // arbc::RasterTileStore (A23; complete: unique_ptr member)
@@ -27,11 +27,35 @@
 
 namespace ace::commands {
 
+// The History panel's whole per-frame model (arch A18, as amended by
+// editor.canvas.history_snapshot_adopt): the library's any-thread published history
+// projection `arbc::Journal::history()` paired with its separately-published `cursor()`,
+// already clamped into `[0, rows->size()]`. `rows` is never null (an empty journal
+// publishes an empty view) and its rows are shared by pointer, so holding this model across
+// any number of later commits sees a stable, self-consistent value — the immutability that
+// retired the host-side publisher mirror. Each `arbc::HistoryRow` carries `name` AND `byte_cost`;
+// DISPLAYING the cost is `editor.panels.history`'s call, not this leaf's.
+struct HistoryModel {
+  std::shared_ptr<const arbc::HistoryView> rows; // never null; oldest-first, shared by pointer
+  std::size_t cursor = 0;                        // applied-entry count, in [0, rows->size()]
+};
+
+// Clamp a separately-published journal cursor into `[0, rows.size()]`
+// (Constraint 3 / D-history_snapshot_adopt-3). `arbc::HistoryView` carries no cursor, so the
+// panel model reads `journal().cursor()` as a SECOND, independent atomic load — and `depth()`
+// is NOT monotonic (a commit after an undo trims the redo tail), so a cursor from a later
+// generation can exceed an earlier generation's row count and index out of range at the
+// "Redo <name>" affordance. Clamping against the very `HistoryView` the caller will index makes
+// any one-frame tear cosmetically stale but never out-of-bounds, self-correcting next frame.
+// Pure, so the correctness-critical branch is unit-testable headless with synthetic
+// out-of-bounds inputs a single-threaded run cannot otherwise reach.
+std::size_t clamp_history_cursor(const arbc::HistoryView& rows, std::size_t raw_cursor);
+
 // A move-safe atomic revision slot. `std::atomic` is neither copyable nor movable, and
 // `AppState`'s defaulted move is load-bearing (`open_or_create_app_state` returns by value), so
-// the atomic is wrapped rather than declared inline — the same problem `history_`'s `unique_ptr`
-// indirection solves for `HistoryPublisher`. `k_none` is the "no known-published snapshot this
-// session" sentinel; no real document revision can reach it.
+// the atomic is wrapped rather than declared inline — the same problem `tiles_`'s `unique_ptr`
+// indirection solves for the non-movable `RasterTileStore`. `k_none` is the "no known-published
+// snapshot this session" sentinel; no real document revision can reach it.
 class SavedRevision {
 public:
   static constexpr std::uint64_t k_none = std::numeric_limits<std::uint64_t>::max();
@@ -114,13 +138,18 @@ public:
   Selection& selection() { return selection_; }
   const Selection& selection() const { return selection_; }
 
-  // The published journal-shape snapshot the UI reads instead of walking the
-  // writer-owned entry vector (arch A18). `history().load()` is any-thread and never
-  // null — an empty snapshot is published at construction, so a panel drawn before the
-  // first edit still gets a valid pointer. `history().refresh(...)` is writer-thread
-  // only; call it through the free `publish_history` below rather than directly.
-  HistoryPublisher& history() { return *history_; }
-  const HistoryPublisher& history() const { return *history_; }
+  // The History panel's whole per-frame model, read ANY-THREAD from the library's published
+  // history projection (arch A18, as amended by editor.canvas.history_snapshot_adopt). Retires
+  // the host-side publisher mirror: `journal().history()` is the library's any-thread immutable
+  // snapshot (never null), and `journal().cursor()` is the separately-published cursor, which is
+  // clamped against the snapshot's OWN size so every index the panel derives is in-bounds despite
+  // the two independent atomic loads (Constraint 3). A pure read — no writer-turn refresh, no
+  // atomic member — the library republishes on every commit regardless of code path.
+  HistoryModel history() const {
+    std::shared_ptr<const arbc::HistoryView> rows = document_->journal().history();
+    const std::size_t cursor = clamp_history_cursor(*rows, document_->journal().cursor());
+    return HistoryModel{std::move(rows), cursor};
+  }
 
   // Whether `open_project` rebuilt this session from the canonical `project.arbc`
   // rather than mapping the crash-durable workspace (always false for a fresh
@@ -199,12 +228,6 @@ private:
   // The next gesture-coalescing key (D-undo-2): monotonic, seeded at 1 so it never
   // hands out `k_no_coalesce` (0) and never repeats within a session.
   std::uint64_t next_gesture_key_ = 1;
-  // The History panel's published read seam (A18 / D-history_published_reads-6). Held
-  // through a `unique_ptr` — like `document_` above — because `HistoryPublisher` owns an
-  // `std::atomic<std::shared_ptr<...>>`, which is neither copyable nor movable and would
-  // otherwise delete the defaulted move above (and with it `open_or_create_app_state`'s
-  // return-by-value). Never null in a live `AppState`.
-  std::unique_ptr<HistoryPublisher> history_;
 };
 
 // A dispatchable editor action (refinement Decision D-app_state-5). This leaf
@@ -283,14 +306,6 @@ struct NavigateOutcome {
 // into ONE writer-thread unit of work that publishes ONE snapshot at the end rather
 // than one per step.
 NavigateOutcome navigate_to(AppState& state, std::size_t target_cursor);
-
-// WRITER THREAD: republish `state`'s history snapshot from the live journal (A18).
-// Idempotent and stamp-guarded, so it is cheap to call at every writer-turn exit — the
-// `commands` verbs above each call it, AND the L4 shell binds it as `CanvasHost`'s
-// post-edit hook, because camera-inspector and manipulator edits run bare `scene::`
-// transactions inside a raw `apply_edit` closure and never reach a verb at all
-// (D-history_published_reads-3).
-void publish_history(AppState& state);
 
 // Resolve a project directory into an `AppState` (refinement Decision
 // D-app_state-6): an existing path opens (`project::open_project`), a
