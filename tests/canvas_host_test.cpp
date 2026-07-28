@@ -712,6 +712,79 @@ TEST_CASE("canvas_host: a resize/camera for a not-yet-live entry is DEFERRED not
   CHECK(f.pixels == ace::render::render_document_srgb8(*doc, k_w, k_h, k_nav_camera).pixels);
 }
 
+TEST_CASE("canvas_host: an add and a remove for the same id in one iteration — the entry never "
+          "surfaces") {
+  // Both calls collapse into ONE drive iteration: the fresh loop inserts canvas#1 into
+  // `entries`, then the remove step extracts it into `dying` before any step/publish — so the
+  // entry is created and destructed under the same lock and never surfaces
+  // (D-pending_removes_order-2, the same-iteration pre-emption guard).
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc);
+  host.remove("canvas#1");
+  settle(host);
+
+  CHECK(host.live_count() == 0);
+  CHECK(host.published_sequence("canvas#1") == 0);
+  std::uint64_t s = 0;
+  Srgb8Image f;
+  CHECK_FALSE(host.consume("canvas#1", s, f));
+}
+
+TEST_CASE("canvas_host: a remove interleaved between the pending-adds swap and the entry-map lock "
+          "pre-empts the queued add") {
+  // The drop window this leaf closes (D-pending_removes_order-1): the add is posted AFTER the
+  // iteration's pending_adds.swap, so it is NOT in the swapped-out `adds` local — it sits in
+  // pending_adds when removes run. On today's code the remove finds no live entry, does
+  // nothing, and the queued add resurrects the canvas on the NEXT iteration; the fix cancels
+  // it in pending_adds so the entry never surfaces. The drive-phase seam makes that
+  // single-threaded window deterministic.
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  bool fired = false;
+  host.set_after_adds_swap_hook([&] {
+    if (fired) {
+      return; // one-shot: post the interleave exactly once, in the first iteration's window
+    }
+    fired = true;
+    host.add("canvas#1", *doc);
+    host.remove("canvas#1");
+  });
+
+  // Drive several explicit iterations: with the bug the resurrection lands on iteration 2
+  // (settle() would stop at iteration 1's false return and miss it), so pin the entry ABSENT
+  // across the following iterations, not just after the first.
+  for (int i = 0; i < 5; ++i) {
+    host.drive_once();
+  }
+
+  CHECK(fired); // the seam actually fired the interleave
+  CHECK(host.live_count() == 0);
+  CHECK(host.published_sequence("canvas#1") == 0);
+  std::uint64_t s = 0;
+  Srgb8Image f;
+  CHECK_FALSE(host.consume("canvas#1", s, f));
+}
+
+TEST_CASE("canvas_host: a remove for an unknown id is a silent no-op") {
+  // A remove naming an id that is neither live, nor a queued add, nor a queued resize/camera
+  // does nothing and is not an error (Constraint 3) — and crucially is NOT retained: a
+  // genuinely-new later add(id) the user asks for still surfaces, unpoisoned.
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  host.remove("ghost");
+  settle(host);
+  CHECK(host.live_count() == 0);
+
+  host.add("ghost", *doc);
+  host.request_resize("ghost", k_w, k_h);
+  settle(host);
+  CHECK(host.live_count() == 1);
+  std::uint64_t s = 0;
+  Srgb8Image f;
+  CHECK(host.consume("ghost", s, f));
+}
+
 TEST_CASE("canvas_host: anchor_depth surfaces deep-zoom rebasing — non-zero in, back to 0 out") {
   auto doc = build_nested_doc(/*levels=*/1);
   CanvasHost host = make_inline_host();

@@ -141,6 +141,18 @@ public:
   // single-threaded unit tests (inline executor); in the app only run() calls it.
   bool drive_once();
 
+  // TEST-ONLY drive-phase seam (D-pending_removes_order-3): a hook fired once inside each
+  // drive_once() AFTER the pending-adds swap releases the first lock and BEFORE the fresh
+  // entries are built / the entry-map lock is retaken. Single-threaded, nothing otherwise
+  // runs in that window, so it is the only way a headless fixture can post the exact
+  // add(id)+remove(id) interleave that must let the remove PRE-EMPT a still-queued add — the
+  // add posted after the swap, still sitting in pending_adds when removes run. In the same
+  // spirit as drive_once() being "public for deterministic single-threaded unit tests"
+  // above. Null by default and INERT in the app: only the inline unit fixtures set it; run()
+  // and the shipped bootstrap never touch it. A std::function member — no new include, no
+  // levelization edge.
+  void set_after_adds_swap_hook(std::function<void()> hook);
+
   // UI thread (or a test): take entry `id`'s latest published frame iff its sequence is
   // newer than `last_seq`. Non-blocking (a bounded MOVE under a short lock). Returns
   // false (out/last_seq untouched) for an unknown id or no new frame (Constraint 3).

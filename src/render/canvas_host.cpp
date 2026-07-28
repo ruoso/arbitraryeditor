@@ -125,6 +125,12 @@ struct CanvasHost::Impl {
 
   std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries;
 
+  // TEST-ONLY drive-phase seam (D-pending_removes_order-3): fired once between the
+  // pending-adds swap and the entry-map lock so a headless fixture can post an add+remove in
+  // that otherwise-unreachable window. Null and untouched in the app; set only by the inline
+  // single-threaded unit fixtures before any thread spawns.
+  std::function<void()> after_adds_swap_hook;
+
   // Wake the render loop (the fan-out poke). Split out of CanvasHost::poke so the writer-thread
   // settle nudge can call it without going through the public API.
   void wake() {
@@ -209,6 +215,10 @@ CanvasHost::~CanvasHost() = default;
 
 void CanvasHost::set_writer(writer::WriterThread* writer) { impl_->writer = writer; }
 
+void CanvasHost::set_after_adds_swap_hook(std::function<void()> hook) {
+  impl_->after_adds_swap_hook = std::move(hook);
+}
+
 void CanvasHost::add(std::string id, arbc::Document& document, const arbc::Registry* registry,
                      arbc::KindBridge* bridge) {
   {
@@ -290,6 +300,12 @@ bool CanvasHost::drive_once() {
     std::lock_guard<std::mutex> lock(impl_->mu);
     adds.swap(impl_->pending_adds);
   }
+  // TEST-ONLY (D-pending_removes_order-3): off-lock between the swap and the entry-map lock,
+  // the single-threaded window where a fixture can post the add+remove interleave that a
+  // remove must pre-empt. Null and skipped in the app.
+  if (impl_->after_adds_swap_hook) {
+    impl_->after_adds_swap_hook();
+  }
   std::vector<std::pair<std::string, std::unique_ptr<Entry>>> fresh;
   for (Impl::PendingAdd& pending : adds) {
     if (impl_->entries.find(pending.id) != impl_->entries.end()) {
@@ -316,13 +332,25 @@ bool CanvasHost::drive_once() {
       impl_->entries.emplace(id, std::move(entry));
     }
 
-    // 2. Service removes (extract, erase, destruct off-lock below).
+    // 2. Service removes (extract, erase, destruct off-lock below). Per removed id, reconcile
+    //    the entries map AND every queue it can name — symmetric with the per-id resize/camera
+    //    discipline in step 3 (D-pending_removes_order-1/2). The pending_adds erase is what
+    //    closes the drop window: an add(id) posted AFTER this iteration's swap sits in
+    //    pending_adds now, invisible to the entries map; without cancelling it the remove finds
+    //    no live entry, does nothing, and that queued add resurrects the removed canvas next
+    //    iteration. A same-iteration add is instead pre-empted above — inserted into `entries`
+    //    by the fresh loop, then extracted into `dying` here. A remove has nothing to wait for
+    //    (unlike a deferred resize, which a later add gives meaning): an id that is neither
+    //    live, nor a queued add, nor a queued resize/camera is a silent no-op, matching add's
+    //    idempotence — and a stale remove is never retained to poison a genuinely-new later add.
     for (const std::string& id : impl_->pending_removes) {
       auto it = impl_->entries.find(id);
       if (it != impl_->entries.end()) {
         dying.push_back(std::move(it->second));
         impl_->entries.erase(it);
       }
+      std::erase_if(impl_->pending_adds,
+                    [&id](const Impl::PendingAdd& add) { return add.id == id; });
       impl_->pending_resizes.erase(id);
       impl_->pending_cameras.erase(id);
     }
