@@ -50,7 +50,8 @@ AppState::AppState(project::OpenedProject opened)
       // `project::open_project` produces it once at bootstrap and this is the only place
       // the UI can reach it — the dock's open verbs spawn SIBLING processes and never see
       // an `OpenedProject`, so the in-process session owns the fact for its own window.
-      unbindable_content_records_(opened.unbindable_content_records) {
+      unbindable_content_records_(opened.unbindable_content_records),
+      mapped_in_sync_(opened.mapped_in_sync) {
   // The persistent, lifetime-scoped kind Registry (D-open-7): seeded once here,
   // not rebuilt per open. `save`/export and the future A6 plugin seam reuse it.
   arbc::register_builtin_kinds(registry_);
@@ -66,11 +67,30 @@ AppState::AppState(project::OpenedProject opened)
   // kind tokens identically to the author-side mints. Every canvas over this document is handed
   // this one bridge — the document holds a single external-load settler slot.
   project::seed_kind_bridge(kind_bridge_, registry_);
-  // The dirty baseline (D-save-4): a session rebuilt from the canonical `project.arbc`
-  // starts CLEAN (the workspace was just built from the snapshot); a fresh
-  // `create_project` or a workspace-mapped open starts DIRTY (`saved_revision_`
-  // stays `k_none` — no known-published snapshot this session).
-  if (rebuilt_from_canonical_) {
+  // Install the content-identity capture on the session document (editor.project.
+  // reconstructing_reopen / D-reconstructing_reopen-5). This is the create/open session's
+  // install point: every `add_content` the user drives — a cell, a camera — snapshots the
+  // content's construction identity into the workspace record, so the crash-durable `workspace/`
+  // carries what a future map reopen (`arbc::open_document`) reconstructs from. It is installed
+  // here, not in `project::create_project`/`open_project`, because the capture's backing must
+  // outlive the captured document — which outlives those functions — and only a
+  // session-lifetime owner (`AppState`, holding the returned `capture_codecs_`) has that reach.
+  // The backing (codec table + bridge) is heap-owned inside the returned handle, so it survives
+  // `AppState` being MOVED by value; `registry_` need only outlive this call. The rebuild path
+  // installs its own transient capture for the load's `add_content`s and clears it; this
+  // overwrites any residue. The install is driven through `project` because `arbc::CodecTable`
+  // names nlohmann::json, kept PRIVATE to `project` (§8) — `commands` holds it only as a
+  // type-erased owner. The capture runs the kind's registered codec, so it covers the editor
+  // kinds `register_editor_kinds` just added (a camera captures its identity), through the same
+  // `registry_` the generic snapshot save serializes through.
+  capture_codecs_ = project::install_content_identity_capture(*document_, registry_);
+  // The dirty baseline (D-save-4, as amended by D28): a session rebuilt from the canonical
+  // `project.arbc` starts CLEAN (the workspace was just built from the snapshot), and a mapped
+  // reopen the published-revision sidecar proved IN SYNC starts clean too (D28 — the durable-by-
+  // default fast path is now the common reopen, so a cleanly-saved project must not open falsely
+  // dirty). A fresh `create_project` or a mapped reopen with no matching sidecar starts DIRTY
+  // (`saved_revision_` stays `k_none` — no known-published snapshot this session).
+  if (rebuilt_from_canonical_ || mapped_in_sync_) {
     saved_revision_.store(document_->pin()->revision());
   }
   // No host-side history publication to seed (A18, as amended by history_snapshot_adopt): the

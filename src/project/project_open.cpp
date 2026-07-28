@@ -8,8 +8,12 @@
 #include <arbc/runtime/document_serialize.hpp>
 #include <arbc/runtime/filesystem_asset_source.hpp>
 #include <arbc/runtime/raster_tile_store.hpp> // arbc::RasterTileStore (the load SEEDS it)
+#include <arbc/serialize/codec.hpp>           // arbc::CodecTable (complete type for builtin_codecs)
+#include <arbc/serialize/load_context.hpp> // arbc::LoadContext (arbc::open_document's reconstruction ctx)
 
+#include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -144,6 +148,17 @@ rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_b
   arbc::KindBridge bridge;
   seed_kind_bridge(bridge, registry);
   arbc::FilesystemAssetSource assets;
+  // Install content-identity capture BEFORE the load so every `ContentRecord` the load mints
+  // carries its construction identity into the freshly-rebuilt workspace (Constraint 3 /
+  // D-reconstructing_reopen-5): `load_document` binds each recovered content through
+  // `Document::add_content`, which snapshots the identity when this capture is installed, so the
+  // rebuilt workspace is itself reconstructable on its NEXT map reopen instead of degrading to a
+  // full canonical rebuild every time. The capture BORROWS `codecs` and `bridge`, both local and
+  // alive through the load and the checkpoint below; it is cleared before the document escapes
+  // this scope so no dangling closure survives (the session re-installs its own over `registry_`
+  // in `AppState`, editor.project.reconstructing_reopen).
+  const arbc::CodecTable codecs = arbc::builtin_codecs(registry, tiles.get());
+  document->set_content_identity_capture(arbc::codec_identity_capture(codecs, bridge));
   const auto loaded = arbc::load_document(canonical_bytes, *document, bridge, registry,
                                           layout.canonical.string(), &assets, tiles.get(),
                                           /*decode=*/nullptr);
@@ -156,36 +171,55 @@ rebuild_from_canonical(const ProjectLayout& layout, std::string_view canonical_b
     tiles.reset();
     return make_error_code(OpenError::IoError);
   }
+  // The load-time capture has done its job (the checkpoint above persisted the captured
+  // identity); clear it so the moved-out `document` carries no closure into the freed `codecs`
+  // and `bridge` locals — `AppState` installs the session capture over its own long-lived state.
+  document->set_content_identity_capture({});
   return document;
 }
 
-// How many of `document`'s recovered content records the binding table could not
-// serve (A19). `arbc::Document::open` takes no `Registry` and runs no factory, so a
-// workspace-mapped document's id→`Content` side-map starts EMPTY: the record graph
-// comes back verbatim — composition, layers, transforms, persisted `StateHandle`
-// slots — while `resolve()` answers null for every recovered record, for EVERY kind.
-// Walking `DocRoot::for_each_layer` (the global, ascending-object-id walk, so a
-// content placed inside a nested composition is counted too) and testing each layer's
-// bound content against `resolve` is therefore the direct measurement of "how much of
-// this mapped document is unusable". Zero means the map is serviceable: the record
-// graph was all there was to recover. The editor attaches each placed content by
-// exactly one layer (`scene::add_cell` / `scene::add_camera`), so the tally is the
-// count of unrecoverable placed objects.
+// Whether the mapped-reconstruct reopen recovered a document in sync with the last publish
+// (D28 / D-reconstructing_reopen-3/-4). Reads the `workspace/published.rev` sidecar through the
+// `platform::FileSystem` seam (A3, never a raw `std::filesystem`) and returns true IFF it is
+// present AND names exactly the WORKSPACE'S LAST-CHECKPOINTED revision.
 //
-// A lock-free pinned read (A4) on the opening thread, before the document is handed
-// to any renderer; `resolve` is documented safe from any thread regardless.
-std::size_t count_unbindable_content(const arbc::Document& document) {
-  const arbc::DocStatePtr pinned = document.pin();
-  if (pinned == nullptr) {
-    return 0;
+// The mapped document's `pin()->revision()` is that checkpointed revision plus one: `open_document`
+// rebinds objects onto EXISTING records and "publishes no version" (arbc `document_serialize.cpp`),
+// but `arbc::Document::open` — the map replay it wraps — advances the revision by exactly one
+// bookkeeping step (verified in `tests/arbc_pin_test.cpp` for 0, 1, and 2 reconstructed records,
+// so the step is the MAP's, not the reconstruction's). A clean publish wrote the checkpointed
+// revision to the sidecar (`save_project` captured the same revision the workspace was
+// checkpointed at), so IN SYNC is `published == reopened_revision - 1`. Absent, unreadable,
+// unparseable, or mismatched all answer FALSE — the safe direction (a false-dirty, never a
+// false-clean): a false-clean would need the sidecar to name a revision the workspace does not
+// hold, which the publish-then-sidecar write ordering forbids (`save_project`); and because the
+// only revision that reads clean is exactly `reopened - 1`, ANY unsaved edit (≥ +1) or a future
+// change to the map's replay step degrades to false-dirty rather than false-clean. A lock-free
+// `pin()` read (A4) on the opening thread, before the document is handed to any renderer.
+bool mapped_reopen_in_sync(const platform::FileSystem& fs, const ProjectLayout& layout,
+                           const arbc::Document& document) {
+  if (!fs.exists(layout.published_rev)) {
+    return false;
   }
-  std::size_t unbindable = 0;
-  pinned->for_each_layer([&](const arbc::LayerRecord& layer) {
-    if (layer.content.valid() && document.resolve(layer.content) == nullptr) {
-      ++unbindable;
-    }
-  });
-  return unbindable;
+  const platform::Result<std::string> contents = fs.read_file(layout.published_rev);
+  if (!contents.has_value()) {
+    return false;
+  }
+  std::string_view text = *contents;
+  // Trim a trailing newline a hand-edited sidecar might carry; the writer adds none, but
+  // otherwise `from_chars`'s tail check below would reject it.
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+    text.remove_suffix(1);
+  }
+  std::uint64_t published = 0;
+  const char* const first = text.data();
+  const char* const last = text.data() + text.size();
+  const std::from_chars_result parsed = std::from_chars(first, last, published);
+  if (parsed.ec != std::errc{} || parsed.ptr != last) {
+    return false; // not a clean decimal `std::uint64_t`: treat as stale → dirty
+  }
+  const arbc::DocStatePtr pinned = document.pin();
+  return pinned != nullptr && pinned->revision() > 0 && published == pinned->revision() - 1;
 }
 
 } // namespace
@@ -203,7 +237,33 @@ ProjectLayout project_layout(const std::filesystem::path& root) {
   layout.workspace_file = layout.workspace_dir / "document.arbcws";
   layout.exports_dir = root / "exports";
   layout.gitignore = root / ".gitignore";
+  layout.published_rev = layout.workspace_dir / "published.rev";
   return layout;
+}
+
+namespace {
+// The heap-stable backing for a document's identity capture: `arbc::codec_identity_capture`
+// borrows a codec table AND a bridge BY REFERENCE, so both must have a stable address for the
+// captured document's whole life — even as the OWNER (e.g. `commands::AppState`) is moved by
+// value. A `KindBridge` VALUE MEMBER of a movable owner would relocate and dangle the borrow, so
+// the capture owns its OWN bridge here, seeded from the same registry the author-side mints
+// intern through (`seed_kind_bridge` makes the tokens registry-order deterministic and therefore
+// identical), rather than borrowing the owner's. Held behind one heap allocation whose address
+// the returned `shared_ptr` keeps stable across every move.
+struct CaptureBacking {
+  arbc::KindBridge bridge;
+  arbc::CodecTable codecs;
+};
+} // namespace
+
+std::shared_ptr<void> install_content_identity_capture(arbc::Document& document,
+                                                       const arbc::Registry& registry) {
+  auto backing = std::make_shared<CaptureBacking>();
+  seed_kind_bridge(backing->bridge, registry);
+  backing->codecs = arbc::builtin_codecs(registry);
+  document.set_content_identity_capture(
+      arbc::codec_identity_capture(backing->codecs, backing->bridge));
+  return backing;
 }
 
 platform::Result<OpenedProject>
@@ -225,63 +285,58 @@ open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
   // after it is incremental.
   std::unique_ptr<arbc::RasterTileStore> tiles = std::make_unique<arbc::RasterTileStore>();
 
-  // Fast, durable-by-default path (D-open-3): map the crash-durable workspace when the
-  // file is present — then KEEP the mapped document only when it is actually usable.
+  // Fast, durable-by-default path (D-open-3 / A19 amendment): map the crash-durable workspace
+  // when the file is present, opening it through the RECONSTRUCTING `arbc::open_document`
+  // (arbc#19). The content-bearing-map guard is RETIRED — the premise it stood on
+  // (`arbc::Document::open` takes no `Registry` and runs no factory, so the map binds no
+  // `Content` for any kind) no longer holds at the v0.4.0 pin. `open_document` is registry-aware:
+  // it maps the workspace, then walks each recovered `ContentRecord` and rebuilds it through the
+  // construction identity the record now carries — captured at `add_content` through the kind's
+  // registered codec — using the SAME routing `load_document` runs for a canonical file. So the
+  // map path is durable-by-default for EVERY kind at once, and the canonical rebuild survives
+  // ONLY as the fallback for a missing, unusable, or pre-v0.4.0 workspace (below).
   //
-  // What the map path really does (A19, pinned by tests/arbc_pin_test.cpp and
-  // tests/project_open_test.cpp): `arbc::Document::open(path, housekeeping)` takes no
-  // `Registry` and runs no factory (arbc `runtime/document.hpp:76-85`), so it restores
-  // the RECORD GRAPH ONLY. The composition, the layers, their transforms and the
-  // persisted `StateHandle` slots all come back; the id→`Content` side-map starts empty,
-  // so `resolve()` answers null for every recovered record and `for_each_content()`
-  // visits none. That is KIND-AGNOSTIC — verified for a non-editable built-in
-  // (`org.arbc.solid`) and an editable kind alike — so a mapped reopen of a
-  // content-bearing project yields zero cells AND zero cameras, both of which read
-  // through `Document::resolve`. The canonical rebuild (`load_document` over the
-  // `Registry` codec table) is the ONLY route that produces live content.
-  //
-  // NOTE for the next reader, because the previous version of this comment said
-  // otherwise: this guard is NOT about libarbc aborting. It was first written that way
-  // — v0.1.0's `Model::rebuild_counts` asserted every recovered `ContentRecord` carried
-  // an INERT `StateHandle` (A15) — and at the v0.3.0 pin that assert is GONE
-  // (`model.cpp:768-783` collects the handle instead; the arbc#5 `KindStateWalker` /
-  // `replay_recovered_content_state` trio exists but its input is unreachable from
-  // `arbc::Document`). Mapping a checkpointed camera is safe today. It is simply useless
-  // for content — which is why the guard outlives its own dead premise, for a larger
-  // reason than A15 states. Deleting it would silently empty every reopened project.
-  //
-  // So: map, then INSPECT. `register_extra_kinds` survives only as a cheap
-  // SHORT-CIRCUIT — an editor-kind session with a canonical present will always reject a
-  // content-bearing map, so we do not open a potentially large workspace arena just to
-  // discard it, and today's I/O profile on the common editor reopen is unchanged
-  // (D-slab_adopt-4). Every other caller maps and is judged on what came back.
+  // The transient reconstruction Registry mirrors the rebuild path (D-open-7): built-ins plus,
+  // when set, the caller's editor kinds (`register_extra_kinds`) so an editor-authored kind
+  // reconstructs as its live typed Content. The bridge is seeded from it (deterministic tokens),
+  // and `builtin_codecs(registry, tiles.get())` binds the session's ONE raster memo into the
+  // codec table by closure — so a reconstruct decode SEEDS the store the first save sweeps,
+  // decoding tiles INLINE (a null `TileDecodeDispatch`, byte-identical, A23 (4)). The
+  // `LoadContext` carries the caller's asset source so owned tiles resolve from `assets/`.
   const bool canonical_exists = fs.exists(layout.canonical);
-  const bool skip_map_for_editor_kinds = register_extra_kinds && canonical_exists;
-  if (fs.exists(layout.workspace_file) && !skip_map_for_editor_kinds) {
-    auto mapped = arbc::Document::open(layout.workspace_file.string());
-    if (mapped.has_value()) {
-      const std::size_t unbindable = count_unbindable_content(**mapped);
-      // Keep the map when it bound everything (the fast path survives where it is
-      // harmless, preserving A13's recovery of unpublished RECORD-level edits — layer
-      // transforms, z-order, composition size), and keep it when there is no canonical
-      // to rebuild from: the mapped document is then all the project has, and returning
-      // `NoProject` instead would be strictly worse. In that second case the loss is
-      // REPORTED rather than silently swallowed (D-slab_adopt-5 / D-slab-3's residual).
-      if (unbindable == 0 || !canonical_exists) {
-        OpenedProject opened;
-        opened.document = std::move(*mapped);
-        opened.tiles = std::move(tiles); // cold: no `load_document` ran (D-raster_tile_store-7)
-        opened.layout = layout;
-        opened.rebuilt_from_canonical = false;
-        opened.unbindable_content_records = unbindable;
-        return opened;
-      }
-      // Unbindable content plus a canonical floor: fall through. `mapped` dies at the
-      // end of this block, unmapping the workspace file before `rebuild_from_canonical`
-      // truncates and re-mints it.
+  if (fs.exists(layout.workspace_file)) {
+    arbc::Registry registry;
+    arbc::register_builtin_kinds(registry);
+    if (register_extra_kinds) {
+      register_extra_kinds(registry);
     }
-    // A returned WorkspaceFileError (truncated / another machine / stale) is not an
-    // error — it falls through to rebuild-from-canonical below.
+    arbc::KindBridge bridge;
+    seed_kind_bridge(bridge, registry);
+    const arbc::CodecTable codecs = arbc::builtin_codecs(registry, tiles.get());
+    arbc::LoadContext ctx(layout.canonical.string());
+    arbc::FilesystemAssetSource assets;
+    ctx.set_asset_source(&assets);
+    auto reopened =
+        arbc::open_document(layout.workspace_file.string(), registry, codecs, ctx, bridge);
+    if (reopened.has_value()) {
+      OpenedProject opened;
+      opened.document = std::move(reopened->document);
+      // Seeded by the reconstruction decode above (not cold): the codec memo took the blob
+      // names every reconstructed tile carries, so the session's first save is a memo sweep.
+      opened.tiles = std::move(tiles);
+      opened.layout = layout;
+      opened.rebuilt_from_canonical = false;
+      // Re-keyed from "the map could not bind" to "open_document could not reconstruct" — a
+      // record with no captured identity (pre-v0.4.0), no registered codec (plugin absent), or a
+      // failed codec is left UNBOUND and reported, never defaulted (Constraint 4). Common case: 0.
+      opened.unbindable_content_records = reopened->unreconstructed.size();
+      // Seed the cross-session dirty verdict (D28): clean iff the sidecar matches the
+      // reconstructed revision, else dirty (the safe direction).
+      opened.mapped_in_sync = mapped_reopen_in_sync(fs, layout, *opened.document);
+      return opened;
+    }
+    // A returned WorkspaceFileError (truncated / another machine / pre-map / pre-v0.4.0 without a
+    // mappable arena) is not an error — it falls through to rebuild-from-canonical below.
   }
 
   // Rebuild from the canonical core. If it too is absent, this is not a project.

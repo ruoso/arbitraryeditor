@@ -125,8 +125,13 @@ std::filesystem::path persist_keeping_workspace(const ScratchDir& scratch,
   {
     AppState state = session_with_composition(scratch, fs, leaf);
     author(state);
+    // Make the authored state durable in the workspace ARENA before publishing: the reconstructing
+    // reopen (editor.project.reconstructing_reopen) maps the workspace, so a fixture that keeps the
+    // workspace must checkpoint the content into it — the canonical alone is not what the map
+    // reads.
+    REQUIRE(state.document().checkpoint().has_value());
     REQUIRE(ace::commands::save_project(state, fs).has_value());
-  } // state destructs → workspace checkpointed + unmapped, HousekeepingThread joined
+  } // state destructs → workspace unmapped, HousekeepingThread joined
   return root; // workspace/ deliberately NOT removed — the fast path stays reachable
 }
 
@@ -846,16 +851,18 @@ TEST_CASE("reopen from canonical WITHOUT the callback degrades a camera to a pla
   CHECK(dynamic_cast<const CameraContent*>(content) == nullptr);
 }
 
-// --- editor.cameras.workspace_reopen_slab: a saved camera project reopens WITH the
-// workspace present through the canonical rebuild, not the map (A15/A19) --------------
+// --- editor.project.reconstructing_reopen: a saved camera project reopens through the
+// RECONSTRUCTING MAP, not the canonical rebuild (A19 amendment) ------------------------
 //
-// Re-founded by `editor.cameras.reopen_slab_adopt`: the map path does NOT abort at the
-// v0.3.0 pin (asserted in tests/arbc_pin_test.cpp) — it simply binds no `Content` for any
-// kind, so a camera-bearing map returns a document with a live layer record and nothing
-// behind it. The rebuild-from-canonical policy therefore stands for a larger,
-// kind-agnostic reason than A15 gave it, and its EFFECT below is unchanged.
+// Re-founded again by `editor.project.reconstructing_reopen`: the v0.4.0 pin makes the map path
+// registry-aware, so a camera-bearing map now RECONSTRUCTS its cameras through their captured
+// construction identity (`arbc::open_document`) instead of the guard discarding it for a
+// canonical rebuild. The cameras below are never edited after creation, so their construction
+// identity IS their authored state and reconstruction restores them exactly. (A camera edited
+// after creation but not saved reverts its name/resolution to construction values on a mapped
+// reopen — the parked library gap; see tests/project_open_test.cpp.)
 
-TEST_CASE("a saved camera project reopens via forced rebuild with the workspace present") {
+TEST_CASE("a saved camera project reopens through the reconstructing map, cameras live") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
 
@@ -870,16 +877,14 @@ TEST_CASE("a saved camera project reopens via forced rebuild with the workspace 
         first_id = ace::scene::cameras(state.document())[0].id;
       });
 
-  // The crash-durable workspace file is present, so D-open-3 would prefer the map fast
-  // path — which would hand back a document binding NO `Content`, hence no cameras and no
-  // cells (A19). The editor-kind callback + the existing canonical short-circuit straight
-  // to rebuild-from-canonical without even opening the workspace file: the call returns,
-  // reports the rebuild route, and restores live typed cameras identically to the
-  // shed-workspace guarantee above.
+  // The crash-durable workspace file is present, so D-open-3's durable-by-default fast path
+  // MAPS it — and the reconstructing reopen (A19 amendment) rebuilds each camera through its
+  // captured construction identity, restoring live typed cameras WITHOUT a canonical rebuild.
   REQUIRE(fs.exists(ace::project::project_layout(root).workspace_file));
   auto reopened = ace::project::open_project(fs, root, ace::scene::register_camera_kind);
   REQUIRE(reopened.has_value());
-  REQUIRE(reopened.value().rebuilt_from_canonical); // policy skipped the map fast path
+  CHECK_FALSE(reopened.value().rebuilt_from_canonical); // mapped-and-reconstructed
+  CHECK(reopened.value().unbindable_content_records == 0);
   const arbc::Document& doc = *reopened.value().document;
 
   const std::vector<Camera> cams = ace::scene::cameras(doc);
@@ -920,7 +925,8 @@ TEST_CASE("without the callback a CONTENT-FREE present-workspace project keeps t
   CHECK(reopened.value().unbindable_content_records == 0);
 }
 
-TEST_CASE("without the callback a CAMERA-bearing present-workspace project now rebuilds") {
+TEST_CASE("without the callback a CAMERA-bearing present-workspace project reconstructs a "
+          "placeholder") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   const std::filesystem::path root =
@@ -931,20 +937,19 @@ TEST_CASE("without the callback a CAMERA-bearing present-workspace project now r
         REQUIRE(state.document().checkpoint().has_value());
       });
 
-  // The behaviour change of D-slab_adopt-4. No callback, so the old guard's condition was
-  // absent and this reopen took the map — receiving a document with a live layer record
-  // and a null `resolve()` behind it. Map-then-inspect rejects that and rebuilds from the
-  // canonical, for EVERY caller, because the binding gap is kind-agnostic (A19).
+  // Re-founded by `editor.project.reconstructing_reopen`. No callback, so the reconstruction
+  // registry is built-ins only and does not know `org.arbc.camera` — but the record carries a
+  // captured identity, and an identified-but-unknown-codec kind reconstructs as the documented
+  // `arbc::PlaceholderContent` (bound, transform-preserving), NOT left unbound. So the map is
+  // KEPT (no canonical rebuild), the placeholder is a successful reconstruction (nothing
+  // reported lost), and the camera simply is not a typed `CameraContent` this session.
   auto reopened = ace::project::open_project(fs, root);
   REQUIRE(reopened.has_value());
-  CHECK(reopened.value().rebuilt_from_canonical);
+  CHECK_FALSE(reopened.value().rebuilt_from_canonical); // mapped-and-reconstructed
   CHECK(reopened.value().unbindable_content_records == 0);
 
-  // Asserted as LIVE CONTENT, not merely as the flag, so the case cannot drift back to
-  // pinning an empty document. Without the extra-kinds callback the camera's codec is not
-  // registered, so it comes back as the documented `arbc::PlaceholderContent` degradation
-  // (D-reopen-1) — bound and transform-preserving, which is exactly the difference
-  // between "rebuilt" and "mapped": the mapped document binds nothing at all.
+  // The camera record reconstructs to a bound placeholder — resolve() answers a live object,
+  // transform-preserving — but `scene::cameras` needs a typed `CameraContent`, so it is empty.
   const arbc::Document& doc = *reopened.value().document;
   std::size_t layers = 0;
   std::size_t bound = 0;
@@ -959,21 +964,21 @@ TEST_CASE("without the callback a CAMERA-bearing present-workspace project now r
   CHECK(ace::scene::cameras(doc).empty()); // no codec registered → not a typed camera
 }
 
-TEST_CASE("a camera-free editor session still forces rebuild (the short-circuit's cost)") {
+TEST_CASE("a camera-free editor session now keeps the map (the short-circuit is retired)") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   const std::filesystem::path root =
       persist_keeping_workspace(scratch, fs, "fastpath_freecb", [](AppState&) {});
 
-  // WITH the callback and a canonical, but an EMPTY workspace: `open_project` skips the
-  // map without inspecting it. That is now an I/O optimization rather than a fail-safe
-  // (D-slab_adopt-4) — an editor-kind session with a canonical would reject almost every
-  // real map, so mapping a potentially large arena just to discard it costs more than the
-  // occasional needless rebuild. This pins the accepted false-positive so the trade-off
-  // stays visible and regression-locked.
+  // `editor.project.reconstructing_reopen` RETIRES the extra-kinds short-circuit: it existed
+  // only to avoid mapping a workspace the old content-bearing-map guard would reject, and there
+  // is no longer a rejection — every caller maps-and-reconstructs. So an editor-kind session with
+  // a canonical and a present workspace now KEEPS the map (the needless-rebuild cost this case
+  // used to pin is eliminated), reconstructing whatever content it holds — here, none.
   auto reopened = ace::project::open_project(fs, root, ace::scene::register_camera_kind);
   REQUIRE(reopened.has_value());
-  CHECK(reopened.value().rebuilt_from_canonical);
+  CHECK_FALSE(reopened.value().rebuilt_from_canonical);
+  CHECK(reopened.value().unbindable_content_records == 0);
 }
 
 TEST_CASE("a never-saved camera-free project falls back to the map path even with the callback") {
@@ -1048,7 +1053,7 @@ TEST_CASE("a workspace-mapped reopen binds no CAMERA content either") {
   CHECK(ace::scene::cameras(doc).empty());
 }
 
-TEST_CASE("a never-saved CAMERA project reopens through the map and reports the lost camera") {
+TEST_CASE("a never-saved CAMERA project reconstructs its camera through the map") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   const std::filesystem::path root = scratch.root / "nocanon_camera";
@@ -1062,17 +1067,22 @@ TEST_CASE("a never-saved CAMERA project reopens through the map and reports the 
   REQUIRE(fs.exists(layout.workspace_file));
   REQUIRE_FALSE(fs.exists(layout.canonical));
 
-  // D-slab-3's residual, closed as far as this repo can close it. At v0.1.0 this call
-  // ABORTED on the checkpointed camera's non-inert StateHandle; it is asserted to RETURN
-  // here for the first time. There is no canonical to rebuild from, so the mapped
-  // document is kept and the camera is unrecoverable — but the loss is now a reported
-  // VALUE rather than a silently empty project (D-slab_adopt-5). Restoring the camera
-  // needs a library seam (parking lot); announcing it does not.
+  // Inverted by `editor.project.reconstructing_reopen` (the parked cross-repo gap this residual
+  // waited on, now landed). The `AppState` session captured the camera's construction identity
+  // into the workspace at `add_content`, so the map reopen RECONSTRUCTS it — no canonical needed,
+  // nothing lost. The camera comes back as its live typed kind at its construction state (never
+  // renamed/re-cropped here, so construction IS the authored state). What used to be a reported
+  // loss is now a durable-by-default reopen.
   auto reopened = ace::project::open_project(fs, root, ace::scene::register_camera_kind);
   REQUIRE(reopened.has_value());
   CHECK_FALSE(reopened.value().rebuilt_from_canonical);
-  CHECK(reopened.value().unbindable_content_records == 1);
-  CHECK(ace::scene::cameras(*reopened.value().document).empty());
+  CHECK(reopened.value().unbindable_content_records == 0);
+  const std::vector<Camera> cams = ace::scene::cameras(*reopened.value().document);
+  REQUIRE(cams.size() == 1);
+  CHECK(cams[0].name == "hero");
+  CHECK(cams[0].resolution == Resolution{1920, 1080});
+  CHECK(cams[0].frame.tx == 1.0);
+  CHECK(cams[0].frame.ty == 2.0);
 }
 
 TEST_CASE("a camera reopened from canonical is fully operable (rename preserves ObjectId)") {

@@ -54,6 +54,8 @@
 #include <arbc/runtime/host_viewport.hpp>
 #include <arbc/runtime/offline.hpp>
 #include <arbc/runtime/recovered_state_replay.hpp>
+#include <arbc/serialize/codec.hpp>        // arbc::CodecTable / builtin_codecs
+#include <arbc/serialize/load_context.hpp> // arbc::LoadContext (open_document's ctx)
 #include <arbc/surface/backend.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -413,4 +415,76 @@ TEST_CASE("arbc pin: a checkpointed NON-INERT StateHandle reopens through Docume
   std::size_t bound = 0;
   mapped.for_each_content([&bound](arbc::Content*) { ++bound; });
   CHECK(bound == 0);
+}
+
+// --- editor.project.reconstructing_reopen: the BEHAVIORAL pin on arbc#19 (Constraint 5) ------
+//
+// arbc_v040 pinned `arbc::open_document`'s SIGNATURE (above). This leaf adds the two behaviours
+// its dirty-precision and safety design rest on: (1) the REVISION RELATIONSHIP the sidecar
+// comparison keys on — `open_document` rebinds objects onto existing records and publishes no
+// version of its own, but the `arbc::Document::open` map replay it wraps advances the revision by
+// exactly one bookkeeping step, so the reopened revision is the workspace's last-checkpointed
+// revision PLUS ONE (the step is the map's, verified here to be the same whether 0, 1, or 2
+// records reconstruct); and (2) a record with no captured construction identity is left UNBOUND
+// and REPORTED in `unreconstructed`, never filled with a default stand-in
+// (D-reconstructing_reopen-2).
+TEST_CASE(
+    "arbc pin: open_document advances the revision by one and reports the unreconstructable") {
+  ScratchDir scratch;
+  const std::filesystem::path file = scratch.root / "reconstruct.arbcws";
+
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  arbc::KindBridge bridge;
+  const std::uint64_t solid = bridge.intern(arbc::SolidContent::kind_id, "");
+  const arbc::CodecTable codecs = arbc::builtin_codecs(registry);
+
+  arbc::ObjectId captured{};
+  arbc::ObjectId uncaptured{};
+  std::uint64_t checkpoint_revision = 0;
+  {
+    auto created = arbc::Document::create(file.string());
+    REQUIRE(created.has_value());
+    arbc::Document& doc = **created;
+    const arbc::ObjectId composition = doc.add_composition(64.0, 64.0);
+    REQUIRE(composition.valid());
+
+    // The FIRST content is added with identity capture installed — its construction identity is
+    // snapshotted onto the record, so `open_document` can rebuild it.
+    doc.set_content_identity_capture(arbc::codec_identity_capture(codecs, bridge));
+    captured = doc.add_content(
+        std::make_shared<arbc::SolidContent>(arbc::Rgba{0.2F, 0.6F, 0.9F, 1.0F}), solid);
+    doc.attach_layer(composition, doc.add_layer(captured, arbc::Affine::identity()));
+
+    // The SECOND is added with NO capture — its record carries no identity, the pre-#19 /
+    // plugin-absent shape.
+    doc.set_content_identity_capture({});
+    uncaptured = doc.add_content(
+        std::make_shared<arbc::SolidContent>(arbc::Rgba{0.9F, 0.1F, 0.1F, 1.0F}), solid);
+    doc.attach_layer(composition, doc.add_layer(uncaptured, arbc::Affine::identity()));
+
+    const std::uint64_t before_checkpoint = doc.pin()->revision();
+    REQUIRE(doc.checkpoint().has_value());
+    checkpoint_revision = doc.pin()->revision();
+    CHECK(before_checkpoint == checkpoint_revision); // a checkpoint does NOT advance the revision
+  } // released: workspace unmapped
+
+  arbc::LoadContext ctx("mem://reconstruct");
+  auto reopened = arbc::open_document(file.string(), registry, codecs, ctx, bridge);
+  REQUIRE(reopened.has_value());
+  const arbc::Document& doc = *reopened->document;
+
+  // (1) The reopened revision is the checkpointed one PLUS ONE — the map-replay step the D28
+  // sidecar comparison (`published == reopened_revision - 1`) accounts for. One record
+  // reconstructed here, but the arbc_pin experiment confirmed the step is +1 for 0 and 2 too.
+  const arbc::DocStatePtr pinned = doc.pin();
+  REQUIRE(pinned != nullptr);
+  CHECK(pinned->revision() == checkpoint_revision + 1);
+  CHECK(reopened->reconstructed == 1);
+
+  // (2) The captured record reconstructs live; the identity-less one is left UNBOUND and reported.
+  CHECK(doc.resolve(captured) != nullptr);
+  CHECK(doc.resolve(uncaptured) == nullptr);
+  REQUIRE(reopened->unreconstructed.size() == 1);
+  CHECK(reopened->unreconstructed[0] == uncaptured);
 }

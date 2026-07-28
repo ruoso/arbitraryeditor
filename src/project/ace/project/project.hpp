@@ -87,10 +87,32 @@ struct ProjectLayout {
   std::filesystem::path workspace_file; // <root>/workspace/document.arbcws (D-open-2)
   std::filesystem::path exports_dir;    // <root>/exports
   std::filesystem::path gitignore;      // <root>/.gitignore
+  // The cross-session published-revision sidecar (D28 / D-reconstructing_reopen-4): a decimal
+  // `std::uint64_t` written on publish (after the canonical `atomic_replace`) and read on the
+  // mapped reopen to seed the session clean when it matches. Machine-local sync state, so it
+  // lives beside the workspace arena in the gitignored `workspace/` scratch, never in the
+  // portable core (D16).
+  std::filesystem::path published_rev; // <root>/workspace/published.rev
 };
 
 // Resolve the canonical bundle paths for a project rooted at `root` (no I/O).
 ProjectLayout project_layout(const std::filesystem::path& root);
+
+// Install the content-identity capture on `document` (editor.project.reconstructing_reopen /
+// D-reconstructing_reopen-5): every `add_content` snapshots the content's construction identity
+// (reverse-DNS `kind_id` + the kind's canonical params, via its registered codec) onto the
+// workspace `ContentRecord`, so a future map reopen (`arbc::open_document`) can RECONSTRUCT it
+// rather than merely name it. The returned owner holds BOTH the codec table and a bridge the
+// capture borrows by reference (`arbc::codec_identity_capture`), the bridge seeded from
+// `registry` so its tokens match the author-side mints; keep the owner alive as long as
+// `document` receives edits, then drop it. The capture owns its OWN bridge rather than borrowing
+// the caller's so the borrow survives the caller being MOVED by value (a `KindBridge` value
+// member would relocate and dangle the reference). TYPE-ERASED (`std::shared_ptr<void>`) so a
+// caller need not name `arbc::CodecTable`, whose definition pulls nlohmann::json kept PRIVATE to
+// `project` (§8). WRITER-THREAD ONLY (installs before any capturing `add_content`); `registry`
+// must outlive the call (not the owner).
+std::shared_ptr<void> install_content_identity_capture(arbc::Document& document,
+                                                       const arbc::Registry& registry);
 
 // Seed `bridge` so it resolves EVERY registered kind's `ContentRecord.kind` token,
 // not just the built-in leaf kinds `arbc::KindBridge()` pre-interns
@@ -147,46 +169,57 @@ struct OpenedProject {
   std::unique_ptr<arbc::RasterTileStore> tiles;
   ProjectLayout layout;
   // True when `open_project` rebuilt from the canonical `project.arbc` (a fresh
-  // clone, another machine, or an unusable workspace) rather than mapping the
+  // clone, another machine, or an unusable/pre-v0.4.0 workspace) rather than mapping the
   // crash-durable workspace. Always false for `create_project`.
   bool rebuilt_from_canonical = false;
-  // How much of a KEPT workspace-mapped document is unusable (A19): the number of
-  // layer-bound content records the mapped document could not bind, counted by
-  // walking every recovered layer and testing `Document::resolve` on its content.
-  // `Document::open` runs no factory, so a mapped reopen restores the record graph
-  // but binds NO `Content` for any kind — its cells and cameras are gone. This is a
-  // VALUE, not an error (the document did open); it is non-zero only on the
-  // canonical-absent fallback, where there is nothing to rebuild from and the loss
-  // is unavoidable, so a caller can say so instead of presenting an empty project as
-  // if nothing happened (D-slab_adopt-5). Zero on every rebuild-from-canonical open,
-  // on a content-free map, and for `create_project`.
+  // How many of a KEPT workspace-mapped document's content records the reconstructing reopen
+  // could NOT rebuild (A19, as amended by editor.project.reconstructing_reopen). The map path
+  // now opens through `arbc::open_document`, which reconstructs each recovered `ContentRecord`
+  // through its captured construction identity and reports what it could not — this is exactly
+  // `arbc::ReopenedDocument::unreconstructed.size()`. A record lands here only when it is
+  // genuinely unrebuildable: a workspace written before v0.4.0 (no captured identity), a kind
+  // whose codec is absent this session (a plugin not loaded), or a codec that failed. Such a
+  // record is left UNBOUND — `resolve()` answers null for it, never a default stand-in
+  // (D-reconstructing_reopen-2) — so the loss is honest and REPORTED rather than silently
+  // corrupted. A VALUE, not an error (the document did open). Zero for a workspace whose
+  // content all reconstructs, every rebuild-from-canonical open, and `create_project`. Feeds
+  // the reopen degradation notice (D25) unchanged, now on the rare case instead of the common.
   std::size_t unbindable_content_records = 0;
+  // Whether a mapped reopen recovered a document that is in sync with the last publish (D28 /
+  // D-reconstructing_reopen-3): true iff the `workspace/published.rev` sidecar is present AND
+  // equals the reconstructed document's revision. `AppState` seeds the session CLEAN on this,
+  // exactly as it does on a `rebuilt_from_canonical` open, so a cleanly-saved project reopens
+  // clean through the durable-by-default fast path instead of falsely dirty. Absent, stale, or
+  // mismatched → false → dirty (the safe direction; never a false-clean, preserved by the
+  // publish-then-sidecar write ordering). Always false for a rebuild-from-canonical open and a
+  // fresh `create_project` (which publishes nothing, so writes no sidecar).
+  bool mapped_in_sync = false;
 };
 
 // Open a project directory into a live `Document` — the LOAD direction only
-// (D-open-3). Maps the crash-durable `workspace/` when the map is USABLE; otherwise
-// (a missing or unusable workspace file, or a mapped document holding content the
-// map could not bind, A19) rebuilds from the canonical `project.arbc` — create a
-// fresh workspace, `load_document` the canonical bytes, checkpoint. Directory
-// enumeration and reading `project.arbc` go through `fs`; the workspace file and the
-// document go through libarbc (D-platform_services-4).
+// (D-open-3). Maps the crash-durable `workspace/` when the file is present, opening it
+// through the RECONSTRUCTING `arbc::open_document` (arbc#19, editor.project.reconstructing_reopen):
+// the map path is registry-aware, so it rebuilds each recovered `ContentRecord` through
+// its captured construction identity and hands back a live, content-bound document —
+// durable-by-default for EVERY kind at once (D-open-3's original policy). The canonical
+// rebuild survives ONLY as the fallback for a missing, unusable, or pre-v0.4.0 workspace
+// (create a fresh workspace, `load_document` the canonical bytes, checkpoint). Directory
+// enumeration, reading `project.arbc`, and the published-revision sidecar go through `fs`;
+// the workspace file and the document go through libarbc (D-platform_services-4).
 //
 // `register_extra_kinds` is the extra-kinds registration hook (D-reopen-1,
-// editor.cameras.reopen_codec): an optional callback applied to the TRANSIENT
-// rebuild-from-canonical registry right after `arbc::register_builtin_kinds`, so
-// the load path recognizes an editor-authored `Content` kind (e.g. `org.arbc.camera`)
-// and reconstructs it as its live typed Content instead of degrading it to
-// `arbc::PlaceholderContent`. It is typed ONLY on `arbc::Registry` — `project` stays
-// ignorant of WHICH kind it registers (no `project->scene` edge, Constraint 1); the
-// concrete registrar is named by the caller at a level that already sees `scene`
-// (`commands`). Absent by default (an empty `std::function`, skipped when unset).
-//
-// The callback also short-circuits the map: an editor-kind session with a canonical
-// present will always reject a content-bearing map, so `open_project` skips opening
-// the workspace file at all rather than mapping a potentially large arena just to
-// discard it (D-slab_adopt-4). It is ONLY an optimization now — a caller that passes
-// nothing is protected by the same map-then-inspect rule, because the map's inability
-// to bind content is kind-agnostic (A19), not specific to editor-authored kinds.
+// editor.cameras.reopen_codec): an optional callback applied to the TRANSIENT load
+// registry right after `arbc::register_builtin_kinds` — on BOTH the map-reconstruct and
+// the rebuild-from-canonical paths — so the open recognizes an editor-authored `Content`
+// kind (e.g. `org.arbc.camera`) and reconstructs it as its live typed Content instead of
+// leaving it unbound. It is typed ONLY on `arbc::Registry` — `project` stays ignorant of
+// WHICH kind it registers (no `project->scene` edge, Constraint 1); the concrete registrar
+// is named by the caller at a level that already sees `scene` (`commands`). Absent by
+// default (an empty `std::function`, skipped when unset). It no longer short-circuits the
+// map — the content-bearing-map guard is retired (A19 amendment): every caller
+// maps-and-reconstructs, because reconstruction is kind-agnostic. A record it cannot rebuild
+// (a kind whose codec is absent this session, a pre-v0.4.0 workspace) is left UNBOUND and
+// reported through `OpenedProject::unbindable_content_records`, never defaulted.
 platform::Result<OpenedProject>
 open_project(const platform::FileSystem& fs, const std::filesystem::path& root,
              const std::function<void(arbc::Registry&)>& register_extra_kinds = {});

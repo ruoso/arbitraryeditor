@@ -170,14 +170,20 @@ public:
   // it once, the UI thread reads it thereafter, and the two never interleave.
   std::size_t unbindable_content_records() const { return unbindable_content_records_; }
 
-  // The dirty indicator (D16/A13/D-save-4): workspace-vs-snapshot drift, modelled as
-  // session revision-drift and CONSERVATIVE toward "dirty" — it never reports a
+  // The dirty indicator (D16/A13/D-save-4, as amended by D28): workspace-vs-snapshot drift,
+  // modelled as session revision-drift and CONSERVATIVE toward "dirty" — it never reports a
   // false clean (telling the user unpublished edits are safely in `project.arbc`
   // when they are not). `saved_revision_` is the last known-published revision this
   // session: set clean at a `rebuilt_from_canonical` open (the workspace was just
-  // built from `project.arbc`) and on each successful publish; `nullopt` (dirty) for
-  // a fresh `create_project` or a workspace-mapped open (no known-published snapshot
-  // this session). Persisting a cross-session baseline is a deliberate non-goal.
+  // built from `project.arbc`), at a mapped reopen the published-revision sidecar proved IN SYNC
+  // (D28 / `mapped_in_sync_`), and on each successful publish; `k_none` (dirty) for a fresh
+  // `create_project` or a mapped reopen with no matching sidecar (no known-published snapshot
+  // this session). D28 promotes the cross-session published-revision sidecar (a
+  // `workspace/published.rev` written on publish, read on the mapped reopen) — reversing
+  // D-save-4's "persisting a cross-session baseline is a deliberate non-goal", now that the
+  // reconstructing reopen makes the mapped open the COMMON case: without it a cleanly-saved
+  // project would arm *modified* on essentially every reopen, hollowing out the indicator. The
+  // never-a-false-clean asymmetry is preserved by write-ordering (canonical then sidecar).
   //
   // Race-free across the writer/UI split (D-writer_thread-12): `pin()->revision()` is already an
   // any-thread read of the immutable `DocRoot`, and `saved_revision_` — the one editor-owned
@@ -206,6 +212,16 @@ public:
   std::uint64_t next_gesture_key() { return next_gesture_key_++; }
 
 private:
+  // The codec table backing the document's content-identity capture (editor.project.
+  // reconstructing_reopen / D-reconstructing_reopen-5), TYPE-ERASED: the capture borrows the
+  // table BY REFERENCE, so it must outlive `document_` and survive `AppState`'s move. Held
+  // through a `shared_ptr<void>` so the pointee address is stable across a move (a value member
+  // would relocate and dangle the borrow) AND so `commands` never names `arbc::CodecTable`,
+  // whose definition pulls nlohmann::json (kept PRIVATE to `project`, §8) — the table is built
+  // and its deleter erased inside `project::install_content_identity_capture`. DECLARED FIRST so
+  // it is destroyed LAST — after `document_`, whose installed capture references it — though the
+  // capture is only ever invoked at `add_content`, never at teardown.
+  std::shared_ptr<void> capture_codecs_;
   std::unique_ptr<arbc::Document> document_;
   // DECLARED AFTER `document_` ON PURPOSE (Constraint 2 / D-raster_tile_store-6): the memo
   // holds owning `BlockRef` pins into the document's `BigBlockPool`, so reverse-declaration
@@ -220,6 +236,12 @@ private:
   arbc::KindBridge kind_bridge_;
   Selection selection_;
   bool rebuilt_from_canonical_ = false;
+  // The D28 sidecar verdict, ferried off the bootstrap `OpenedProject` (never recomputed): true
+  // when a mapped reopen recovered a document the `workspace/published.rev` sidecar proved in
+  // sync with the last publish, so the session seeds CLEAN (see the ctor). False for a
+  // rebuild-from-canonical open (already clean via `rebuilt_from_canonical_`), a fresh
+  // `create_project`, and a mapped reopen with no matching sidecar. Immutable after construction.
+  bool mapped_in_sync_ = false;
   // The A19 reopen-degradation count, carried off `OpenedProject` and never written
   // again. Plain (non-atomic) on purpose — see the accessor above.
   std::size_t unbindable_content_records_ = 0;

@@ -257,6 +257,13 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene ace::writer
                                         arbc::arbc Catch2::Catch2WithMain)
+# editor.project.reconstructing_reopen: the reconstruction pins name `arbc::CodecTable` and drive
+# `arbc::open_document` / `codec_identity_capture` directly (tests/arbc_pin_test.cpp,
+# tests/project_open_test.cpp); its definition (arbc/serialize/codec.hpp) names nlohmann::json,
+# which arbc keeps PRIVATE to arbc_serialize. Link the header-only lib PRIVATE to the test binary
+# alone (the exact idiom ace_project uses above) — invisible to scripts/check_levels.py (a test
+# target is not a src/ component), no new src-level dependency, no levelization edge.
+target_link_libraries(ace_tests PRIVATE nlohmann_json::nlohmann_json)
 # The render_offline golden compares against raw sRGB8 bytes under tests/goldens
 # (D-render_probe-6); the byte-compare helper resolves them by absolute path.
 target_compile_definitions(ace_tests PRIVATE

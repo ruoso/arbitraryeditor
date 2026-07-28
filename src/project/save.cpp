@@ -192,6 +192,23 @@ platform::Result<SaveOutcome> save_project(const platform::FileSystem& fs,
     return make_error_code(SaveError::IoError);
   }
 
+  // Publish the just-dumped revision to the cross-session sidecar (D28 /
+  // D-reconstructing_reopen-3), AFTER the canonical durably lands — the ordering is the whole
+  // safety argument. The mapped reopen (`open_project`) reads it and seeds the session CLEAN
+  // when it equals the reconstructed document's revision, so a cleanly-saved project reopens
+  // clean through the durable-by-default fast path instead of falsely dirty. A crash between the
+  // two writes leaves the sidecar stale/absent → the reopen mismatches → dirty: a safe
+  // false-dirty, never a false-clean (a false-clean would need a sidecar naming a revision the
+  // canonical does not hold, which this ordering forbids). Written crash-atomically through the
+  // same `FileSystem` seam (A3), and ONLY when a live `workspace/` exists to describe: a plain
+  // Save's session is workspace-backed, so it does; a Save As publishes into a FRESH root with no
+  // workspace (the exec'd sibling rebuilds it), so `layout.workspace_dir` is absent there and no
+  // stray sidecar is written into the copy. The write is BEST-EFFORT — a failure is not a failed
+  // Save (the canonical is already durable), it only costs a false-dirty on the next reopen.
+  if (fs.exists(layout.workspace_dir)) {
+    (void)fs.atomic_replace(layout.published_rev, std::to_string(revision));
+  }
+
   SaveOutcome outcome;
   outcome.revision = revision;
   outcome.assets_written = sink.blobs_written();

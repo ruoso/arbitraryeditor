@@ -335,7 +335,7 @@ TEST_CASE("a session rebuilt from project.arbc is clean at construction") {
   CHECK_FALSE(state.is_dirty()); // the workspace was just built from project.arbc
 }
 
-TEST_CASE("a content-bearing reopen with the workspace PRESENT is clean (it rebuilt)") {
+TEST_CASE("a content-bearing reopen with the workspace PRESENT is clean (the sidecar)") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   const std::filesystem::path root = scratch.root / "rebuilt_content";
@@ -355,17 +355,17 @@ TEST_CASE("a content-bearing reopen with the workspace PRESENT is clean (it rebu
     REQUIRE(seed.document().checkpoint().has_value());
   } // released: the workspace stays on disk, content-bearing and durable
 
-  // The dirty-baseline knock-on of `editor.cameras.reopen_slab_adopt` (A19). The workspace
-  // is PRESENT and unshed and there is no extra-kinds callback, so before that leaf this
-  // reopen mapped the workspace and the session started DIRTY over a document with no live
-  // content at all. Map-then-inspect rejects the map, the reopen rebuilds from
-  // `project.arbc`, and a rebuilt session's baseline IS the published snapshot — so more
-  // reopens now take A13's clean branch (`src/commands/app_state.cpp:70-76`). That is a
-  // correctness improvement, but it is a behaviour change on a shipped path, asserted here
-  // rather than discovered.
+  // The dirty-baseline knock-on, re-founded by `editor.project.reconstructing_reopen` (A19
+  // amendment / D28). The workspace is PRESENT and unshed, so the reopen now MAPS AND
+  // RECONSTRUCTS the content (no canonical rebuild) — `rebuilt_from_canonical == false`. That
+  // used to start the session DIRTY, but this leaf publishes a `workspace/published.rev` sidecar
+  // on save and reads it on the mapped reopen: the project was saved cleanly, so the sidecar
+  // matches the reconstructed revision, `mapped_in_sync` is true, and the session seeds CLEAN
+  // through the D28 branch (`src/commands/app_state.cpp`) rather than the rebuild branch.
   auto reopened = ace::project::open_project(fs, root);
   REQUIRE(reopened.has_value());
-  REQUIRE(reopened.value().rebuilt_from_canonical);
+  CHECK_FALSE(reopened.value().rebuilt_from_canonical); // maps-and-reconstructs, not rebuilt
+  CHECK(reopened.value().mapped_in_sync);               // the sidecar proved it in sync
   AppState state(std::move(*reopened));
   CHECK_FALSE(state.is_dirty());
 }
