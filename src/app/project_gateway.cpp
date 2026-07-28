@@ -352,9 +352,10 @@ bool AppProjectGateway::can_delete() const { return ace::commands::can_delete(ap
 
 std::size_t AppProjectGateway::delete_selected() {
   // Every UI-driven delete runs inside CanvasView::apply_edit (Constraint 4), exactly as
-  // insert does: `arbc::Document::remove_content` is WRITER-THREAD ONLY, so a bare dispatch
+  // insert does: `arbc::Document::remove_contents` is WRITER-THREAD ONLY, so a bare dispatch
   // from the UI thread is forbidden. `delete_selection` resolves its targets INSIDE the
-  // closure, on the writer thread, against the live document (D-cells_remove-3).
+  // closure, on the writer thread, against the live document (D-cells_remove-3), then removes
+  // the whole batch in one transaction (D-one_action_one_entry-2).
   std::size_t removed = 0;
   run_edit([this, &removed] { removed = ace::commands::delete_selection(app_state_).removed; });
   return removed;

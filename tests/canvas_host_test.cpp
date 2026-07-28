@@ -1419,7 +1419,8 @@ TEST_CASE("canvas_host: a ref-free document renders byte-identically through the
   CHECK(wired.pixels == offline.pixels);
 }
 
-TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against the render read") {
+TEST_CASE("canvas_host: a stream of UI-thread cell inserts then a batch delete runs clean against "
+          "the render read") {
   // The document's ONE writer identity, bound the way the shipped bootstrap binds it
   // (D-writer_thread-6): the writer starts BEFORE the document exists, the document is built
   // ON it (the first write binds the identity for life), and it is stopped only after the host
@@ -1427,14 +1428,17 @@ TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against th
   // declaration order below IS that contract: `writer` outlives `host`.
   ace::platform::NativeThreads threads;
   ace::writer::WriterThread writer(threads);
-  // editor.cells.model Acceptance (Threading): the SHIPPED insert path — a registry
-  // factory call, `Document::add_content` (which binds a Content vtable and
-  // self-commits), then one transact adding + attaching the placing layer — streamed
-  // through `apply_edit` on the REAL interactive pool against a live rendering canvas.
-  // Structurally heavier than `damage()`'s solid add (a raster mints a tile pyramid),
-  // so it widens the overlap window the D-edit_render_sync-3 anchor above opens. No
-  // new lock and no new thread: A4.1 writer-identity holds because every edit runs on
-  // the caller, and the render walk reads the COW-published bindings lock-free.
+  // editor.cells.one_action_one_entry Acceptance (Threading): the SHIPPED insert path — a
+  // registry factory call, then `Document::create_content_and_attach` binding the Content
+  // vtable, adding the placing layer, and attaching it in ONE transaction — streamed through
+  // `apply_edit` on the REAL interactive pool against a live rendering canvas, then a SYMMETRIC
+  // batch delete (`scene::remove_cells` -> `Document::remove_contents`, one transaction for the
+  // whole selection). Structurally heavier than `damage()`'s solid add (a raster mints a tile
+  // pyramid), so it widens the overlap window the D-edit_render_sync-3 anchor above opens. No
+  // new lock and no new thread: A4.1 writer-identity holds because every edit runs on the
+  // caller, and the render walk reads the COW-published bindings lock-free. Collapsing the
+  // create to one entry and the delete to one transaction REDUCES writer round-trips; it adds
+  // no new shared state (Constraint 7).
   ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
@@ -1468,12 +1472,30 @@ TEST_CASE("canvas_host: a stream of UI-thread cell inserts runs clean against th
     return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
   }));
 
+  // Every insert landed exactly once: the probe's own untokened solid plus k_inserts.
+  REQUIRE(ace::scene::cells(*probe.document, registry).size() ==
+          static_cast<std::size_t>(k_inserts) + 1);
+
+  // Now tear the whole set down in ONE `remove_contents` transaction on the writer thread,
+  // overlapping the render walk exactly as the inserts did — the batch path under TSan.
+  std::size_t removed = 0;
+  apply_edit(writer, host, [&] {
+    std::vector<ace::scene::CellRemoval> batch;
+    for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry)) {
+      batch.push_back(ace::scene::CellRemoval{cell.id, cell.layer});
+    }
+    removed = ace::scene::remove_cells(*probe.document, batch);
+  });
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 3 && host.published_sequence("canvas#2") >= 3;
+  }));
+
   host.stop();
   handle->join();
 
-  // Every insert landed exactly once: the probe's own untokened solid plus k_inserts.
-  CHECK(ace::scene::cells(*probe.document, registry).size() ==
-        static_cast<std::size_t>(k_inserts) + 1);
+  // The one batch removed every placed object at once, leaving the root composition empty.
+  CHECK(removed == static_cast<std::size_t>(k_inserts) + 1);
+  CHECK(ace::scene::cells(*probe.document, registry).empty());
 }
 
 TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live render walk") {

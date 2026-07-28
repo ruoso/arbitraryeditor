@@ -155,10 +155,11 @@ public:
   // --- Delete Selected (editor.cells.remove) ---------------------------------
   // The inverse of `insert_cell`, over the ONE project-level selection (D19). `can_delete`
   // is the cheap gate both affordances poll each frame; `delete_selected` resolves the
-  // targets against the live document and dispatches one `remove_cell_command` per object,
-  // with the mutation wrapped in `run_edit` so it runs inside `CanvasView::apply_edit`
-  // (Constraint 5) — `arbc::Document::remove_content` is WRITER-THREAD ONLY. Returns how
-  // many objects actually left the composition (a stale selected id is skipped).
+  // targets against the live document and dispatches ONE `remove_cells_command` for the whole
+  // batch (D-one_action_one_entry-2 — one journal entry, one undo press for N objects), with
+  // the mutation wrapped in `run_edit` so it runs inside `CanvasView::apply_edit` (Constraint
+  // 5) — `arbc::Document::remove_contents` is WRITER-THREAD ONLY. Returns how many objects
+  // actually left the composition (a stale selected id is skipped).
   bool can_delete() const override;
   std::size_t delete_selected() override;
 

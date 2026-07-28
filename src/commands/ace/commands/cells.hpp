@@ -28,9 +28,9 @@ struct InsertCellOutcome {
 // The dispatchable "insert a cell" verb (Constraint 4): the mutation rides
 // `commands::Command`/`dispatch` so `AppState`'s revision + dirty bookkeeping (A13)
 // stays correct and the edit lands in the journal like any other. The create costs
-// TWO journal entries (`scene::add_cell`'s two-transaction shape, D-cells_model-7);
-// the D15 observable contract still holds — one undo detaches the placing layer and
-// the cell leaves `scene::cells()`, one redo restores it on the same `ObjectId`.
+// exactly ONE journal entry (`scene::add_cell`'s single-transaction
+// `create_content_and_attach` shape, D-one_action_one_entry-1): one undo press removes
+// the created cell whole (no orphan content), one redo restores it on the same `ObjectId`.
 //
 // `registry` and `outcome` are held BY REFERENCE by the returned command and must
 // outlive the `dispatch` call (which is synchronous).
@@ -40,9 +40,11 @@ Command insert_cell_command(const arbc::Registry& registry, std::string kind_id,
 // --- Delete (editor.cells.remove) -------------------------------------------------------
 
 // One resolved deletion target: the `Content` the selection names and the `Layer` that
-// places it in the root composition — the exact pair `arbc::Document::remove_content`
-// takes. A selection holds only content ids (D-selection-1); the layer is what has to be
-// looked up, and looking it up is the whole job of `selected_removals`.
+// places it in the root composition. A selection holds only content ids (D-selection-1); the
+// layer is what has to be looked up, and looking it up is the whole job of `selected_removals`.
+// Deliberately a two-field pair, composition-free (D-one_action_one_entry-3): the root
+// composition is a single shared value `scene::remove_cells` resolves once, so carrying it per
+// removal would leak the root-composition concern up a level for no gain.
 struct Removal {
   arbc::ObjectId content;
   arbc::ObjectId layer;
@@ -63,21 +65,25 @@ struct Removal {
 std::vector<Removal> selected_removals(const arbc::Document& document,
                                        const arbc::Registry& registry, const Selection& selection);
 
-// The dispatchable "remove one placed object" verb: exactly one `scene::remove_cell`, hence
-// exactly ONE libarbc transaction and one journal entry, so `dispatch`'s
-// one-command-one-transaction contract holds literally (Constraint 3). A multi-object
-// delete is N of these commands, NOT one command looping N removals.
+// The dispatchable "remove N placed objects" verb: ONE `scene::remove_cells` over the whole
+// span, hence exactly ONE libarbc transaction and one journal entry for the batch, so
+// `dispatch`'s one-command-one-transaction contract holds literally (remove Constraint 3,
+// restored — the old N-dispatch loop was the strain on it). A multi-object delete is this one
+// command, NOT N commands (D-one_action_one_entry-2/-4). An empty span mutates nothing and
+// adds zero entries.
 //
-// `removed` is filled in when the command RUNS (synchronously, inside `dispatch`, on the
-// writer thread): false means the target was stale and nothing was mutated. It is held BY
-// REFERENCE and must outlive the `dispatch` call.
-Command remove_cell_command(arbc::ObjectId content, arbc::ObjectId layer, bool& removed);
+// `removals` is taken BY VALUE (moved into the command). `removed` is filled in when the
+// command RUNS (synchronously, inside `dispatch`, on the writer thread): the count of targets
+// that actually left the composition (stale ones are skipped). It is held BY REFERENCE and
+// must outlive the `dispatch` call.
+Command remove_cells_command(std::vector<Removal> removals, std::size_t& removed);
 
 // The observable result of one `delete_selection`. `removed` counts the objects that
 // actually left the composition (stale members of the selection are skipped, so it can be
-// smaller than the selection); `journal_entries_added` is the summed `dispatch` delta —
-// ONE per removed object, which is also the number of undo presses it takes to restore
-// them all (the accepted asymmetry, D-cells_remove-2).
+// smaller than the selection); `journal_entries_added` is the `dispatch` delta — exactly ONE
+// for a non-empty delete (the whole batch is one transaction), which is also the single undo
+// press it takes to restore them all (D-one_action_one_entry-2), or ZERO for an empty or
+// wholly-stale selection (`remove_contents` over an empty span publishes nothing).
 struct DeleteOutcome {
   std::size_t removed = 0;
   std::size_t journal_entries_added = 0;
@@ -85,8 +91,8 @@ struct DeleteOutcome {
 
 // Delete the whole project-level selection (D19): resolve the targets against the LIVE
 // document here, on the writer thread — never from a UI-side snapshot taken frames earlier,
-// which an interleaved undo/redo could have invalidated (D-cells_remove-3) — dispatch one
-// `remove_cell_command` per target, then EMPTY the selection.
+// which an interleaved undo/redo could have invalidated (D-cells_remove-3) — dispatch ONE
+// `remove_cells_command` wrapping the whole batch, then EMPTY the selection.
 //
 // The selection is cleared by the delete itself rather than left to the next frame's
 // `Selection::prune` (D-cells_remove-7): the objects are gone, so no id can survive, and the

@@ -275,7 +275,8 @@ TEST_CASE("frame_selection e2e: the rail action mints a camera fit to the select
     IM_CHECK(union_region.x1 >= k_b_x + k_cell_edge && union_region.y1 >= k_b_y + k_cell_edge);
 
     // --- (vi) Ctrl+Z removes the minted camera; the selection still stands ------------
-    // ONE undo, even though the create cost two journal entries (D15 / Constraint 9).
+    // ONE undo reverses the create whole — one action, one journal entry
+    // (D-one_action_one_entry-1 collapsed the create; D15 / Constraint 9).
     const std::vector<arbc::ObjectId> selection_pre_undo = state.selection().items();
     ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Z);
     IM_CHECK(pump_until(ctx, [&] { return cameras().size() == 2; }));

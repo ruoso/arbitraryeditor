@@ -7,7 +7,9 @@
 #include <arbc/base/ids.hpp>       // arbc::ObjectId
 #include <arbc/base/transform.hpp> // arbc::Affine
 
+#include <cstddef>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -111,37 +113,48 @@ probe_bounds(const arbc::Registry& registry, std::string_view kind_id, std::stri
 // returns the kind's OWN error string with the `Document` untouched (no content
 // minted, no transaction opened, zero journal entries; Constraint 3).
 //
-// On success this spans TWO libarbc transactions, exactly as `add_camera` does:
-// `Document::add_content` self-commits (it is the only call that binds a `Content`
-// vtable), then one `transact` adds and attaches the placing layer. So a create is
-// two journal entries — but the D15 observable contract holds, since `cells()` keys
-// off composition membership: one undo detaches the layer and the cell disappears,
-// one redo restores it on the same `ObjectId` (D-cells_model-7).
+// On success this is ONE libarbc transaction (D-one_action_one_entry-1):
+// `Document::create_content_and_attach` binds the `Content` vtable, adds the placing layer,
+// and attaches it inside a single `transact` — everything `add_content` + `add_layer` +
+// `attach_layer` did, in the same order, so a create is ONE journal entry and one undo press,
+// with no intermediate published state in which the content is attached to nothing.
 arbc::expected<arbc::ObjectId, std::string>
 add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_view kind_id,
          std::string_view config, const arbc::Affine& placement);
 
-// The declared inverse of `add_cell` (editor.cells.remove): make the placed object whose
-// content is `content`, placed by `layer`, leave the ROOT composition. Kind-AGNOSTIC — a
-// camera is a `Content` + a `Layer` structurally identical to a cell (A14), and D7 makes
-// them "one shape", so the same verb removes either (D-cells_remove-1).
+// One resolved deletion target for the batch verb below: the `Content` a selection names and
+// the `Layer` that places it in the root composition. A scene-local mirror of
+// `commands::Removal`, kept here because `commands` depends on `scene`, not the reverse (the
+// §8 DAG), so the batch verb names no `commands` type (D-one_action_one_entry-3).
+struct CellRemoval {
+  arbc::ObjectId content;
+  arbc::ObjectId layer;
+};
+
+// The declared inverse of `add_cell` (editor.cells.one_action_one_entry): make N placed
+// objects — the `(content, layer)` pairs `removals` names — leave the ROOT composition as ONE
+// user-visible action. Kind-AGNOSTIC — a camera is a `Content` + a `Layer` structurally
+// identical to a cell (A14), and D7 makes them "one shape", so the same verb removes either
+// (D-cells_remove-1).
 //
-// The whole deletion is `arbc::Document::remove_content(content, composition, layer)`
-// (`document.hpp:131`), never a hand-composed `detach_layer` + `remove` + `remove`: the
-// library wrapper is ONE transaction — atomic, revision +1, ONE journal entry, one damage
-// flush — and it owns the invariant that the content's binding row stays RETAINED while
-// the journal holds the removal. So the delete is undoable BY CONSTRUCTION: the editor
-// writes no inverse and no snapshot, and one undo restores the object on the SAME
-// `ObjectId` with its layer and placement intact (D15).
+// The whole batch is ONE `arbc::Document::remove_contents(span<Removal>)` call
+// (`document.hpp:151`): one transaction — atomic (an observer sees the whole selection present
+// or wholly gone), revision +1, ONE journal entry, one damage flush — and it owns the
+// invariant that each content's binding row stays RETAINED while the journal holds the removal.
+// So the delete is undoable BY CONSTRUCTION as a unit: the editor writes no inverse and no
+// snapshot, and ONE undo restores all N objects on their SAME `ObjectId`s with layers and
+// placements intact (D15 / D-one_action_one_entry-2).
 //
-// Returns false, having opened no transaction and mutated NOTHING, when the document has
-// no root composition, when either id is invalid, when `layer` is not a live member of the
-// root composition, or when `layer` does not place `content` — a selected id whose target
-// was already deleted (or undone away, or GC'd) is a SKIP, not an error. Deleting from an
-// entered/isolated nested scope is `editor.panels.layers`', symmetric with `add_cell`,
-// which only inserts into the root. WRITER-THREAD ONLY (`document.hpp:130`); wrap it in a
+// The root composition is resolved ONCE (root-only, remove Constraint 12) and each removal is
+// validated against the live pinned generation: a removal with an invalid id, a layer that is
+// not a live member of the root composition, or a layer that does not place its stated content
+// — a target already deleted, undone away, or GC'd — is SKIPPED, not an error (Constraint 5).
+// Returns the number of removals that actually left the composition (never more than
+// `removals.size()`); an empty or wholly-stale batch mutates NOTHING and returns 0. Deleting
+// from an entered/isolated nested scope is `editor.panels.layers`', symmetric with `add_cell`,
+// which only inserts into the root. WRITER-THREAD ONLY (`document.hpp:151`); wrap it in a
 // `commands::Command` and `dispatch` it so the edit rides the single-writer seam.
-bool remove_cell(arbc::Document& document, arbc::ObjectId content, arbc::ObjectId layer);
+std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> removals);
 
 struct Cell {
   arbc::ObjectId id;      // the `Content` object (the cell's identity)

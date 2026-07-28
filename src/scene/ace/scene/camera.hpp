@@ -142,12 +142,11 @@ std::vector<Camera> cameras(const arbc::Document& document);
 //
 // Returns the new camera's content `ObjectId`, or an invalid `ObjectId` when the
 // document has no root composition to place the camera in. WRITER-THREAD ONLY (A4);
-// wrap in a `commands::Command` and `dispatch` it for undo/redo (D-model-4). NOTE:
-// binding the Content vtable (`Document::add_content`) and attaching the frame layer
-// are two libarbc transactions — the vtable seam offers no atomic content+layer+
-// attach — so a create spans two journal entries; because `cameras()` keys off
-// composition membership, a single undo detaches the layer and the camera disappears,
-// and a single redo restores it (the observable D15 contract).
+// wrap in a `commands::Command` and `dispatch` it for undo/redo (D-model-4). Binding the
+// Content vtable, adding the frame layer, and attaching it ride ONE
+// `Document::create_content_and_attach` transaction (D-one_action_one_entry-1), so a create
+// is ONE journal entry and a single undo reverses it whole — no intermediate published
+// state in which the camera is attached to nothing.
 arbc::ObjectId add_camera(arbc::Document& document, const arbc::Registry& registry,
                           const std::string& name, Resolution resolution,
                           const arbc::Affine& frame);

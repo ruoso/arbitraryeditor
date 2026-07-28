@@ -513,18 +513,15 @@ arbc::ObjectId add_camera(arbc::Document& document, const arbc::Registry& regist
     return arbc::ObjectId{}; // no root composition to place the camera in
   }
 
-  // The content vtable can only be bound through `Document::add_content` (its own
-  // transaction); the frame layer is then attached in one further transaction. Two
-  // journal entries — libarbc exposes no atomic content+layer+attach for a vtable
-  // content — but a single undo detaches the layer (the camera leaves `cameras()`)
-  // and a single redo restores it.
-  const arbc::ObjectId content = document.add_content(
-      std::make_shared<CameraContent>(name, resolution), camera_token(registry));
-  auto txn = document.transact("add_camera");
-  const arbc::ObjectId layer = txn.add_layer(content, frame);
-  txn.attach_layer(composition, layer);
-  txn.commit();
-  return content;
+  // ONE journal entry (D-one_action_one_entry-1): `create_content_and_attach` binds the
+  // camera `Content` vtable, adds the frame layer, and attaches it inside a SINGLE
+  // transaction — one undo press reverses the create whole, with no intermediate published
+  // state in which the camera exists attached to nothing. The frame rides in as the layer's
+  // `Affine`; a camera is non-rendering (A14), so the verb's default opacity is inert for it.
+  const arbc::Document::Placed placed =
+      document.create_content_and_attach(std::make_shared<CameraContent>(name, resolution),
+                                         camera_token(registry), composition, frame);
+  return placed.content;
 }
 
 bool rename_camera(arbc::Document& document, const arbc::Registry& /*registry*/,

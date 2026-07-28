@@ -313,7 +313,8 @@ TEST_CASE("new_shot_from_view e2e: the rail action promotes the live viewport in
         zoomed.camera));
 
     // --- (5) Ctrl+Z takes the last mint back; a re-click reuses the freed name -------
-    // ONE undo, even though the create cost two journal entries (D15).
+    // ONE undo reverses the create whole — one action, one journal entry
+    // (D-one_action_one_entry-1 collapsed the create; D15).
     ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Z);
     IM_CHECK(pump_until(ctx, [&] { return cameras().size() == 1; }));
     IM_CHECK_STR_EQ(cameras()[0].name.c_str(), "Camera 1");

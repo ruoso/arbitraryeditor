@@ -1265,18 +1265,14 @@ TEST_CASE("AppProjectGateway::new_shot_from_view mints undo one-for-one", "[app_
   REQUIRE(gateway.new_shot_from_view());
   REQUIRE(gateway.new_shot_from_view());
   REQUIRE(ace::scene::cameras(session.document()).size() == 2);
-  // `scene::add_camera`'s documented shape (model.md:391): TWO journal entries per create —
-  // `add_content` self-commits, the binding layer is a second transaction — so two mints cost
-  // exactly four entries.
-  CHECK(session.document().journal().depth() == depth_before + 4);
+  // `scene::add_camera`'s shape after D-one_action_one_entry-1: ONE journal entry per create —
+  // `create_content_and_attach` binds the Content, adds the frame layer, and attaches it in a
+  // single transaction — so two mints cost exactly two entries (down from four).
+  CHECK(session.document().journal().depth() == depth_before + 2);
 
-  // …of which only the BINDING entry is observable through `scene::cameras`, which keys off
-  // composition membership: the press that pops a mint's attach removes that camera, and the
-  // press that pops its add_content changes nothing visible. Undoing back to zero cameras
-  // therefore takes three presses, not two — the accounting `frame_selection`'s e2e sees as
-  // "one Ctrl+Z removes the camera I just minted".
-  CHECK(gateway.undo());
-  CHECK(ace::scene::cameras(session.document()).size() == 1);
+  // …and each mint is reversed WHOLE by ONE press: the create is one entry, so undoing back to
+  // zero cameras takes exactly two presses (not three), one per mint — the accounting
+  // `frame_selection`'s e2e sees as "one Ctrl+Z removes the camera I just minted".
   CHECK(gateway.undo());
   CHECK(ace::scene::cameras(session.document()).size() == 1);
   CHECK(gateway.undo());

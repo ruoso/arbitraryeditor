@@ -593,19 +593,26 @@ TEST_CASE("dispatching add_camera is undoable: undo removes the camera, redo res
   const std::size_t depth_before = journal.depth();
   dispatch(state, add_camera_command(registry, "hero", Resolution{1920, 1080},
                                      arbc::Affine::translation(1.0, 2.0)));
-  CHECK(ace::scene::cameras(state.document()).size() == 1);
-  CHECK(journal.depth() > depth_before); // the create advanced the journal
+  REQUIRE(ace::scene::cameras(state.document()).size() == 1);
+  const arbc::ObjectId camera = ace::scene::cameras(state.document())[0].id;
+  // Exactly ONE entry (D-one_action_one_entry-1): `create_content_and_attach` binds the camera
+  // Content, adds the frame layer, and attaches it in a SINGLE transaction — the mirror of the
+  // cell create, and down from the retired two-entry shape.
+  CHECK(journal.depth() == depth_before + 1);
 
-  // A single undo detaches the camera's layer: it leaves the composition membership
-  // `cameras()` reads, so the camera disappears (the observable D15 contract).
+  // Undo-WHOLENESS (D-one_action_one_entry-5): a single undo reverses the create entirely — the
+  // camera leaves `cameras()` AND its content record is gone, not merely detached (the two-entry
+  // shape's first undo left an orphan content that only a record-level check catches).
   const auto undone = ace::commands::undo(state);
   CHECK(undone.moved);
   CHECK(ace::scene::cameras(state.document()).empty());
+  CHECK(state.document().pin()->find_content(camera) == nullptr);
 
-  // A single redo re-attaches it.
+  // A single redo restores it whole, on the SAME ObjectId.
   const auto redone = ace::commands::redo(state);
   CHECK(redone.moved);
   REQUIRE(ace::scene::cameras(state.document()).size() == 1);
+  CHECK(ace::scene::cameras(state.document())[0].id == camera);
   CHECK(ace::scene::cameras(state.document())[0].name == "hero");
 }
 

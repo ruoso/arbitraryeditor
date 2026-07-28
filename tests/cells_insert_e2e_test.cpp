@@ -231,6 +231,20 @@ TEST_CASE("cells insert e2e: registry-length kind list, prefilled resolution, in
     IM_CHECK(pump_until(ctx, [&] { return !dockspace.insert_modal_open(); }));
     ctx->Yield(2);
     IM_CHECK(ace::scene::cells(state.document(), state.registry()).size() == 1);
+
+    // --- (v) The insert is ONE undo unit (D-one_action_one_entry-1) ----------
+    // The create is a single journal entry, so ONE Ctrl+Z leaves the composition empty — no
+    // orphan content lingering behind a merely-detached layer, which the two-entry create needed
+    // a second undo to clear — and one Ctrl+Y (redo) restores the cell WHOLE on the same
+    // ObjectId. The round trip is what proves the single-entry reversal.
+    const arbc::ObjectId inserted = after[0].id;
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Z);
+    IM_CHECK(pump_until(
+        ctx, [&] { return ace::scene::cells(state.document(), state.registry()).empty(); }));
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Y);
+    IM_CHECK(pump_until(
+        ctx, [&] { return ace::scene::cells(state.document(), state.registry()).size() == 1; }));
+    IM_CHECK(ace::scene::cells(state.document(), state.registry())[0].id == inserted);
   };
   ImGuiTestEngine_QueueTest(engine, test);
 

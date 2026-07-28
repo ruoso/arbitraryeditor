@@ -393,20 +393,24 @@ TEST_CASE("cells() excludes cameras and reports an unresolvable token as an empt
 
 // --- The commands verb + journal contract (Constraint 4) ---------------------
 
-TEST_CASE("dispatching insert_cell adds two journal entries and undo/redo is id-stable") {
+TEST_CASE("dispatching insert_cell adds ONE journal entry and one undo removes the cell whole") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   AppState state = session_with_composition(scratch, fs, "journal");
+
+  const std::size_t depth_baseline = state.document().journal().depth();
 
   ace::commands::InsertCellOutcome outcome;
   const Command command = ace::commands::insert_cell_command(
       state.registry(), "org.arbc.raster", "8x8", arbc::Affine::translation(2.0, 3.0), outcome);
   const ace::commands::DispatchOutcome dispatched = dispatch(state, command);
 
-  // TWO entries: `Document::add_content` self-commits (it is the only call that binds
-  // a Content vtable), then one transact adds + attaches the placing layer. Cells and
-  // cameras are identical here on purpose (D-cells_model-7 / D-rename-4).
-  CHECK(dispatched.journal_entries_added == 2);
+  // ONE entry (D-one_action_one_entry-1): `create_content_and_attach` binds the Content vtable,
+  // adds the placing layer, and attaches it inside a SINGLE transaction — no intermediate
+  // published state in which a content exists attached to nothing. This is the COUNT that
+  // distinguishes the shapes: the retired two-entry create landed `== 2` here.
+  CHECK(dispatched.journal_entries_added == 1);
+  CHECK(state.document().journal().depth() == depth_baseline + 1);
   CHECK(outcome.error.empty());
   REQUIRE(outcome.content.valid());
 
@@ -414,16 +418,23 @@ TEST_CASE("dispatching insert_cell adds two journal entries and undo/redo is id-
   REQUIRE(before.size() == 1);
   CHECK(before[0].id == outcome.content);
 
-  // The D15 OBSERVABLE contract: `cells()` keys off composition membership, so ONE
-  // undo detaches the layer and the cell disappears; one redo restores it, id-stable.
+  // Undo-WHOLENESS (D-one_action_one_entry-5): ONE undo reverses the create entirely. `cells()`
+  // is empty AND the content RECORD is gone — not merely detached, as the two-entry shape's
+  // first undo left it (an orphan content a membership check cannot see). A record-level
+  // `find_content` is what distinguishes a whole reversal from a half one; the two-entry create
+  // needed a SECOND undo to reach this state.
   REQUIRE(ace::commands::undo(state).moved);
   CHECK(ace::scene::cells(state.document(), state.registry()).empty());
+  CHECK(state.document().pin()->find_content(outcome.content) == nullptr);
+
+  // One redo restores it whole and id-stable — the round trip proves the single-entry reversal.
   REQUIRE(ace::commands::redo(state).moved);
   const std::vector<Cell> after = ace::scene::cells(state.document(), state.registry());
   REQUIRE(after.size() == 1);
   CHECK(after[0].id == outcome.content);
   CHECK(after[0].layer == before[0].layer);
   CHECK(after[0].placement == before[0].placement);
+  CHECK(state.document().pin()->find_content(outcome.content) != nullptr);
 }
 
 TEST_CASE("a refused insert command reports the kind's error and leaves the journal alone") {

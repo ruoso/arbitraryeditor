@@ -1,12 +1,17 @@
-// editor.cells.remove — L1 headless Catch2 units for taking a placed object back OUT of the
-// composition through `arbc::Document::remove_content` (D7/D15/D-cells_remove-1..9). The
-// load-bearing properties: a delete is exactly ONE library transaction (against the insert's
-// two), it is undoable BY CONSTRUCTION on the SAME `ObjectId` with the editor writing no
-// inverse, an N-object delete is N entries and N undo steps (the accepted asymmetry, pinned
-// rather than engineered away), the verb is kind-AGNOSTIC so a selected camera deletes by the
-// same path, a stale selected id is skipped rather than faulting, and the selection is emptied
-// by the delete itself with no frame pump. Plus the round-trip byte-INVARIANCE case: insert
-// changes the rendered image, delete puts it back byte-for-byte.
+// editor.cells.one_action_one_entry (was editor.cells.remove) — L1 headless Catch2 units for
+// taking placed objects back OUT of the composition through the batch verb
+// `arbc::Document::remove_contents(span<Removal>)` (D7/D15/D-one_action_one_entry-2..5). The
+// load-bearing properties: an N-object delete is exactly ONE library transaction — ONE journal
+// entry and ONE undo press for the whole selection, matching the create's one entry
+// (D-one_action_one_entry-1) — it is undoable BY CONSTRUCTION on the SAME `ObjectId`s with the
+// editor writing no inverse, the verb is kind-AGNOSTIC so a selected camera deletes by the same
+// path, a stale selected id is skipped rather than faulting, and the selection is emptied by the
+// delete itself with no frame pump. Plus the round-trip byte-INVARIANCE case: insert changes the
+// rendered image, delete puts it back byte-for-byte.
+//
+// The proof is entry COUNT plus undo-WHOLENESS, not final state (D-one_action_one_entry-5): the
+// retired N-dispatch loop landed one entry PER object and took N undos, and a membership check
+// alone could not tell the shapes apart, so every count assertion below is the batch's one entry.
 //
 // No ImGui/GL/SDL (Constraint 1); runs under the ASan/TSan legs (A4/§9).
 
@@ -109,6 +114,21 @@ Removal removal_for(const AppState& state, arbc::ObjectId content) {
   return Removal{};
 }
 
+// The single-object `scene::remove_cell` retired with D-one_action_one_entry-4; a one-element
+// batch through `scene::remove_cells` is byte-identical in effect. Returns the removed count
+// (0 when the pair is stale/mismatched), so a former `remove_cell(...) == false` reads as `== 0`.
+std::size_t remove_one(arbc::Document& document, arbc::ObjectId content, arbc::ObjectId layer) {
+  const std::vector<ace::scene::CellRemoval> batch{ace::scene::CellRemoval{content, layer}};
+  return ace::scene::remove_cells(document, batch);
+}
+
+// Dispatch a batch delete of a single resolved target — the single-object command
+// `remove_cell_command` retired with the loop it fed (D-one_action_one_entry-4).
+DispatchOutcome dispatch_remove(AppState& state, const std::vector<Removal>& removals,
+                                std::size_t& removed) {
+  return dispatch(state, ace::commands::remove_cells_command(removals, removed));
+}
+
 bool lists(const std::vector<Cell>& cells, arbc::ObjectId id) {
   for (const Cell& cell : cells) {
     if (cell.id == id) {
@@ -149,9 +169,9 @@ arbc::ObjectId add_child_composition(arbc::Document& doc) {
 
 } // namespace
 
-// --- One entry per delete (Constraint 3 / D15) -------------------------------------------
+// --- One entry per delete, matching the insert's one (Constraint 2/3 / D15) --------------
 
-TEST_CASE("cells remove: one delete is ONE journal entry, against the insert's two") {
+TEST_CASE("cells remove: one delete is ONE journal entry, matching the insert's one") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   AppState state = session_with_composition(scratch, fs, "one_entry");
@@ -160,23 +180,20 @@ TEST_CASE("cells remove: one delete is ONE journal entry, against the insert's t
   const Command insert_command = ace::commands::insert_cell_command(
       state.registry(), "org.arbc.raster", "8x8", arbc::Affine::translation(2.0, 3.0), inserted);
   const DispatchOutcome insert_outcome = dispatch(state, insert_command);
-  // The contrast this case exists to pin: `Document::add_content` self-commits (it is the
-  // only call that binds a Content vtable) and the placing layer is a second transaction, so
-  // a CREATE is two entries — but `remove_content` composes all three teardowns into one, so
-  // a DELETE is one (D-cells_remove-2).
-  CHECK(insert_outcome.journal_entries_added == 2);
+  // Contrast-pinned against the insert's ONE: `create_content_and_attach` collapses the
+  // create to a single entry (D-one_action_one_entry-1), and `remove_contents` composes every
+  // teardown into one, so a single delete is one too — create and delete are now symmetric.
+  CHECK(insert_outcome.journal_entries_added == 1);
   REQUIRE(inserted.content.valid());
 
   const Removal target = removal_for(state, inserted.content);
   const std::size_t depth_before = depth(state);
   const std::uint64_t revision_before = revision(state);
 
-  bool removed = false;
-  const Command remove_command =
-      ace::commands::remove_cell_command(target.content, target.layer, removed);
-  const DispatchOutcome removed_outcome = dispatch(state, remove_command);
+  std::size_t removed = 0;
+  const DispatchOutcome removed_outcome = dispatch_remove(state, {target}, removed);
 
-  CHECK(removed);
+  CHECK(removed == 1);
   CHECK(removed_outcome.journal_entries_added == 1);
   CHECK(depth(state) == depth_before + 1);
   CHECK(revision(state) > revision_before);
@@ -195,9 +212,9 @@ TEST_CASE("cells remove: undo restores the cell on the same ObjectId, redo remov
   const std::vector<Cell> before = cells_of(state);
   REQUIRE(before.size() == 1);
 
-  bool removed = false;
-  dispatch(state, ace::commands::remove_cell_command(before[0].id, before[0].layer, removed));
-  REQUIRE(removed);
+  std::size_t removed = 0;
+  dispatch_remove(state, {Removal{before[0].id, before[0].layer}}, removed);
+  REQUIRE(removed == 1);
   REQUIRE(cells_of(state).empty());
 
   // Undoable BY CONSTRUCTION, through the journal alone — the editor wrote no inverse and
@@ -239,9 +256,9 @@ TEST_CASE("cells remove: the selection stays empty across an undo of the delete"
   CHECK(state.selection().primary() == arbc::ObjectId{});
 }
 
-// --- N objects => N entries => N undos (D-cells_remove-2) ---------------------------------
+// --- N objects => ONE entry => ONE undo restoring all N (D-one_action_one_entry-2) --------
 
-TEST_CASE("cells remove: a 3-object delete is 3 entries and takes 3 undos, in reverse order") {
+TEST_CASE("cells remove: a 3-object delete is ONE entry and one undo restores all three") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   AppState state = session_with_composition(scratch, fs, "three");
@@ -258,26 +275,27 @@ TEST_CASE("cells remove: a 3-object delete is 3 entries and takes 3 undos, in re
   const std::size_t depth_before = depth(state);
   const DeleteOutcome outcome = ace::commands::delete_selection(state);
 
-  // The accepted asymmetry: `remove_content` self-commits and exposes no coalesce hook, so
-  // there is no place to fold N removals into one undo step. Recorded, not engineered away.
+  // The asymmetry is overturned (D-one_action_one_entry-2): `remove_contents` tears down all
+  // three contents-and-layers in ONE transaction, so a delete of three is ONE entry — one undo
+  // press to reverse something the user did once. This COUNT is what fails on the old N-dispatch
+  // shape (it landed `== 3`); a membership check alone could not tell the two apart.
   CHECK(outcome.removed == 3);
-  CHECK(outcome.journal_entries_added == 3);
-  CHECK(depth(state) == depth_before + 3);
+  CHECK(outcome.journal_entries_added == 1);
+  CHECK(depth(state) == depth_before + 1);
   CHECK(cells_of(state).empty());
 
-  // Reverse order: the LAST-deleted object comes back first.
-  REQUIRE(ace::commands::undo(state).moved);
-  CHECK(lists(cells_of(state), third));
-  CHECK(cells_of(state).size() == 1);
-  REQUIRE(ace::commands::undo(state).moved);
-  CHECK(lists(cells_of(state), second));
-  CHECK(cells_of(state).size() == 2);
+  // ONE undo restores all three WHOLE — undo-wholeness (D-one_action_one_entry-5), where the old
+  // shape needed three undos in reverse order.
   REQUIRE(ace::commands::undo(state).moved);
   const std::vector<Cell> all = cells_of(state);
   REQUIRE(all.size() == 3);
   CHECK(lists(all, first));
   CHECK(lists(all, second));
   CHECK(lists(all, third));
+
+  // And a single redo removes all three again, as one step.
+  REQUIRE(ace::commands::redo(state).moved);
+  CHECK(cells_of(state).empty());
 }
 
 // --- A camera deletes by the SAME verb (D-cells_remove-1) ---------------------------------
@@ -336,7 +354,9 @@ TEST_CASE("cells remove: a mixed cell+camera selection deletes both, in selectio
 
   const DeleteOutcome outcome = ace::commands::delete_selection(state);
   CHECK(outcome.removed == 2);
-  CHECK(outcome.journal_entries_added == 2);
+  // ONE entry for the whole mixed batch (D-one_action_one_entry-2): the cell and the camera
+  // tear down in a single `remove_contents` transaction — the retired loop landed `== 2`.
+  CHECK(outcome.journal_entries_added == 1);
   CHECK(cells_of(state).empty());
   CHECK(ace::scene::cameras(state.document()).empty());
   CHECK(state.selection().empty());
@@ -363,17 +383,62 @@ TEST_CASE("cells remove: a stale selected id is skipped, not an error") {
   const std::size_t depth_before = depth(state);
   const DeleteOutcome outcome = ace::commands::delete_selection(state);
   CHECK(outcome.removed == 1);
-  CHECK(outcome.journal_entries_added == 1); // entries only for the live member
+  // ONE entry over the LIVE subset — a batch of the live removals, not N
+  // (D-one_action_one_entry-2): the ghost is dropped by `selected_removals`, so the batch that
+  // reaches `remove_contents` is the single live pair.
+  CHECK(outcome.journal_entries_added == 1);
   CHECK(depth(state) == depth_before + 1);
   CHECK(cells_of(state).empty());
 
-  // And the scene verb itself opens no transaction for a stale or mismatched pair.
+  // And the scene batch verb itself opens no transaction for a stale or mismatched pair —
+  // every target is skipped, so the removed count is 0 and nothing is published.
   const std::uint64_t revision_before = revision(state);
-  CHECK_FALSE(ace::scene::remove_cell(state.document(), ghost, ghost));
-  CHECK_FALSE(ace::scene::remove_cell(state.document(), arbc::ObjectId{}, arbc::ObjectId{}));
-  CHECK_FALSE(ace::scene::remove_cell(state.document(), live, ghost));
+  CHECK(remove_one(state.document(), ghost, ghost) == 0);
+  CHECK(remove_one(state.document(), arbc::ObjectId{}, arbc::ObjectId{}) == 0);
+  CHECK(remove_one(state.document(), live, ghost) == 0);
   CHECK(depth(state) == depth_before + 1);
   CHECK(revision(state) == revision_before);
+}
+
+// --- The batch verb itself: one transaction, validated count (D-one_action_one_entry-3) ----
+
+TEST_CASE("cells remove: scene::remove_cells validates each pair and removes the live ones once") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "batch_verb");
+
+  const arbc::ObjectId a = insert(state, "org.arbc.raster", "8x8", arbc::Affine::identity());
+  const arbc::ObjectId b =
+      insert(state, "org.arbc.raster", "8x8", arbc::Affine::translation(10.0, 0.0));
+  const Removal ra = removal_for(state, a);
+  const Removal rb = removal_for(state, b);
+
+  // A batch mixing two live pairs with a stale one and a mismatched one: the verb resolves the
+  // root composition ONCE, validates each removal against the live pin, skips the two bad pairs,
+  // builds one `arbc::Document::Removal` per survivor, and makes ONE `remove_contents` call —
+  // returning the VALIDATED count (2), not the input count (4).
+  const std::vector<ace::scene::CellRemoval> batch{
+      ace::scene::CellRemoval{ra.content, ra.layer},
+      ace::scene::CellRemoval{arbc::ObjectId{123456}, arbc::ObjectId{123457}}, // stale
+      ace::scene::CellRemoval{a, rb.layer}, // mismatched: `a` is not placed by `b`'s layer
+      ace::scene::CellRemoval{rb.content, rb.layer}};
+
+  const std::size_t depth_before = depth(state);
+  const std::size_t removed = ace::scene::remove_cells(state.document(), batch);
+  CHECK(removed == 2);
+  CHECK(depth(state) == depth_before + 1); // ONE transaction for the whole surviving batch
+  CHECK(cells_of(state).empty());
+
+  // One undo restores both survivors whole.
+  REQUIRE(ace::commands::undo(state).moved);
+  CHECK(cells_of(state).size() == 2);
+
+  // A wholly-stale (and an empty) batch is a no-op: no library call, zero entries.
+  ace::commands::redo(state); // back to the deleted state
+  const std::size_t after_redo_depth = depth(state);
+  CHECK(remove_one(state.document(), arbc::ObjectId{7}, arbc::ObjectId{8}) == 0);
+  CHECK(ace::scene::remove_cells(state.document(), {}) == 0);
+  CHECK(depth(state) == after_redo_depth);
 }
 
 TEST_CASE("cells remove: an empty selection is a no-op with zero entries") {
@@ -513,8 +578,9 @@ TEST_CASE("cells remove: a layer in a NESTED composition is not removable by thi
   const std::size_t depth_before = depth(state);
   const std::uint64_t revision_before = revision(state);
   // Symmetric with `add_cell`, which only inserts into the root; entered/isolated nested
-  // scope is `editor.panels.layers`'.
-  CHECK_FALSE(ace::scene::remove_cell(state.document(), nested_content, nested_layer));
+  // scope is `editor.panels.layers`'. The batch verb skips a non-root member exactly as the
+  // single-object verb did (Constraint 5).
+  CHECK(remove_one(state.document(), nested_content, nested_layer) == 0);
   CHECK(depth(state) == depth_before);
   CHECK(revision(state) == revision_before);
 }
@@ -527,7 +593,7 @@ TEST_CASE("cells remove: a document with no root composition removes nothing") {
   AppState state(std::move(*created));
 
   // A freshly created project has no composition at all — the arm `add_cell` refuses with
-  // "no root composition to place a cell in", which `remove_cell` mirrors as a plain false.
+  // "no root composition to place a cell in", which `remove_cells` mirrors as a zero count.
   arbc::ObjectId orphan_content;
   arbc::ObjectId orphan_layer;
   dispatch(state, Command{"orphan", [&](arbc::Document& doc) {
@@ -540,7 +606,7 @@ TEST_CASE("cells remove: a document with no root composition removes nothing") {
 
   const std::size_t depth_before = depth(state);
   const std::uint64_t revision_before = revision(state);
-  CHECK_FALSE(ace::scene::remove_cell(state.document(), orphan_content, orphan_layer));
+  CHECK(remove_one(state.document(), orphan_content, orphan_layer) == 0);
   CHECK(depth(state) == depth_before);
   CHECK(revision(state) == revision_before);
 }
@@ -582,7 +648,7 @@ TEST_CASE("cells remove: deleting an inserted cell restores the rendered bytes e
     }
   }
   REQUIRE(layer.valid());
-  REQUIRE(ace::scene::remove_cell(*probe.document, *added, layer));
+  REQUIRE(remove_one(*probe.document, *added, layer) == 1);
 
   const ace::render::Srgb8Image after = ace::render::render_document_srgb8(
       *probe.document, ace::project::k_probe_width, ace::project::k_probe_height);

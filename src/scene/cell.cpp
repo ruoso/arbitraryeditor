@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -302,54 +303,65 @@ add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_v
   if (!composition.valid()) {
     return arbc::unexpected<std::string>("no root composition to place a cell in");
   }
-  // Two journal entries, exactly as `add_camera` (D-cells_model-7): `add_content`
-  // self-commits because it is the only call that binds a `Content` vtable, then the
-  // placing layer is added and attached in one further transaction.
-  const arbc::ObjectId content = document.add_content(
-      std::shared_ptr<arbc::Content>(std::move(*made)), cell_token(registry, kind_id));
-  auto txn = document.transact("add_cell");
-  const arbc::ObjectId layer = txn.add_layer(content, placement);
-  txn.attach_layer(composition, layer);
-  txn.commit();
-  return content;
+  // ONE journal entry (D-one_action_one_entry-1): `create_content_and_attach` binds the
+  // `Content` vtable, adds the placing layer, and attaches it inside a SINGLE transaction —
+  // everything `add_content` + `add_layer` + `attach_layer` did, in the same order, with no
+  // intermediate published state in which a content exists attached to nothing, and one undo
+  // press to reverse the create whole. Placement rides in as the finished `arbc::Affine`
+  // (Constraint 6); the library's default opacity is kept.
+  const arbc::Document::Placed placed =
+      document.create_content_and_attach(std::shared_ptr<arbc::Content>(std::move(*made)),
+                                         cell_token(registry, kind_id), composition, placement);
+  return placed.content;
 }
 
-bool remove_cell(arbc::Document& document, arbc::ObjectId content, arbc::ObjectId layer) {
-  if (!content.valid() || !layer.valid()) {
-    return false;
+std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> removals) {
+  if (removals.empty()) {
+    return 0; // an empty batch is a no-op that publishes nothing (Constraint 2)
   }
-  // Resolve + validate against the live pinned generation BEFORE opening anything, so a
-  // stale id costs exactly one snapshot read and leaves the document byte-for-byte
-  // untouched (Constraint 5). `remove_content` names a specific `(composition, layer)`,
-  // so a layer that is not a live member of the root would detach the WRONG member.
-  arbc::ObjectId composition;
-  bool member = false;
+  // Resolve + validate every removal against the live pinned generation BEFORE opening
+  // anything, so a wholly-stale batch costs exactly one snapshot read and leaves the
+  // document byte-for-byte untouched (Constraint 5). The root composition is resolved ONCE
+  // here (root-only, remove Constraint 12 / D-one_action_one_entry-3): every removal names it.
+  std::vector<arbc::Document::Removal> validated;
+  validated.reserve(removals.size());
   {
     const arbc::DocStatePtr state = document.pin();
     if (!state) {
-      return false;
+      return 0;
     }
-    composition = root_composition(*state);
+    const arbc::ObjectId composition = root_composition(*state);
     if (!composition.valid()) {
-      return false;
+      return 0; // no root composition to remove from
     }
-    const arbc::LayerRecord* record = state->find_layer(layer);
-    if (record == nullptr || record->content != content) {
-      return false; // no such layer, or it does not place `content`
-    }
-    state->for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
-      if (layer_id == layer) {
-        member = true;
+    for (const CellRemoval& removal : removals) {
+      if (!removal.content.valid() || !removal.layer.valid()) {
+        continue; // a selected id with no live target — skipped, not an error (Constraint 5)
       }
-    });
+      const arbc::LayerRecord* record = state->find_layer(removal.layer);
+      if (record == nullptr || record->content != removal.content) {
+        continue; // no such layer, or it does not place `content`
+      }
+      bool member = false;
+      state->for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
+        if (layer_id == removal.layer) {
+          member = true;
+        }
+      });
+      if (!member) {
+        continue; // live layer, but not in the root composition (a nested scope's)
+      }
+      validated.push_back(arbc::Document::Removal{removal.content, composition, removal.layer});
+    }
   }
-  if (!member) {
-    return false; // live layer, but not in the root composition (a nested scope's)
+  if (validated.empty()) {
+    return 0; // every target stale: no library call, nothing published (Constraint 2)
   }
-  // ONE library transaction: one journal entry, one revision bump, undoable through the
-  // journal alone (D15 / Constraint 2).
-  document.remove_content(content, composition, layer);
-  return true;
+  // ONE library transaction for the whole batch: one journal entry, one revision bump, one
+  // undo press to restore all N (D-one_action_one_entry-2 / D15 / Constraint 2/4). Returns
+  // the validated count — the objects that actually left the composition.
+  document.remove_contents(validated);
+  return validated.size();
 }
 
 std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& registry) {

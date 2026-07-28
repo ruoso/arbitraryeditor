@@ -413,7 +413,7 @@ TEST_CASE("frame selection: a degenerate extent yields the {identity, 0, 0} sent
 
 // --- commands::cameras: the dispatchable mint (Constraint 9 / D15) --------------------------
 
-TEST_CASE("frame selection: add_camera_command adds 2 journal entries; one undo removes it") {
+TEST_CASE("frame selection: add_camera_command adds ONE journal entry; one undo removes it whole") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem fs;
   AppState state = session_with_composition(scratch, fs, "mint");
@@ -428,10 +428,11 @@ TEST_CASE("frame selection: add_camera_command adds 2 journal entries; one undo 
       ace::commands::add_camera_command(state.registry(), "Camera 1", resolution, frame, outcome);
   const DispatchOutcome dispatched = dispatch(state, command);
 
-  // TWO entries: `Document::add_content` self-commits and the binding layer is a second
-  // transaction (the library's shape, already accepted for the insert side by D-cells_model-7).
-  CHECK(dispatched.journal_entries_added == 2);
-  CHECK(depth(state) == depth_before + 2);
+  // ONE entry (D-one_action_one_entry-1): `create_content_and_attach` binds the camera Content
+  // vtable, adds the frame layer, and attaches it inside a SINGLE transaction — the retired
+  // two-transaction shape landed `== 2` here.
+  CHECK(dispatched.journal_entries_added == 1);
+  CHECK(depth(state) == depth_before + 1);
   CHECK(revision(state) > revision_before);
   REQUIRE(outcome.camera.valid());
   CHECK(outcome.error.empty());
@@ -443,10 +444,12 @@ TEST_CASE("frame selection: add_camera_command adds 2 journal entries; one undo 
   CHECK(minted[0].resolution == resolution);
   CHECK(minted[0].frame == frame);
 
-  // The D15 observable contract: ONE undo removes the camera even though the create cost two
-  // entries, because `cameras()` keys off composition membership.
+  // Undo-WHOLENESS (D-one_action_one_entry-5): ONE undo reverses the create entirely — the
+  // camera leaves `cameras()` AND its content record is gone, not merely detached (the two-entry
+  // shape's first undo left an orphan content a membership check could not see).
   REQUIRE(ace::commands::undo(state).moved);
   CHECK(ace::scene::cameras(state.document()).empty());
+  CHECK(state.document().pin()->find_content(outcome.camera) == nullptr);
   // …and one redo restores it on the SAME ObjectId.
   REQUIRE(ace::commands::redo(state).moved);
   const std::vector<ace::scene::Camera> restored = ace::scene::cameras(state.document());

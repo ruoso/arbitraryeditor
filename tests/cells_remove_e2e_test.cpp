@@ -1,18 +1,20 @@
-// editor.cells.remove — the Delete affordances' UI e2e (docs §9, the offscreen software-GL
-// lane; modelled on tests/cells_insert_e2e_test.cpp + tests/undo_ui_e2e_test.cpp). Drives the
-// REAL `app::AppProjectGateway` over a REAL `commands::AppState` on a ScratchDir project, with
-// a live `CanvasView`, so every delete takes the shipped path: the rail item / the chord ->
-// `ProjectGateway` -> `apply_edit` -> `commands::dispatch` -> `scene::remove_cell` ->
-// `arbc::Document::remove_content`.
+// editor.cells.one_action_one_entry (was editor.cells.remove) — the Delete affordances' UI e2e
+// (docs §9, the offscreen software-GL lane; modelled on tests/cells_insert_e2e_test.cpp +
+// tests/undo_ui_e2e_test.cpp). Drives the REAL `app::AppProjectGateway` over a REAL
+// `commands::AppState` on a ScratchDir project, with a live `CanvasView`, so every delete takes
+// the shipped path: the rail item / the chord -> `ProjectGateway` -> `apply_edit` ->
+// `commands::dispatch` -> `scene::remove_cells` -> `arbc::Document::remove_contents`.
 //
 // Asserts, by stable widget id and on MODEL state (never pixels — software-GL pixels are
 // flaky, per the save_ui/gc_ui precedent): the rail's `###delete_selected` is DISABLED with an
-// empty selection and enabled once something is selected; clicking it removes exactly that
-// object and empties the selection; the `Delete` and `Backspace` chords do the same; Ctrl+Z
-// restores the last-deleted object without restoring the selection; the text-input guard
-// (Constraint 9) — a `Delete`/`Backspace` typed into the Insert Cell modal's field edits the
-// FIELD and deletes nothing; and deleting the camera a canvas is looking through leaves the
-// pane rendering through the free viewport rather than a stale frame or a crash.
+// empty selection and enabled once something is selected; a MULTI-SELECT delete of N objects is
+// reversed WHOLE by a SINGLE Ctrl+Z (D-one_action_one_entry-2, where the retired N-dispatch loop
+// needed N undos); clicking it removes exactly that object and empties the selection; the
+// `Delete` and `Backspace` chords do the same; Ctrl+Z restores the last-deleted object without
+// restoring the selection; the text-input guard (Constraint 9) — a `Delete`/`Backspace` typed
+// into the Insert Cell modal's field edits the FIELD and deletes nothing; and deleting the
+// camera a canvas is looking through leaves the pane rendering through the free viewport rather
+// than a stale frame or a crash.
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
@@ -219,6 +221,33 @@ TEST_CASE("cells remove e2e: the rail action, the Delete/Backspace chords, undo,
     state.selection().select(initial[0].id);
     ctx->Yield(2);
     IM_CHECK((ctx->ItemInfo(delete_item.c_str()).ItemFlags & ImGuiItemFlags_Disabled) == 0);
+
+    // --- (i.5) A MULTI-SELECT delete is ONE undo unit (D-one_action_one_entry-2) ------
+    // Select all three, delete them as ONE action through the rail, then a SINGLE Ctrl+Z
+    // restores ALL three on their same ObjectIds — where the retired N-dispatch loop took
+    // three undos to reverse what the user did once. Leaves the scene back at its three cells
+    // so the per-object cases below run against the original fixture.
+    state.selection().select(initial[0].id);
+    state.selection().add(initial[1].id);
+    state.selection().add(initial[2].id);
+    ctx->Yield(2);
+    ctx->ItemClick(delete_item.c_str());
+    IM_CHECK(pump_until(ctx, [&] { return cell_ids().empty(); }));
+    IM_CHECK(state.selection().empty());
+    ctx->KeyPress(ImGuiMod_Ctrl | ImGuiKey_Z);
+    IM_CHECK(pump_until(ctx, [&] { return cell_ids().size() == 3; }));
+    for (const ace::scene::Cell& was : initial) {
+      bool found = false;
+      for (const ace::scene::Cell& now : cell_ids()) {
+        if (now.id == was.id) {
+          found = true;
+        }
+      }
+      IM_CHECK(found); // the same ObjectId came back, from ONE undo
+    }
+    IM_CHECK(state.selection().empty());     // a restore does NOT restore the selection
+    state.selection().select(initial[0].id); // re-arm the single-object cases below
+    ctx->Yield(2);
 
     // --- (ii) Clicking it removes exactly that cell and empties the selection ---------
     const arbc::ObjectId first = initial[0].id;
