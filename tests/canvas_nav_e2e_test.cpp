@@ -123,18 +123,24 @@ template <class Ready> bool pump_until(ImGuiTestContext* ctx, Ready ready) {
 // which is exactly what made a frame-count settle unsound before this leaf.
 //
 // BOUNDED by the same wall clock `pump_until` uses, because a quiet window is a HOPE, not a
-// guarantee: a canvas is only obliged to idle when the library stops owing it a follow-up
-// frame, and a deep magnification of a raster cell does not reach that state — arbc's
-// `InteractiveRenderer::render_frame` keeps reporting `schedule_follow_up` (arrival damage that
-// still maps to a non-empty device region), so the host re-drives forever and `frames_issued`
-// advances at the frame rate indefinitely. Unbounded, this helper then never returns: the
+// guarantee: a canvas is only obliged to idle once the library stops owing it a follow-up frame,
+// and this deadline is general lane protection against ANY canvas that fails to reach that state,
+// not a workaround for one bug. Unbounded, this helper would never return on such a canvas: the
 // ImGui Test Engine's 60s `ConfigWatchdogKillTest` fires, the test is recorded as failed
-// (count_success == 0), and the binary burns minutes of CI wall clock doing it. The deadline
-// makes the wait an optimisation — every assertion downstream of it reads UI-thread state
-// (`scale_bar_units` is recomputed from `Presenter::camera` on the drawing thread each frame)
-// or a strict frame-count advance, so a settle that times out costs attribution sharpness, not
-// soundness. See `tasks/parking-lot.md` — "A magnified raster cell never lets the canvas go
-// idle" — for the library-side defect this bounds.
+// (count_success == 0), and the binary burns minutes of CI wall clock doing it (a 16s
+// `ace_shell_test` once became a 566s failure this way). The deadline makes the wait an
+// optimisation — every assertion downstream of it reads UI-thread state (`scale_bar_units` is
+// recomputed from `Presenter::camera` on the drawing thread each frame) or a strict frame-count
+// advance, so a settle that times out costs attribution sharpness, not soundness.
+//
+// The magnified raster that first motivated this deadline is no longer such a canvas. A deep
+// magnification of an `org.arbc.raster` cell once left arbc's `InteractiveRenderer::render_frame`
+// reporting `schedule_follow_up` forever (arrival damage still mapping to a non-empty device
+// region), so the host re-drove forever and `frames_issued` advanced at the frame rate
+// indefinitely. ruoso/arbitrarycomposer#18 (libarbc v0.4.0, pinned by editor.canvas.arbc_v040)
+// fixed the kind to render at the requested scale, and the `magnified_raster_idle` case below now
+// frames such a cell with Shift+F and REQUIREs the canvas goes quiet — proving that defect retired
+// while this deadline stays as protection against any future non-idling canvas.
 constexpr auto k_settle_budget = std::chrono::seconds(10);
 void settle(ImGuiTestContext* ctx, CanvasView& canvas) {
   const auto deadline = std::chrono::steady_clock::now() + k_settle_budget;
@@ -392,6 +398,146 @@ TEST_CASE("canvas_nav e2e: Shift+F frames the selection; empty is a no-op; never
 
     // (c) The gesture never transacts: the revision — and the dirty read — did not move.
     IM_CHECK(!state.is_dirty());
+  };
+  ImGuiTestEngine_QueueTest(engine, test);
+
+  const int k_max_frames = 200000;
+  int frames = 0;
+  while (!ImGuiTestEngine_IsTestQueueEmpty(engine) && frames < k_max_frames) {
+    shell.new_frame();
+    shell.draw_ui();
+    shell.render();
+    ImGuiTestEngine_PostSwap(engine);
+    ++frames;
+  }
+
+  int count_tested = 0;
+  int count_success = 0;
+  ImGuiTestEngine_GetResult(engine, count_tested, count_success);
+  ImGuiTestEngine_Stop(engine);
+
+  ace::views::register_view_body(ViewType::Canvas, {});
+
+  CHECK(frames < k_max_frames);
+  CHECK(count_tested == 1);
+  CHECK(count_success == 1);
+
+  canvas.destroy();
+  shell.shutdown();
+  ImGuiTestEngine_DestroyContext(engine);
+}
+
+// editor.canvas.magnified_raster_idle: assert a magnified raster canvas reaches idle. Before
+// libarbc v0.4.0 (ruoso/arbitrarycomposer#18, pinned by editor.canvas.arbc_v040), a raster cell
+// viewed at a deep magnification never let the canvas go idle — `InteractiveRenderer::render_frame`
+// kept reporting `schedule_follow_up`, so `frames_issued` advanced at the frame rate forever and
+// the render thread burned a core (violating the libarbc `idle-viewport-issues-no-frames`
+// guarantee). #18 fixed the kind to render at the requested scale under BestEffort; this case
+// asserts the fix and guards against a later pin silently regressing it. Mirroring the "already
+// quiet" `wheel_pan_scalebar` (nested-solid) and `frame_selection_view` (1x raster) fixtures, it
+// reuses `seed_with_cell`: select the 32x32 cell, press Shift+F (editor.canvas.nav_aids) to frame
+// the selection into the pane — ~8-10x device magnification, the transient-camera path the user
+// drives — confirm the framing engaged, `settle()`, then a bounded post-settle quiescence probe
+// that REQUIREs `frames_issued("canvas#1")` does NOT advance. The 1ms-spaced yields give a still-
+// spinning render thread wall-clock time to advance, so a held counter proves genuine idle rather
+// than a settle-deadline time-out (D-magnified_raster_idle-2). The probe fails on pre-#18 code (it
+// sees the counter advance) and holds with the v0.4.0 pin. No pixel/golden claim: the gap is
+// never-reaching-idle, whose observable is `frames_issued` steadying, not a composited colour.
+TEST_CASE("canvas_nav e2e: a magnified raster cell reaches idle (no forever re-drive)") {
+  ScratchDir scratch("magnified");
+  ace::platform::NativeFileSystem fs;
+  ace::testing::WriterSession session(scratch.root / "magnified");
+  REQUIRE(session.ok());
+  AppState& state = session.state();
+  arbc::ObjectId cell{};
+  session.on_writer([&] { seed_with_cell(state, cell); });
+
+  Shell shell;
+  ShellOptions opts;
+  opts.headless = true;
+  opts.width = 640;
+  opts.height = 480;
+  REQUIRE(shell.init(opts));
+
+  CanvasView canvas(state, session.writer()); // spawns the render thread
+  ace::views::register_view_body(ViewType::Canvas, [&canvas](std::string_view view_id) {
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
+  });
+
+  ace::dock::Dockspace dockspace; // default layout → canvas#1 open + docked
+  shell.set_draw_content([&dockspace]() { dockspace.draw(); });
+
+  ImGuiTestEngine* engine = ImGuiTestEngine_CreateContext();
+  ImGuiTestEngineIO& te_io = ImGuiTestEngine_GetIO(engine);
+  te_io.ConfigRunSpeed = ImGuiTestRunSpeed_Fast;
+  te_io.ConfigNoThrottle = true;
+  ImGuiTestEngine_Start(engine, shell.imgui_context());
+
+  E2EState e2e{&canvas, &state, cell};
+  ImGuiTest* test = IM_REGISTER_TEST(engine, "canvas_nav", "magnified_raster_idle");
+  test->UserData = &e2e;
+  test->TestFunc = [](ImGuiTestContext* ctx) {
+    auto* e2e = static_cast<E2EState*>(ctx->Test->UserData);
+    CanvasView& canvas = *e2e->canvas;
+    AppState& state = *e2e->state;
+
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") >= 1; }));
+    IM_CHECK(ctx->GetWindowByRef("canvas#1") != nullptr);
+    ctx->WindowFocus("canvas#1");
+    settle(ctx, canvas);
+
+    const ImVec2 center = ctx->GetWindowByRef("canvas#1")->Rect().GetCenter();
+    ctx->MouseSetViewport(ctx->GetWindowByRef("canvas#1"));
+    ctx->MouseMoveToPos(center);
+    ctx->Yield(2);
+
+    // Select the 32x32 raster cell and Shift+F to frame it — fit-to-selection magnifies the
+    // 32-unit region into the pane (~8-10x). This is the framing that, pre-#18, left the render
+    // thread re-driving forever.
+    state.selection().select(e2e->cell);
+    ctx->Yield(2);
+    const std::uint64_t before = canvas.frames_issued("canvas#1");
+    ctx->MouseMoveToPos(center);
+    ctx->KeyPress(ImGuiMod_Shift | ImGuiKey_F);
+    IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") > before; }));
+    settle(ctx, canvas);
+
+    // The bounded post-settle quiescence probe: after settle() reports quiet, a magnified raster
+    // that still owed follow-up frames would keep advancing `frames_issued`. Pump a fixed window
+    // (well under k_settle_budget) with 1ms sleeps so a still-spinning render thread has wall-clock
+    // time to advance the counter, then REQUIRE it did not — the direct refutation of "the render
+    // thread burns a core forever at magnification" (#18 / D-magnified_raster_idle-2).
+    //
+    // settle()'s quiet window can end MID-refinement: the magnified raster converges via a worker-
+    // arrival-driven progressive sequence (degraded frame → tile settles → refined repaint), and
+    // under a contended worker pool a tile's device-visible arrival can be spaced WIDER than
+    // settle()'s quiet threshold. A single probe would then read a false "idle" and trip over the
+    // late arrival frame that lands during the window (the observed flake). So confirm idle by
+    // re-settling and re-probing until a probe window HOLDS end-to-end, bounded by the same
+    // k_settle_budget: genuine idle is a hard, event-latched state (the render loop blocks on a
+    // no-timeout condition variable once no tile is in flight), so it yields a holding window
+    // quickly; a canvas that re-drives FOREVER (pre-#18) never does, exhausts the bound, and fails
+    // the REQUIRE below — the property this case guards is preserved, only the sampling is
+    // hardened.
+    const auto quiescent_by = std::chrono::steady_clock::now() + k_settle_budget;
+    std::uint64_t idle = canvas.frames_issued("canvas#1");
+    bool held = false;
+    while (!held && std::chrono::steady_clock::now() < quiescent_by) {
+      settle(ctx, canvas);
+      idle = canvas.frames_issued("canvas#1");
+      held = true;
+      for (int i = 0; i < 120; ++i) {
+        ctx->Yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (canvas.frames_issued("canvas#1") != idle) {
+          held = false; // a late refinement frame landed — settle() had gone quiet too early
+          break;
+        }
+      }
+    }
+    IM_CHECK(held);
+    IM_CHECK(canvas.frames_issued("canvas#1") == idle);
   };
   ImGuiTestEngine_QueueTest(engine, test);
 
