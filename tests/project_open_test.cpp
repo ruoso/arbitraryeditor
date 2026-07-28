@@ -54,13 +54,27 @@ struct ScratchDir {
 
 // Delegates to NativeFileSystem but can be told to fail one chosen operation, so
 // open/create's IoError value-branches (which a healthy native filesystem never
-// takes) are exercised. `noop_mkdir` reports success without creating anything —
-// which makes libarbc's `Document::create` fail on the absent workspace subtree.
+// takes) are exercised. `plant_dir_at_workspace_file` lets a fully-scaffolded
+// `root` (real dirs + real `.gitignore`) still fault the workspace-document MINT,
+// by squatting a directory where `Document::create` must open the workspace file.
 class FaultyFileSystem final : public ace::platform::FileSystem {
 public:
   enum class Op { None, MakeDirectories, AtomicReplace, ReadFile };
   Op fail_op = Op::None;
-  bool noop_mkdir = false;
+  // Land a real, fully-scaffolded `root` (dirs + `.gitignore`) but squat a DIRECTORY at the
+  // workspace-file path, so libarbc's `O_RDWR|O_CREAT` mint open faults EISDIR — the only
+  // portable double lever that steers past the earlier branches to the MINT step. (An
+  // absent `root`, e.g. a no-op mkdir, would fault the `.gitignore` write first, landing on
+  // the earlier gitignore branch rather than the mint one.)
+  bool plant_dir_at_workspace_file = false;
+  // editor.project.create_rollback made this observable: `create_project` now rolls back
+  // its partial scaffold via `fs.remove_tree(root)` on every post-guard failure branch, so
+  // the suite counts the calls and captures the path, and can force the rollback itself to
+  // fail — the A26 injection that proves the ORIGINAL error survives a failed cleanup
+  // (mirrors tests/save_as_test.cpp's `fail_remove_tree`).
+  mutable int remove_tree_calls = 0;
+  mutable std::filesystem::path last_remove_tree_path;
+  bool fail_remove_tree = false;
 
   bool exists(const std::filesystem::path& path) const override { return native_.exists(path); }
 
@@ -85,10 +99,14 @@ public:
     if (fail_op == Op::MakeDirectories) {
       return std::make_error_code(std::errc::io_error);
     }
-    if (noop_mkdir) {
-      return {};
+    std::error_code ec = native_.make_directories(dir);
+    if (!ec && plant_dir_at_workspace_file && dir.filename() == "workspace") {
+      // The `workspace/` subdir just landed for real; plant a directory where the workspace
+      // file (`workspace/document.arbcws`) must be minted, so `Document::create`'s
+      // `O_RDWR|O_CREAT|O_TRUNC` open returns EISDIR and the mint branch is taken.
+      ec = native_.make_directories(dir / "document.arbcws");
     }
-    return native_.make_directories(dir);
+    return ec;
   }
 
   std::error_code atomic_replace(const std::filesystem::path& path,
@@ -99,10 +117,12 @@ public:
     return native_.atomic_replace(path, contents);
   }
 
-  // A plain forwarder: `create_project`'s rollback is deferred to
-  // editor.project.create_rollback, so this suite provokes no removal — the override exists
-  // because the A26 primitive is pure (the compiler, not grep, re-signs every double).
   std::error_code remove_tree(const std::filesystem::path& path) const override {
+    ++remove_tree_calls;
+    last_remove_tree_path = path;
+    if (fail_remove_tree) {
+      return std::make_error_code(std::errc::permission_denied);
+    }
     return native_.remove_tree(path);
   }
 
@@ -206,7 +226,11 @@ TEST_CASE("create_project scaffolds the bundle and mints a workspace-backed docu
 
 TEST_CASE("create_project refuses a target that already exists, scaffolding nothing") {
   ScratchDir scratch;
-  ace::platform::NativeFileSystem fs;
+  // A FaultyFileSystem left at its defaults is a transparent native delegate, used here
+  // ONLY so `remove_tree_calls` is observable: the single most important guarantee of
+  // editor.project.create_rollback is that the delete never touches a directory the D27
+  // guard rejected — the target is somebody else's, not this call's debris (A26).
+  FaultyFileSystem fs;
   std::error_code ec;
 
   // Each SECTION makes the target exist in a different way; the rule is exists-at-all, so
@@ -253,6 +277,10 @@ TEST_CASE("create_project refuses a target that already exists, scaffolding noth
   const auto created = ace::project::create_project(fs, root);
   REQUIRE_FALSE(created.has_value());
   CHECK(created.error() == ace::project::make_error_code(OpenError::TargetExists));
+
+  // The refusal removes NOTHING: the rollback runs only on the post-guard failure branches,
+  // never on the D27 refusal, so a directory the guard rejected is never deleted (A26).
+  CHECK(fs.remove_tree_calls == 0);
 
   // Nothing was scaffolded: no assets/, no workspace/, no exports/, no .gitignore, and the
   // directory listing is exactly what it was.
@@ -558,28 +586,36 @@ TEST_CASE("open/create surface filesystem faults as IoError values") {
   ScratchDir scratch;
   ace::platform::NativeFileSystem native;
 
+  // editor.project.create_rollback: each create_project fault now ALSO rolls the partial
+  // scaffold back, so the directory does not survive to poison the D27-guarded retry (A26).
   SECTION("create_project: a directory-scaffold failure") {
     FaultyFileSystem fs;
     fs.fail_op = FaultyFileSystem::Op::MakeDirectories;
-    const auto created = ace::project::create_project(fs, scratch.root / "p1");
+    const std::filesystem::path root = scratch.root / "p1";
+    const auto created = ace::project::create_project(fs, root);
     REQUIRE_FALSE(created.has_value());
     CHECK(created.error() == OpenError::IoError);
+    CHECK_FALSE(fs.exists(root));
   }
 
   SECTION("create_project: a .gitignore write failure") {
     FaultyFileSystem fs;
     fs.fail_op = FaultyFileSystem::Op::AtomicReplace;
-    const auto created = ace::project::create_project(fs, scratch.root / "p2");
+    const std::filesystem::path root = scratch.root / "p2";
+    const auto created = ace::project::create_project(fs, root);
     REQUIRE_FALSE(created.has_value());
     CHECK(created.error() == OpenError::IoError);
+    CHECK_FALSE(fs.exists(root));
   }
 
   SECTION("create_project: a workspace-file mint failure") {
     FaultyFileSystem fs;
-    fs.noop_mkdir = true; // dirs report success but nothing is created on disk
-    const auto created = ace::project::create_project(fs, scratch.root / "p3");
+    fs.plant_dir_at_workspace_file = true; // a dir squats the workspace file, so the mint faults
+    const std::filesystem::path root = scratch.root / "p3";
+    const auto created = ace::project::create_project(fs, root);
     REQUIRE_FALSE(created.has_value());
     CHECK(created.error() == OpenError::IoError);
+    CHECK_FALSE(fs.exists(root));
   }
 
   SECTION("open_project: a canonical-read failure") {
@@ -605,6 +641,96 @@ TEST_CASE("open/create surface filesystem faults as IoError values") {
     REQUIRE_FALSE(opened.has_value());
     CHECK(opened.error() == OpenError::IoError);
   }
+}
+
+// --- editor.project.create_rollback: every post-guard failure rolls the scaffold back ------
+
+TEST_CASE("create_project removes the partial scaffold when the mkdir loop fails") {
+  ScratchDir scratch;
+  const std::filesystem::path root = scratch.root / "mkdir_fault";
+  FaultyFileSystem fs;
+  fs.fail_op = FaultyFileSystem::Op::MakeDirectories;
+  const auto created = ace::project::create_project(fs, root);
+  REQUIRE_FALSE(created.has_value());
+  CHECK(created.error() == OpenError::IoError);
+  // Idempotence is relied on: the mkdir loop failed before `root` could materialize, and the
+  // unconditional rollback on an absent path is still success (D-create_rollback-5).
+  CHECK_FALSE(fs.exists(root));
+  CHECK(fs.remove_tree_calls == 1);
+  CHECK(fs.last_remove_tree_path == root);
+}
+
+TEST_CASE("create_project removes the partial scaffold when the gitignore write fails") {
+  ScratchDir scratch;
+  const std::filesystem::path root = scratch.root / "gitignore_fault";
+  FaultyFileSystem fs;
+  fs.fail_op = FaultyFileSystem::Op::AtomicReplace;
+  const auto created = ace::project::create_project(fs, root);
+  REQUIRE_FALSE(created.has_value());
+  CHECK(created.error() == OpenError::IoError);
+  // Here the mkdir loop DID materialize `root` (assets/workspace/exports) before the
+  // gitignore fault; the rollback removes the real directory it left behind.
+  CHECK_FALSE(fs.exists(root));
+  CHECK(fs.remove_tree_calls == 1);
+  CHECK(fs.last_remove_tree_path == root);
+}
+
+TEST_CASE("create_project removes the partial scaffold when the workspace-document mint fails") {
+  ScratchDir scratch;
+  const std::filesystem::path root = scratch.root / "mint_fault";
+  FaultyFileSystem fs;
+  // Dirs and `.gitignore` land for real, but a directory squats the workspace-file path, so
+  // libarbc's `O_RDWR` mint open faults EISDIR — reaching the mint branch specifically (an
+  // absent `root` would fault the earlier `.gitignore` write and land on the gitignore branch).
+  fs.plant_dir_at_workspace_file = true;
+  const auto created = ace::project::create_project(fs, root);
+  REQUIRE_FALSE(created.has_value());
+  CHECK(created.error() == OpenError::IoError);
+  CHECK_FALSE(fs.exists(root));
+  // `minted` held an error, so nothing escaped into scope — a bare rollback with `root`.
+  CHECK(fs.remove_tree_calls == 1);
+  CHECK(fs.last_remove_tree_path == root);
+}
+
+TEST_CASE("create_project retried with the same name after a failed create now succeeds") {
+  ScratchDir scratch;
+  const std::filesystem::path root = scratch.root / "retry";
+
+  // A first attempt faults after the mkdir loop has materialized `root`. Before this leaf
+  // that stranded directory poisoned the D27 guard, refusing every retry of the same name
+  // forever after (A26); the rollback clears it.
+  FaultyFileSystem faulty;
+  faulty.fail_op = FaultyFileSystem::Op::AtomicReplace;
+  const auto first = ace::project::create_project(faulty, root);
+  REQUIRE_FALSE(first.has_value());
+  CHECK(first.error() == OpenError::IoError);
+  REQUIRE_FALSE(faulty.exists(root));
+
+  // The same name on a healthy filesystem now creates cleanly — the loop is closed. The
+  // result is structural: a live `Document` and a fresh (cold) `RasterTileStore`, pinned by
+  // create/checkpoint success rather than by pixels (D-create_rollback-5).
+  ace::platform::NativeFileSystem fs;
+  const auto second = ace::project::create_project(fs, root);
+  REQUIRE(second.has_value());
+  CHECK(second.value().document != nullptr);
+  CHECK(second.value().tiles != nullptr);
+  CHECK_FALSE(second.value().rebuilt_from_canonical);
+}
+
+TEST_CASE(
+    "create_project reports the create fault, not the rollback fault, when cleanup also fails") {
+  ScratchDir scratch;
+  const std::filesystem::path root = scratch.root / "cleanup_fault";
+  FaultyFileSystem fs;
+  fs.fail_op = FaultyFileSystem::Op::AtomicReplace; // the scaffold fault
+  fs.fail_remove_tree = true;                       // and the rollback itself fails
+  const auto created = ace::project::create_project(fs, root);
+  REQUIRE_FALSE(created.has_value());
+  // The ORIGINAL create error survives; `remove_tree`'s error is discarded best-effort, and
+  // no `OpenError::RollbackFailed` exists (D-create_rollback-3).
+  CHECK(created.error() == OpenError::IoError);
+  CHECK(fs.remove_tree_calls == 1);
+  CHECK(fs.last_remove_tree_path == root);
 }
 
 TEST_CASE("OpenError messages are populated for every value") {

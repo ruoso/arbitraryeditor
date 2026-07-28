@@ -57,6 +57,22 @@ const std::error_category& open_error_category() noexcept {
   return category;
 }
 
+// The D27 guard in `create_project` returned false for `fs.exists(root)`
+// immediately before the scaffold, so every byte under `root` was written by
+// THIS call — removing it can destroy nothing but our own debris (A26). Runs
+// unconditionally on each post-guard failure branch: `remove_tree` on an absent
+// path is success (idempotent), so the mkdir branch that failed before `root`
+// materialized rolls back harmlessly too (D-create_rollback-5). The removal's
+// own error is DISCARDED on purpose — the caller's actionable fact is why the
+// CREATE failed, and a failed cleanup only restores the pre-leaf behaviour
+// (D-create_rollback-3). The merged mint/checkpoint tail destroys any live
+// mmap-backed `Document` (via its scoped `unique_ptr`) BEFORE calling this
+// (D-create_rollback-2); the mkdir and gitignore branches hold no live
+// `Document` and call it bare.
+void discard_partial_scaffold(const platform::FileSystem& fs, const std::filesystem::path& root) {
+  (void)fs.remove_tree(root);
+}
+
 // Mint a fresh workspace-backed document over `workspace_file`. `Document::create`
 // truncates any stale/garbage file already there (O_CREAT|O_TRUNC), so it doubles
 // as the "overwrite the unusable workspace" step of the rebuild path. A workspace
@@ -318,37 +334,55 @@ platform::Result<OpenedProject> create_project(const platform::FileSystem& fs,
   for (const std::filesystem::path& dir :
        {layout.assets_dir, layout.workspace_dir, layout.exports_dir}) {
     if (fs.make_directories(dir)) {
+      // A mid-loop failure can leave `root` plus a partial tree; roll it back so the
+      // D27 guard above does not refuse the retry forever after (A26).
+      discard_partial_scaffold(fs, root);
       return make_error_code(OpenError::IoError);
     }
   }
 
   // Exclude the machine-local workspace scratch from VCS, atomically (D-open-5).
   if (fs.atomic_replace(layout.gitignore, k_gitignore_body)) {
+    discard_partial_scaffold(fs, root);
     return make_error_code(OpenError::IoError);
   }
 
-  // Mint a fresh workspace-backed document and make it durable by default via
-  // checkpoint (D-open-4). No project.arbc is written — that is save's publish step.
+  // Mint a fresh workspace-backed document and make it durable by default via checkpoint
+  // (D-open-4). No project.arbc is written — that is save's publish step.
+  //
+  // Both post-mint failures — a mint that never yielded a `Document`, and a mint whose first
+  // `checkpoint` faulted — converge on the single rollback below. `document` is scoped to
+  // THIS block on purpose (D-create_rollback-2, satisfied by Constraint 3's "equivalent
+  // scoped destruction"): a checkpoint fault does NOT return from inside, so it falls out of
+  // the block and the live, mmap-backed map over `workspace/` and its HousekeepingThread are
+  // torn down at the closing brace — BEFORE `discard_partial_scaffold` removes the subtree,
+  // never via an end-of-scope unwind after a `return`. The success path moves `document` onto
+  // `OpenedProject` and returns from inside the block, so that teardown never runs there.
   platform::Result<std::unique_ptr<arbc::Document>> minted =
       create_workspace_document(layout.workspace_file);
-  if (!minted.has_value()) {
-    return minted.error();
-  }
-  std::unique_ptr<arbc::Document> document = std::move(*minted);
-  if (!document->checkpoint().has_value()) {
-    return make_error_code(OpenError::IoError);
-  }
+  if (minted.has_value()) {
+    std::unique_ptr<arbc::Document> document = std::move(*minted);
+    if (document->checkpoint().has_value()) {
+      OpenedProject opened;
+      opened.document = std::move(document);
+      // A fresh project has no tiles to seed, but the store is still minted here so
+      // `OpenedProject::tiles` is never null on success (Constraint 1) and "one store per
+      // `Document`" holds on BOTH bootstrap paths. Cold and empty is the right start: the
+      // first save of a newly painted project hashes what the user actually made.
+      opened.tiles = std::make_unique<arbc::RasterTileStore>();
+      opened.layout = layout;
+      opened.rebuilt_from_canonical = false;
+      return opened;
+    }
+  } // a checkpoint fault destroys the live `document` HERE, ahead of the rollback below
 
-  OpenedProject opened;
-  opened.document = std::move(document);
-  // A fresh project has no tiles to seed, but the store is still minted here so
-  // `OpenedProject::tiles` is never null on success (Constraint 1) and "one store per
-  // `Document`" holds on BOTH bootstrap paths. Cold and empty is the right start: the
-  // first save of a newly painted project hashes what the user actually made.
-  opened.tiles = std::make_unique<arbc::RasterTileStore>();
-  opened.layout = layout;
-  opened.rebuilt_from_canonical = false;
-  return opened;
+  // Reached by a mint failure (`minted` held an error, no `Document` ever in scope) and by a
+  // checkpoint failure (the block above already destroyed the live `Document`). Either way no
+  // live mapping remains over `workspace/`, so the bare rollback is safe. The mint error
+  // `create_workspace_document` returns IS `OpenError::IoError`, so both branches report the
+  // same value they returned inline before.
+  discard_partial_scaffold(fs, root);
+  return make_error_code(OpenError::IoError);
 }
 
 bool is_project_directory(const platform::FileSystem& fs, const std::filesystem::path& root) {
