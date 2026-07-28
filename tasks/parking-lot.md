@@ -3,11 +3,37 @@
 Items surfaced by refinements that a WBS implementer cannot decide and that do
 **not** gate any leaf. Reviewed by a human; not scheduled by the orchestrator.
 
+Split on one axis, because the two halves want different things from a reviewer
+(added at the 2026-07-28 triage — the file used to mix them, so every pass
+re-read the whole list as open):
+
+- **Decidable now** — every input exists; the item is waiting on a human to
+  choose, and re-reading it next cycle will not produce new information.
+- **Waiting on evidence** — the call is blocked on something that does not exist
+  yet: real use, profiling data, or a leaf that has not shipped. Each names its
+  own trigger. Do not re-litigate these until the trigger fires.
+
 ---
+
+# Decidable now
+
+*Empty.* The 2026-07-28 triage decided all three items that stood here — the
+bundled font (adopted, scheduled as `editor.cameras.truetype_captions`), the
+welcome-window visual treatment (declined for v1) and the worker-backed tile
+dispatch (inline decode accepted for v1). Git history is the record of each; the
+reasoning that survives is carried in the leaf note and in the architecture rows
+the decisions touch, not here. A new item lands here only if it is genuinely
+waiting on a human choice rather than on evidence.
+
+---
+
+# Waiting on evidence
 
 ## Assets view real-body owner
 
 **Source:** `tasks/refinements/editor/view_registry.md` (view_registry, 2026-07-17)
+
+**Trigger:** `editor.panels.layers` ships.
 
 The Assets view type is registered and draws a labeled placeholder. Its real
 body is a design judgment call: does it warrant a dedicated asset-browser leaf,
@@ -16,23 +42,11 @@ or is it subsumed by the Layers list's referenced-vs-painted surface
 parked here for human review before a downstream panel-content task is
 scheduled.
 
----
-
-## Cross-session dirty precision on mapped-workspace reopen
-
-**Source:** `tasks/refinements/editor/save.md` (save, 2026-07-18), D-save-4.
-
-The current dirty model is conservative and session-scoped: a workspace-mapped
-reopen (e.g. crash-recovered session) starts dirty even if `project.arbc` is
-already up to date, because we cannot prove they are in sync without reloading
-the canonical. D-save-4 calls this the honest call — a false-dirty causes an
-unnecessary re-dump, which is cheap and idempotent; a false-clean would tell the
-user their edits are safe in `project.arbc` when they are not. Improving
-precision (persisting a cross-session published-revision sidecar in `workspace/`
-so a mapped reopen reads clean) would require touching the shipped open/create
-path and adding I/O for a degree of precision the durable-workspace +
-idempotent-re-dump model does not need. This is a product-polish judgment call
-for a human to weigh; no WBS task was created.
+*Sharpened at the v0.4.0 triage (2026-07-28):* this is not an open-ended design
+call — it has a named gate that has not opened. `editor.panels.layers` is still
+**incomplete**, so the referenced-vs-painted surface the "is it subsumed?"
+question compares against does not exist yet to be looked at. Nothing here is
+answerable until that leaf lands; revisit then, not before.
 
 ---
 
@@ -40,61 +54,9 @@ for a human to weigh; no WBS task was created.
 
 **Source:** `tasks/refinements/editor/multi_canvas.md` (multi_canvas, 2026-07-18), D-multi_canvas-2.
 
+**Trigger:** observed head-of-line blocking in real multi-canvas use.
+
 `render::CanvasHost` drives all N canvases from one shared render thread. A5 mandates a shared `WorkerPool` but is silent on render-thread count; D-multi_canvas-2 chose one thread as the conservative baseline (single pool drainer, smaller TSan surface, correct for the realistic N of 2–3 canvases). If future profiling shows head-of-line blocking is observable (e.g. one heavy canvas visibly slowing the others), moving to N render threads would require revisiting the borrowed-pool concurrent-submitter contract with libarbc. That is a monitor-and-decide call gated on real profiling data, not implementable work today. No WBS task was created.
-
----
-
-## arbc Registry per-kind insert-schema hook
-
-**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-2.
-**Tracking:** ruoso/arbitrarycomposer#21 (filed 2026-07-24).
-
-`arbc::Registry` advertises `factory`/`metadata`/`codec`/`binder`/`state_walker` but no per-kind field-descriptor for `ContentConfig` inputs (the config is `std::string_view`, opaque). The editor therefore carries a grammar-adapter table in `scene::build_config` that encodes the built-in grammars (raster `"<w>x<h>"`, solid `"r,g,b,a"`, nested decimal id). A future `KindInsertSchema` hook on `Registry` would let that table shrink to zero and allow plugins to advertise their own insert fields automatically. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
-## org.arbc.solid factory grammar admits no bounds field
-
-**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-3.
-**Tracking:** ruoso/arbitrarycomposer#22 (filed 2026-07-24).
-
-`org.arbc.solid`'s registered factory config grammar is `"r,g,b,a"` with no bounds (`builtin_kinds.cpp:90-104`), so a Registry-constructed solid cell is always unbounded — Constraint 11 forbids bypassing the factory to name the concrete `SolidContent` type directly. The consequence (solid placement affine is a no-op, solid fills everywhere) is accepted and documented; the bounded-solid use case would require the library to extend the grammar. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
-## arbc Document lacks atomic create-content-and-attach
-
-**Source:** `tasks/refinements/editor.cells/model.md` (cells.model, 2026-07-22) — D-cells_model-7. Also noted in `tasks/refinements/cameras/model.md`.
-**Tracking:** ruoso/arbitrarycomposer#20 (filed 2026-07-24 — one issue with the batch-removal mirror below).
-
-`arbc::Document::add_content` self-commits (it is the only vtable-binding call), so every cell or camera create costs two journal entries: content first, then `transact` → `add_layer` → `attach_layer` → `commit`. The mirror verb `remove_content` (document.hpp:131) is atomic in one entry. A future `create_content_and_attach` on `Document` would collapse the two-entry create to one, making undo semantics uniform. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
-## arbc::Content::bounds() thread-safety guarantee absent from contract
-
-**Source:** `tasks/refinements/editor.cells/selection.md` (cells.selection, 2026-07-23) — Open questions #2.
-**Tracking:** ruoso/arbitrarycomposer#23 (filed 2026-07-24).
-
-`pick_targets` calls `arbc::Content::bounds()` from the UI thread while the render thread walks the same document. The lock-free `pin()` seam covers the record walk, and `bounds()` is an immutable property for every kind shipped today — but `contract/content.hpp:487` states no thread-safety guarantee. A future kind whose bounds change under an `Editable` edit (e.g. a growing raster, per `editor.cells.resolution`'s "resample to crisp") would make it a live read/write pair. The TSan case in `tests/canvas_host_test.cpp` is the tripwire. If it ever fires, the fix is a libarbc-side contract statement, not an editor-side lock — upstream-issue candidate for `ruoso/arbitrarycomposer`.
-
----
-
-## arbc batch removal verb (remove_contents / CoalesceKey on remove_content)
-
-**Source:** `tasks/refinements/editor.cells/remove.md` (cells.remove, 2026-07-23) — D-cells_remove-2 / Open questions #1.
-**Tracking:** ruoso/arbitrarycomposer#20 (filed 2026-07-24 — one issue with the create mirror above).
-
-`Document::remove_content` self-commits with no coalesce hook, so an N-object delete produces N journal entries and requires N undo presses to reverse (D-cells_remove-2). A `remove_contents(std::span<const Removal>)` — or a `CoalesceKey` parameter on `remove_content` — would collapse a multi-select delete to one undo unit. This is the exact mirror of the already-parked `create_content_and_attach` ask (see above). Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
-## arbc runtime.removed_content_reclaim (memory growth on insert/delete cycles)
-
-**Source:** `tasks/refinements/editor.cells/remove.md` (cells.remove, 2026-07-23) — Open questions #2.
-**Tracking:** ruoso/arbitrarycomposer#26 (filed 2026-07-24).
-
-`remove_content` deliberately retains the content's binding row and live `Content*` while the journal holds the removal; teardown happens only at document close (or "once `runtime.removed_content_reclaim` lands, the moment the removal leaves history", `document.hpp:123-130`). A long session that repeatedly inserts and deletes large rasters therefore grows monotonically in memory even after history trims. The named library follow-up already exists upstream; the editor cannot fix it host-side. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task.
 
 ---
 
@@ -102,24 +64,9 @@ for a human to weigh; no WBS task was created.
 
 **Source:** `tasks/refinements/cameras/new_shot_from_view.md` (cameras.new_shot_from_view, 2026-07-23) — Open questions.
 
+**Trigger:** multi-canvas layouts in real use.
+
 `editor.cameras.mint_from_focused_canvas` implements the "follow focus with lowest-id fallback" approach: the gateway reads `CanvasView::focused_framing()` and the mint always promotes the canvas the user was most recently working in. The alternative — an explicit "promote this canvas" affordance in the canvas camera picker — would let the user designate a specific canvas regardless of focus. These two shapes have different discoverability tradeoffs: focus tracking is invisible until it matters (multi-canvas layout); explicit designation adds picker chrome that is meaningless in single-canvas use. Whether the right end state is the focus-tracking rail item alone, the explicit picker, or both is a D23/D18 design call for a human once multi-canvas layouts are in real use. The WBS task ships the focus-tracking path; if explicit designation is the preferred answer, `mint_from_focused_canvas` may need to be reconsidered or extended.
-
----
-
-## arbc::Journal entry_at()/byte_cost() — upstream any-thread publication
-
-**Source:** `tasks/refinements/canvas/arbc_v030.md` (arbc_v030, 2026-07-23) — Open questions.
-**Tracking:** ruoso/arbitrarycomposer#24 (filed 2026-07-24).
-
-`arbc::Journal::entry_at()` and `byte_cost()` remain writer-thread-only at v0.3.0 by
-explicit upstream decision (arbc#15 covered `can_undo`/`can_redo`/`depth`/`cursor` and
-excluded these two). The editor's fix is a host-side published snapshot in
-`commands::AppState` (`editor.canvas.history_published_reads`), which is correct and
-sufficient — but the *general* shape (a host UI that wants to browse history off the
-writer thread) is the same class of problem arbc#15 solved for the enable state. Whether
-libarbc should publish an entry-name view is a **library** design judgment for the
-`arbitrarycomposer` maintainer, not editor work. Upstream-issue candidate for
-`ruoso/arbitrarycomposer`; no editor-side WBS task.
 
 ---
 
@@ -128,6 +75,8 @@ libarbc should publish an entry-name view is a **library** design judgment for t
 **Source:** `tasks/refinements/canvas/focused_canvas_indicator.md`
 (canvas.focused_canvas_indicator, 2026-07-23) — Open questions /
 D-focused_canvas_indicator-3.
+
+**Trigger:** the always-on border reading as chrome noise in real single-canvas use.
 
 D-focused_canvas_indicator-3 chose to draw the hairline accent border
 unconditionally — even on a single-canvas dock where it conveys no
@@ -142,121 +91,24 @@ that warrants real use before deciding.
 
 ---
 
-## HostViewport settler attach/detach split (upstream library ask)
-
-**Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — D-writer_thread-8 / Open questions #2.
-**Tracking:** ruoso/arbitrarycomposer#25 (filed 2026-07-24).
-
-D-writer_thread-8 posts the `HostViewport` constructor and destructor to the writer thread (via `submit_sync` from the render thread) because the settler slot install (`Document::set_external_load_settler`) is writer-thread-only and lives in the `HostViewport` ctor/dtor. If upstream adds an explicit writer-thread `attach`/`detach` pair for the settler — decoupled from object construction — the render thread could manage the full viewport lifecycle itself, the posted ctor/dtor would retire, and D-8 would simplify substantially. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
 ## Sync-submit latency behind a deep async burst
 
 **Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — Open questions #3.
 
+**Trigger:** profiling on the real pool — **after** `editor.canvas.settler_attach_split` lands.
+
 `editor.canvas.writer_thread` ships all-sync for result-carrying verbs (D-3). A streamed gesture burst could build a queue depth that makes a subsequent sync `undo` wait. The coalescing key bounds the *commit* cost, not the queue depth. Whether this is observable in practice is unknown; if it bites, adding a bounded depth or a gesture-drop policy would be the fix. Measure on the real pool with a realistic workload before designing anything — this is a data-gated decision, not implementable work today. No WBS task until profiling data exists.
 
----
-
-## Deferred-external nested child composites blank under real WorkerPool
-
-**Source:** `tasks/refinements/editor/writer_thread.md` (canvas.writer_thread, 2026-07-23) — tech debt note.
-**Tracking:** ruoso/arbitrarycomposer#17 (filed 2026-07-24). This entry is the
-`editor.canvas.nested_real_pool` follow-up that `tests/canvas_host_test.cpp:1628` names.
-
-Under the inline degenerate `WriterThread` (headless fixtures) a deferred-external nested child composites correctly (byte-exact). Under the real interactive `WorkerPool`, a deferred-external nested child composites blank even pre-settled — a pre-existing behaviour not introduced by this change. The root cause is in libarbc's worker-pool dispatch path for nested child arrivals, not in the editor. Upstream-issue candidate for `ruoso/arbitrarycomposer`; no editor-side WBS task until the library fix exists.
-
----
-
-## arbc workspace-map reopen binds no Content — the seam that would restore the fast path
-
-**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (cameras.reopen_slab_adopt, 2026-07-23) — Open questions (1).
-**Tracking:** ruoso/arbitrarycomposer#19 (filed 2026-07-24 — carries the secondary
-`recovered_content_state()` ask too).
-
-`arbc::Document::open(path, housekeeping)` takes **no `Registry`** and runs **no factory**
-(`arbc/runtime/document.hpp:76-85`), so a workspace-mapped reopen restores the record graph
-only: `resolve()` is null for every recovered record and `for_each_content()` visits none,
-for **every** kind (verified at the v0.3.0 pin for `org.arbc.solid` and `org.arbc.raster`
-alike, and pinned by `tests/arbc_pin_test.cpp` / `tests/project_open_test.cpp`). That is why
-A19's rebuild-from-canonical policy is permanent, not a stopgap, and why arbc#5's
-`KindStateWalker` could not retire it. Restoring D-open-3's durable-by-default fast path
-needs one of two library changes: a **registry-aware open**
-(`Document::open(path, registry, bridge)` reconstructing each recovered `ContentRecord`
-through `registry.factory(kind_id)` plus a state codec), or a **public rebind seam**
-(`Document::rebind_content(ObjectId, std::shared_ptr<Content>)`) — which the library today
-deliberately does not offer (`arbc/pool/slot_store.hpp:119`: *"it never rebinds and there is
-no rebind API"*). A smaller secondary ask: expose `recovered_content_state()` on `Document`,
-since `replay_recovered_content_state` is currently unreachable by any host that opens
-through `Document` rather than `Model`. Upstream-issue candidates for
-`ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
-## A magnified raster cell never lets the canvas go idle
-
-**Source:** `tasks/refinements/cameras/reopen_slab_adopt.md` (fixer, 2026-07-23) — surfaced while
-diagnosing a `ci-gcc-release` hang; NOT caused by that refinement (reproduced 6/6 on clean
-`ac321f0`).
-**Tracking:** ruoso/arbitrarycomposer#18 (filed 2026-07-24).
-
-After `editor.canvas.nav_aids`' Shift+F frames a 32×32 `org.arbc.raster` cell into the pane
-(a ~10× magnification: the scale bar goes 50 → 5 composition units), the render loop **never
-settles**. Every `HostViewport::step()` composites a frame and reports
-`schedule_follow_up == true` — arbc's `InteractiveRenderer::render_frame` computes it as
-`!arrival_device.empty()`, so a refinement arrives, maps to a non-empty device region, and
-owes another frame, indefinitely — with `external_loads_ready == 0` and an empty in-flight
-tile queue. `frames_issued` then advances at the frame rate forever and the render thread
-burns a core for as long as the framing holds. The same fixture is quiet at 1× (one frame,
-then idle), and the nested all-`SolidContent` fixture in the same file settles in ~80 ms at
-any zoom, so the trigger is magnification of a raster leaf, not the nav aid itself.
-
-This violates `02-architecture#idle-viewport-issues-no-frames` and is a real
-battery/CPU defect, but the loop is inside the pinned library: the editor's host merely obeys
-the `schedule_follow_up` it is handed. Diagnosing whether the culprit is the tile-cache probe
-key at high magnification or the bounded per-frame budget (D-multi_canvas-3) starving the
-frame needs library-side instrumentation. Upstream-issue candidate for
-`ruoso/arbitrarycomposer`; no editor-side WBS task until the library fix exists. The
-editor-side mitigation already landed: `tests/canvas_nav_e2e_test.cpp`'s `settle()` helper is
-wall-clock bounded, so a non-idling canvas can no longer hang a lane (unbounded, it tripped
-the ImGui Test Engine's 60 s `ConfigWatchdogKillTest` and turned a 16 s `ace_shell_test` into
-a 566 s failure).
-
----
-
-## Bundled font for offline text rendering (captions, watermarks, slates)
-
-**Source:** `tasks/refinements/editor/contact_sheet.md` (cameras.contact_sheet, 2026-07-23) — Open questions / D-sheet-4.
-
-`docs/01-architecture.md:247` reserves an `assets/ icons, fonts (bundled)` slot that nothing has ever filled. `editor.cameras.contact_sheet` chose an embedded 5×7 constexpr ASCII bitmap table (D-sheet-4) as the defensible interim — no new external dependency, no runtime asset path, legible on any background via white+black-shadow pair. The follow-up `editor.cameras.caption_latin1` extends the table to the Latin-1 printable range. Whether the editor should eventually ship a real bundled font for offline text rendering — captions, watermarks, slates — is a new-external-dependency and product-scope call that D-sheet-4 deliberately did not make: a TrueType rasterizer (stb_truetype, FreeType, or similar) would be a second vendored library, and its antialiased grey edges are an alpha blend that conflicts with D-sheet-2's copy-only invariant unless the pipeline is widened to compositing. This is a human design judgment; `editor.cameras.caption_latin1` extends the existing table decision without presuming the answer.
-
----
-
-## render_offline version-addressed offline render (exact batch-export coherence)
-
-**Source:** `tasks/refinements/editor.cameras/export.md` (cameras.export, 2026-07-23) — Open questions / D-export-8.
-**Tracking:** ruoso/arbitrarycomposer#27 (filed 2026-07-24).
-
-`render_offline(const Document&, const Viewport&, Backend&)` (`arbc/runtime/offline.hpp:20-21`)
-pins the **current** version per call, so an edit landing mid-batch can make item 3 reflect a
-document state item 1 did not. D-export-8 chose to record and report the incoherence
-(`ExportReport::document_changed_during_export`) rather than block it, because the two
-host-side alternatives are untenable: blocking the writer for the full batch contradicts D14's
-async promise; snapshotting the document requires a full parse-and-rebuild of a serialisation
-snapshot per export. Whether libarbc should offer a version-addressed offline render
-(`render_offline(const Document&, RevisionId, …)` backed by the library's internal retained
-versions) is a **library** design judgement for the `arbitrarycomposer` maintainer — the
-editor has no host-side fix that is not a full second document load. Upstream-issue candidate
-for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
-
----
-
-## Welcome window visual treatment (branding, splash art, geometry persistence)
-
-**Source:** `tasks/refinements/editor/welcome.md` (welcome, 2026-07-24) — Acceptance criteria / Open questions (none).
-
-`dock::WelcomeWindow` draws the three verbs over a plain full-viewport ImGui window with no branding, splash art, or remembered geometry. Whether to add product branding, a splash illustration, remembered window size/position across launches, or a differentiated first-run experience is a design judgment call with no correct answer derivable from the constitution (D26 explicitly excludes all of these from v1 scope). These are product-taste decisions that warrant real use before deciding; no WBS task was created.
+*Amended at the v0.4.0 triage (2026-07-28):* do not measure yet — the queue shape
+is about to change. `editor.canvas.settler_attach_split` (consuming libarbc
+v0.4.0's arbc#25 `attach_settler`/`detach_settler`) removes a **known** contributor
+to the depth this item is about: today every canvas add, every remove and every
+resize rebuild posts a whole `HostViewport` construction or destruction to the
+writer thread via `submit_sync` (`src/render/canvas_renderer.cpp:73,150`,
+`src/render/canvas_host.cpp:116`), purely because the settler install lives in the
+ctor. After that leaf only the attach/detach pair is posted. Profiling the current
+queue would characterise a shape that is being retired, so the measurement this
+item asks for belongs after that leaf, not before it.
 
 ---
 
@@ -264,23 +116,14 @@ for `ruoso/arbitrarycomposer`; no editor-side WBS task until the API exists.
 
 **Source:** `tasks/refinements/cameras/export_destination_reseed.md` (cameras.export_destination_reseed, 2026-07-24) — Open questions / D-reseed-1 rejected alternative.
 
+**Trigger:** an in-process project reopen ever shipping.
+
 The Export panel's re-seed keys on `ExportService::instance()` — a monotonic per-service id — which is a faithful proxy for the live project today because the shipped model is 1:1 service-per-process (`project_gateway.hpp:21-33`, `app_state.hpp:284-285`). If the editor ever grows an in-process project reopen (swapping `Document`/`AppState` under a **surviving** `ExportService` instead of the current detached-sibling-`exec` model), `instance()` would not change across the swap, so the panel would retain the previous project's destination. The fix in that future would be to key the re-seed on a project/layout identity rather than the service `instance()` — D-reseed-1's "rejected alternative", which is correct only under that future architecture. This is a design call contingent on an architecture decision no leaf owns today; the WBS records the trigger: if in-process reopen ever ships, revisit `views.cpp:315-317` and `ExportPanel::owner` to key on a stable project identity instead.
 
----
-
-## Worker-backed parallel tile decode/encode — and where the pool would come from
-
-**Source:** `tasks/refinements/editor/raster_tile_store.md` (project.raster_tile_store, 2026-07-24) — Open questions 1 / D-raster_tile_store-4.
-
-The editor now threads its `arbc::RasterTileStore` through save and load (A23), but leaves
-`TileDecodeDispatch`/`TileEncodeDispatch` **null**, so both directions run inline. A
-worker-backed dispatch needs an `arbc::WorkerPool` (`tile_decode_dispatch.hpp:95-99`, *"pool
-must outlive the dispatch"*), and the editor's only pool belongs to `ace::render::CanvasHost`
-(`src/render/ace/render/canvas_host.hpp:64-70`) — **L2**, unreachable from L1
-`project`/`commands` under §8, and not yet constructed when `open_or_create_app_state` runs.
-Minting a second pool inside `project` would contradict A4's *shared pool* clause and add the
-editor-owned thread `open.md` Constraint 7 forbids. Answering this means deciding whether the
-pool's lifetime moves below `render` (an A4/A5 amendment) or whether cold-open latency on
-large raster projects is simply accepted. A null dispatch is byte-identical to the serial
-path, so nothing is incorrect today — this is a latency/architecture judgment, not a kernel to
-write. No WBS task was created.
+*Clarified at the v0.4.0 triage (2026-07-28):* libarbc v0.4.0 does **not** move this
+trigger, and the reopen work landing alongside it should not be read as having done
+so. `editor.project.reconstructing_reopen` changes how a project's document is
+*reconstructed on open*; it does not make the editor reopen a different project
+**in process**. Opening another project is still a detached sibling `exec`
+(`editor.project.exec_new`), so a surviving `ExportService` across a project swap
+remains hypothetical and `instance()` remains a faithful proxy. Unchanged.
