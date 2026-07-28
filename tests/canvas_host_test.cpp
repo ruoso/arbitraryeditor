@@ -1700,10 +1700,15 @@ TEST_CASE("canvas_host: streamed edits + a live render loop + a canvas added/rem
   REQUIRE(pump_until([&] { return doc->external_loads_ready() == 0; }));
   REQUIRE(pump_until([&] { return host.live_count() == 1; }));
   // The arrival was installed, and exactly once, by whichever of the three idempotent paths got
-  // there first (D-writer_thread-10). NOTE the composite itself is asserted by the deterministic
-  // inline cases above, not here: the real interactive pool composites a deferred-external nested
-  // child blank even when the document is pre-settled — a pre-existing gap this leaf surfaces but
-  // does not own (see the `editor.canvas.nested_real_pool` follow-up).
+  // there first (D-writer_thread-10). The composite under the real interactive pool is asserted
+  // below, non-blank (editor.canvas.nested_real_pool): #17 (libarbc v0.4.0) routes the settled
+  // child into the compositor, so this is the first real-pool published-pixel read-back in the
+  // suite — byte-exact convergence stays owned by the deterministic inline case above.
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+  std::uint64_t seq = 0;
+  Srgb8Image frame;
+  REQUIRE(host.consume("canvas#1", seq, frame));
+  CHECK(ace::render::frame_has_content(frame));
   host.stop();
   handle->join();
   writer.set_idle_work({}); // disarm before the host the closure pokes goes out of scope

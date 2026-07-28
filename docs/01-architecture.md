@@ -154,6 +154,38 @@ ctor and `Model::navigate()`, nowhere else), so "the UI thread transacts before 
 render thread ever steps" is a load-bearing ordering rule, not an incidental one.
 Realized by `editor.canvas.arbc_v030`; superseded in part by `editor.canvas.writer_thread`.
 
+**A4.1a (amended at the v0.4.0 settler split) — the settler no longer installs *at
+construction*; the render thread constructs the `HostViewport` and posts only an explicit
+`attach_settler`/`detach_settler` pair.** libarbc v0.4.0 (`editor.canvas.arbc_v040`, arbc#25)
+adds `HostViewport::Config::install_settler` and `HostViewport::attach_settler()`/
+`detach_settler()` — precisely the split D-writer_thread-8 asked upstream for. Consumed by
+`editor.canvas.settler_attach_split`: the viewport is constructed on the **render thread**
+with `install_settler = false`, so its ctor/dtor do **no** writer-thread-only work and the
+render thread owns the viewport lifetime (RAII, no `submit_sync` round trip for
+construction). The two writer-thread-only concerns the ctor/dtor used to fold in — the
+document's external-load settler slot (`set_external_load_settler`, install-counted) **and**
+the registration of the viewport's `DamageAccumulator` into the shared `DamageRouter` whose
+registrant list a commit's flush walks — move into the explicit `attach_settler()` (posted
+`submit_sync` on add / resize-in) and `detach_settler()` (posted on remove / resize-out /
+teardown). **Delivery is two-phase, because arbc#25/v0.4.0 shipped only the settler-slot
+half.** `install_settler = false` defers the settler slot alone; `DamageRouter::register_sink`
+/ `set_damage_sink` stay welded to the ctor with no internal synchronization, so
+render-thread construction still races the router's registrant list — which is why the
+settler consumer (`editor.canvas.settler_attach_split`) re-deferred on the falsified
+assumption that one flag deferred both. The router-registrant half moves off the ctor only
+when a successor libarbc release lands it behind an `install_settler`-style flag (or a
+dedicated `attach_router`/`detach_router` pair): pinned by
+`editor.canvas.arbc_router_split_pin` and consumed by
+`editor.canvas.arbc_router_attach_split`, which together complete this amendment. What does
+**not** change: the install is still writer-thread-only, still
+install-counted, still never on the render thread, and the N-viewports-per-document
+single-slot / last-installer-wins rule (A4.1b) is untouched — only *which call* performs
+the install moves off the ctor onto `attach_settler()`. The prior amendment's "installs at
+construction … released in the dtor" wording is superseded accordingly. Realized (settler
+half) by `editor.canvas.settler_attach_split`; the router-registrant half is completed by
+`editor.canvas.arbc_router_split_pin` (the successor pin) + `editor.canvas.arbc_router_attach_split`
+(the consumer).
+
 **A4.1b — the document owns ONE writer thread; the UI and render threads are pure
 submitters and readers.** A4.1's prescribed consequence is now the shipped shape.
 `ace::writer::WriterThread` (L1, over `base` + `platform` only — it holds no `Document`
