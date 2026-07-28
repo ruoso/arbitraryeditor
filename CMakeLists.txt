@@ -22,7 +22,7 @@ include(FetchContent)
 # (overrides the git fetch) or point ARBC_GIT_TAG at a branch.
 set(ARBC_GIT_REPOSITORY "https://github.com/ruoso/arbitrarycomposer.git"
     CACHE STRING "libarbc git remote")
-set(ARBC_GIT_TAG "v0.3.0" CACHE STRING "libarbc git ref")
+set(ARBC_GIT_TAG "v0.4.0" CACHE STRING "libarbc git ref")
 set(ARBC_SOURCE_DIR "" CACHE STRING "Local libarbc checkout (overrides the git fetch)")
 set(_editor_build_testing "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)

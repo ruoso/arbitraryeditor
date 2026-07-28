@@ -1,16 +1,21 @@
-// editor.canvas.arbc_v030 — the libarbc pin guard, headless + GL-free
-// (docs/01-architecture.md §9). Three jobs, one file:
+// editor.canvas.arbc_v040 — the libarbc pin guard, headless + GL-free
+// (docs/01-architecture.md §9; retargeted from editor.canvas.arbc_v030 at the v0.4.0 pin).
+// Three jobs, one file:
 //
-//  1. PIN EFFECTIVENESS (D-arbc_v030-2). `ARBC_GIT_TAG` is a `CACHE` variable set WITHOUT
-//     `FORCE` (CMakeLists.txt:25) and `scripts/gate` reconfigures in place without wiping
-//     `build/`, so a developer with an existing build tree can bump the tag, see a green
-//     gate, and still be linked against v0.2.0 — silently. There is no `arbc_version`
-//     symbol to assert at runtime, and a subproject's `<NAME>_VERSION` is not visible in
-//     the parent scope after `FetchContent_MakeAvailable`, so a CMake `VERSION_LESS` guard
-//     would never fire. The guard is therefore the COMPILER: this file NAMES the four
-//     v0.3.0-only `Document` members (`on_writer_thread`, `external_loads_ready`,
-//     `set_external_load_settler`, `external_loads_auto_settled`), so a stale tree fails to
-//     build rather than passing (Constraint 2 / Constraint 7).
+//  1. PIN EFFECTIVENESS (D-arbc_v030-2 -> D-arbc_v040-3). `ARBC_GIT_TAG` is a `CACHE` variable
+//     set WITHOUT `FORCE` (CMakeLists.txt:25) and `scripts/gate` reconfigures in place without
+//     wiping `build/`, so a developer with an existing build tree can bump the tag, see a green
+//     gate, and still be linked against v0.3.0 — silently. There is no `arbc_version` symbol to
+//     assert at runtime, and a subproject's `<NAME>_VERSION` is not visible in the parent scope
+//     after `FetchContent_MakeAvailable`, so a CMake `VERSION_LESS` guard would never fire. The
+//     guard is therefore the COMPILER. The four v0.3.0-only `Document` members this file already
+//     names (`on_writer_thread`, `external_loads_ready`, `set_external_load_settler`,
+//     `external_loads_auto_settled`) STILL resolve at v0.4.0, so they no longer discriminate;
+//     the guard is renewed by the v0.4.0 witness block below, which NAMES the surface the pin
+//     added (`arbc::open_document`, `Journal::history`, `HostViewport::attach_settler`, the
+//     per-kind insert schema, `create_content_and_attach`/`remove_contents`, and the
+//     caller-pinned `render_offline`) so a stale v0.3.0 tree fails to build rather than passing
+//     (Constraint 2 / Constraint 8).
 //
 //  2. THE SEMANTIC PIN `editor.canvas.writer_thread` INHERITS (D-arbc_v030-4/-5). Writer
 //     identity is UNBOUND until the first transaction and `Model::on_writer_thread()`
@@ -45,14 +50,21 @@
 #include <arbc/model/journal.hpp>
 #include <arbc/model/model.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/document_serialize.hpp>
+#include <arbc/runtime/host_viewport.hpp>
+#include <arbc/runtime/offline.hpp>
 #include <arbc/runtime/recovered_state_replay.hpp>
+#include <arbc/surface/backend.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
@@ -265,6 +277,80 @@ static_assert(
                        std::declval<const arbc::Registry&>(),
                        std::declval<const arbc::RecoveredStateHooks&>())),
                    arbc::RecoveredStateReplayStats>);
+
+// --- editor.canvas.arbc_v040: the v0.4.0 staleness guard + downstream-surface witnesses ------
+//
+// D-arbc_v040-3. This leaf CONSUMES none of the v0.4.0 surface in `src/` (D-arbc_v040-1); every
+// new API is used by its own downstream leaf. Here it is pinned by EXISTENCE AND SHAPE only —
+// unevaluated operands, no odr-use — for two purposes: (a) it renews the compile-time staleness
+// guard, because a tree still resolving v0.3.0 fails to build on these lines; and (b) it records
+// in one place what the pin bought, so a stale tree fails HERE rather than confusingly at the
+// first consumer leaf. Behaviour stays with the named leaf on each line.
+
+// #19 reconstructing reopen — `editor.project.reconstructing_reopen` (.tji:208). The record
+// graph reopens through the unchanged `Document::open` (last case below); `arbc::open_document`
+// is the NEW route that rebinds content, reporting what it could not rebuild.
+static_assert(
+    std::is_same_v<decltype(arbc::ReopenedDocument::unreconstructed), std::vector<arbc::ObjectId>>);
+static_assert(std::is_same_v<decltype(&arbc::open_document),
+                             arbc::expected<arbc::ReopenedDocument, arbc::WorkspaceFileError> (*)(
+                                 const std::string&, const arbc::Registry&, const arbc::CodecTable&,
+                                 arbc::LoadContext&, arbc::KindBridge&,
+                                 const arbc::DocumentHousekeepingConfig&)>);
+static_assert(
+    std::is_same_v<decltype(&arbc::Document::rebind_content),
+                   bool (arbc::Document::*)(arbc::ObjectId, std::shared_ptr<arbc::Content>)>);
+
+// #20 one-action-one-entry — `editor.cells.one_action_one_entry` (.tji:530).
+static_assert(std::is_same_v<decltype(&arbc::Document::create_content_and_attach),
+                             arbc::Document::Placed (arbc::Document::*)(
+                                 std::shared_ptr<arbc::Content>, std::uint64_t, arbc::ObjectId,
+                                 const arbc::Affine&, double)>);
+static_assert(std::is_same_v<decltype(&arbc::Document::remove_contents),
+                             void (arbc::Document::*)(std::span<const arbc::Document::Removal>)>);
+
+// #21/#22 per-kind insert schema — `editor.cells.insert_schema` (.tji:481).
+static_assert(
+    std::is_same_v<decltype(&arbc::Registry::insert_schema),
+                   const arbc::KindInsertSchema* (arbc::Registry::*)(std::string_view) const>);
+
+// #24 any-thread journal history snapshot — `editor.canvas.history_snapshot_adopt` (.tji:364).
+// The mirror A18 keeps host-side is retired against THIS; `entry_at` stays writer-thread-only.
+static_assert(
+    std::is_same_v<decltype(&arbc::Journal::history),
+                   std::shared_ptr<const arbc::HistoryView> (arbc::Journal::*)() const noexcept>);
+
+// #25 settler lifetime split — `editor.canvas.settler_attach_split` (.tji:370). Opted into with
+// `Config::install_settler = false`, letting the render thread own the viewport lifetime again.
+static_assert(
+    std::is_same_v<decltype(&arbc::HostViewport::attach_settler), void (arbc::HostViewport::*)()>);
+static_assert(std::is_same_v<decltype(&arbc::HostViewport::detach_settler),
+                             void (arbc::HostViewport::*)() noexcept>);
+static_assert(std::is_same_v<decltype(arbc::HostViewport::Config::install_settler), bool>);
+
+// #27 caller-pinned batch-coherent export overload — `editor.cameras.export_pinned` (.tji:487).
+// `render_offline` is overloaded, so the cast disambiguates AND is the guard: the 4-arg overload
+// does not exist at v0.3.0, where the cast fails to compile. The editor's own two calls
+// (src/render/render.cpp) stay on the 2-arg overload — that one now routes through the tiled
+// driver, and its byte-exact witnesses are this leaf's four re-baselined goldens (D-arbc_v040-2).
+using ArbcRenderOfflinePinned =
+    arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> (*)(const arbc::Document&,
+                                                                           const arbc::DocStatePtr&,
+                                                                           const arbc::Viewport&,
+                                                                           arbc::Backend&);
+static_assert(std::is_same_v<decltype(static_cast<ArbcRenderOfflinePinned>(&arbc::render_offline)),
+                             ArbcRenderOfflinePinned>);
+
+// The two new `Backend` virtuals a pixel-modelling backend must supply (D-arbc_v040-6 / A6
+// amendment). The editor implements NO `arbc::Backend` and constructs only `arbc::CpuBackend`,
+// so these are inert here — witnessed for the staleness guard and to record the seam growth.
+static_assert(std::is_same_v<decltype(&arbc::Backend::composite_windowed),
+                             void (arbc::Backend::*)(arbc::Surface&, const arbc::Surface&,
+                                                     const arbc::Affine&, double, const arbc::Rect&,
+                                                     const arbc::Rect&)>);
+static_assert(std::is_same_v<decltype(&arbc::Backend::clear_rect),
+                             void (arbc::Backend::*)(arbc::Surface&, const arbc::Rect&, float,
+                                                     float, float, float)>);
 
 TEST_CASE("arbc pin: a checkpointed NON-INERT StateHandle reopens through Document::open") {
   ScratchDir scratch;

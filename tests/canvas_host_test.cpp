@@ -1412,14 +1412,19 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
   ace::platform::NativeThreads threads;
   ace::writer::WriterThread writer(threads);
   // editor.cells.selection Acceptance (Threading): selection mutates NOTHING, so this leaf adds
-  // no writer path — but `interact::pick_targets` now calls a `Content` VIRTUAL
+  // no writer path — but `interact::pick_targets` calls a `Content` VIRTUAL
   // (`arbc::Content::bounds()`, via `scene::cells`' pinned walk, D-selection-11) on the UI
   // thread against a document a render thread is walking. The lock-free `pin()` seam covers the
-  // record walk; whether it also covers the `bounds()` call is the specific thing this case
-  // pins. Repeated pick_targets + pick on the UI thread against a LIVE rendering real-pool host
-  // (the D-edit_render_sync-3 anchor) while cell inserts stream through `apply_edit`. No new
-  // lock and no new thread; a TSan/ASan report here is the tripwire the refinement's parking-lot
-  // item names (the fix would be a libarbc-side contract statement, not an editor-side lock).
+  // record walk; the `bounds()` call is covered by libarbc's stated ANY-THREAD contract for
+  // `Content::bounds()` (arbc#23, landed at the v0.4.0 pin, D-arbc_v040-5). Repeated
+  // pick_targets + pick on the UI thread against a LIVE rendering real-pool host (the
+  // D-edit_render_sync-3 anchor) while cell inserts stream through `apply_edit`. No new lock and
+  // no new thread: this case is no longer a TRIPWIRE for an unstated race — it ASSERTS a stated
+  // guarantee. At v0.3.0 the read was safe only because every editor kind fixes its extent at
+  // construction (`scene::CameraContent::bounds()` is constant-empty, src/scene/ace/scene/
+  // camera.hpp:46-48; every other kind the editor uses is a library built-in); at v0.4.0 it is
+  // safe by contract. A TSan/ASan report here is therefore a real contract violation, not the
+  // open design question it once flagged.
   ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
