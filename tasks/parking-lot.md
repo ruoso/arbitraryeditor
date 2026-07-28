@@ -130,6 +130,23 @@ remains hypothetical and `instance()` remains a faithful proxy. Unchanged.
 
 ---
 
+## DamageRouter registrant split — libarbc arbc#25 successor needed to unblock settler_attach_split
+
+**Source:** `tasks/refinements/canvas/settler_attach_split.md` (re-defer 2026-07-28)
+
+**Trigger:** a new libarbc release that moves `DamageRouter::register_sink` (and `Document::set_damage_sink`) out of `HostViewport` ctor/dtor into the `attach_settler()`/`detach_settler()` pair (or a dedicated `attach_router`/`detach_router()` pair), gated by an `install_settler`-style flag.
+
+`editor.canvas.settler_attach_split` was found unimplementable against libarbc v0.4.0: arbc#25 split only the settler slot (`set_external_load_settler`), NOT the `DamageRouter::register_sink` call, out of `HostViewport` ctor/dtor. The `DamageRouter` registration is welded unconditionally to the ctor (`host_viewport.cpp:66-68`) and has no internal synchronization (`damage_router.hpp:29-34`), so render-thread construction with `install_settler=false` still races the router's registrant vector against concurrent writer-thread damage flushes. That is exactly the race the `:1639` TSan anchor's guard note (`canvas_host_test.cpp:1636-1638`) names; the hermetic gcc-tsan lane would report it.
+
+**Human action:** file a libarbc issue (successor to arbc#25) requesting the DamageRouter split — that `register_sink` (and the single-canvas `set_damage_sink`) be deferred to `attach_settler()`/`detach_settler()` or a new `attach_router()`/`detach_router()` pair, gated by a new flag analogous to `install_settler`.
+
+**When the trigger fires:**
+1. Mark `editor.canvas.arbc_router_split_pin` complete once the pin bump to that release lands.
+2. Implement `editor.canvas.arbc_router_attach_split` (the editor consumer leaf that wires the deferred router registration into the render-thread construction path).
+3. `editor.canvas.settler_attach_split` unblocks automatically once `arbc_router_attach_split` is done.
+
+---
+
 ## add(X)→remove(X)→add(X) collapsing in one drive iteration
 
 **Source:** `tasks/refinements/canvas/pending_removes_order.md` (canvas.pending_removes_order, 2026-07-28) — Open questions / D-pending_removes_order-1 accepted consequence.
