@@ -132,7 +132,10 @@ remains hypothetical and `instance()` remains a faithful proxy. Unchanged.
 
 ## DamageRouter registrant split — libarbc arbc#25 successor needed to unblock settler_attach_split
 
-**Source:** `tasks/refinements/canvas/settler_attach_split.md` (re-defer 2026-07-28)
+**Source:** `tasks/refinements/canvas/settler_attach_split.md` (re-defer 2026-07-28);
+confirmed by `tasks/refinements/canvas/arbc_router_split_pin.md` (re-defer 2026-07-28 —
+`arbc_router_split_pin` was picked up and verified the upstream state independently: no
+successor tag exists, `DamageRouter::register_sink` still welded to ctor at v0.4.0).
 
 **Trigger:** a new libarbc release that moves `DamageRouter::register_sink` (and `Document::set_damage_sink`) out of `HostViewport` ctor/dtor into the `attach_settler()`/`detach_settler()` pair (or a dedicated `attach_router`/`detach_router()` pair), gated by an `install_settler`-style flag.
 
