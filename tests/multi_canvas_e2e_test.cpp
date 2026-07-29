@@ -300,6 +300,9 @@ TEST_CASE("multi_canvas e2e: two canvases over one host render, dock, fan-out, a
              canvas.frames_issued("canvas#2") > before2;
     }));
 
+    // Freeze the both-open snapshot at the last frame in which both panes are still docked +
+    // drawn, before canvas#2 leaves the layout below (grab_frame stops refreshing it).
+    e2e->snapshot_now.store(false);
     // Close canvas#2 (through the dockspace, the same path the tab ✕ routes through): the
     // reconcile drops its host entry (no longer served → sequence 0) while canvas#1 stays
     // live. No crash.
@@ -326,8 +329,13 @@ TEST_CASE("multi_canvas e2e: two canvases over one host render, dock, fan-out, a
       if (capture_pixels(0, 0, 0, captured_w, captured_h, px.data(), nullptr)) {
         const auto* bytes = reinterpret_cast<const unsigned char*>(px.data());
         last_frame.assign(bytes, bytes + px.size() * 4);
-        // Keep the first frame captured while both panes are open for the pixel check.
-        if (e2e.snapshot_now.load() && both_frame.empty()) {
+        // Keep refreshing the both-open snapshot to the LATEST frame while both panes are open
+        // (the coroutine clears snapshot_now just before canvas#2 closes, freezing it at the
+        // last both-open frame). Grabbing the FIRST post-focus frame raced the async
+        // render→upload→draw of the freshly-focused pane: under a slow build (sanitizer, or a
+        // contended CI runner) canvas#2's texture had not yet reached the screen, so its centre
+        // still read the shell clear colour. The last both-open frame has settled.
+        if (e2e.snapshot_now.load()) {
           both_frame = last_frame;
         }
       }
