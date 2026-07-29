@@ -3,6 +3,7 @@
 #include <ace/commands/app_state.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/scene/camera.hpp>
+#include <ace/scene/cell.hpp>
 
 #include <arbc/base/transform.hpp>
 
@@ -31,10 +32,133 @@ struct AspectPreset {
 };
 constexpr AspectPreset k_presets[] = {{"1:1", 1, 1}, {"4:3", 4, 3}, {"16:9", 16, 9}, {"2:1", 2, 1}};
 
+// The worst-case (softest) health of `cell` across the cameras that capture it — the ratio
+// the readout leads with (Constraint / D-resolution-4). Cameras for which the verdict is N/A
+// (a degenerate frame) are skipped; if no camera yields a verdict, the result is
+// NotApplicable. `cell` must carry a native pixel grid (the caller gates on it).
+interact::ResolutionHealth worst_cell_health(const scene::Cell& cell,
+                                             const std::vector<scene::Camera>& cameras) {
+  interact::ResolutionHealth worst;
+  const std::pair<int, int> native = *cell.detail.native_pixels;
+  for (const scene::Camera& cam : cameras) {
+    const interact::ResolutionHealth h =
+        interact::resolution_health(native.first, native.second, cell.placement,
+                                    cam.resolution.width, cam.resolution.height, cam.frame);
+    if (h.verdict == interact::ResolutionVerdict::NotApplicable) {
+      continue;
+    }
+    if (worst.verdict == interact::ResolutionVerdict::NotApplicable || h.ratio > worst.ratio) {
+      worst = h;
+    }
+  }
+  return worst;
+}
+
+// The selected cell's native/placed size + D8 health/provenance (editor.cells.resolution).
+// Native resolution and placed size are shown as DISTINCT numbers (D7/D8): the placement
+// scale is never presented as a resolution, and the native grid never derives from it.
+void draw_cell_readout(const scene::Cell& cell, const std::vector<scene::Camera>& cameras) {
+  ImGui::TextUnformatted("Cell");
+  ImGui::Separator();
+
+  // Native resolution — the content's own pixel grid, unchanged by any placement drag (D8).
+  if (cell.detail.native_pixels.has_value()) {
+    ImGui::Text("Native resolution: %d x %d px", cell.detail.native_pixels->first,
+                cell.detail.native_pixels->second);
+  } else {
+    ImGui::TextUnformatted("Native resolution: n/a (resolution-independent)");
+  }
+  // Placed size — the placement-mapped content extent in composition units (D7/§6:234), a
+  // pure Affine::map_rect, SEPARATE from the native pixel count.
+  if (cell.content_bounds.has_value()) {
+    const arbc::Rect placed = cell.placement.map_rect(*cell.content_bounds);
+    ImGui::Text("Placed size: %.0f x %.0f composition units", placed.width(), placed.height());
+  } else {
+    ImGui::TextUnformatted("Placed size: n/a (unbounded)");
+  }
+
+  // Provenance + health (D8/D11), from the generic classification — never a kind switch.
+  switch (cell.detail.source) {
+  case scene::DetailSource::ResolutionIndependent:
+    // No detail floor: no health verdict, never a false "soft" (Constraint 4).
+    ImGui::TextUnformatted("Resolution-independent - no native detail floor.");
+    return;
+  case scene::DetailSource::ReferencedImage:
+    // A terminal, fully-true statement (D8/§6:242): the file is the floor, nothing to
+    // resample to. No resample affordance is offered (D-resolution-5: no dead UI).
+    ImGui::TextUnformatted("Source-limited - no crisper detail exists.");
+    break;
+  case scene::DetailSource::PaintedRaster:
+    break;
+  }
+
+  // A finite-detail cell whose grid is unavailable (an image that failed to decode: empty
+  // bounds) reports no verdict rather than a false one (Constraint 4).
+  if (!cell.detail.native_pixels.has_value()) {
+    return;
+  }
+  const interact::ResolutionHealth health = worst_cell_health(cell, cameras);
+  if (health.verdict == interact::ResolutionVerdict::NotApplicable) {
+    ImGui::TextUnformatted("Health: n/a (no capturing camera).");
+    return;
+  }
+  if (health.verdict == interact::ResolutionVerdict::Soft) {
+    // "soft - sampled at 1.4x . detail floor 2048" (docs/00-design.md:157): the softness and,
+    // for a painted raster, the detail floor the (deferred) resample would grow.
+    ImGui::Text("Health: soft - sampled at %.2fx . detail floor %d x %d px", health.ratio,
+                cell.detail.native_pixels->first, cell.detail.native_pixels->second);
+  } else {
+    ImGui::Text("Health: crisp - sampled at %.2fx (at or below native).", health.ratio);
+  }
+}
+
+// The per-camera resolution-health read of the cells `camera` captures — the read
+// editor.cameras.manip explicitly deferred to this leaf (D9/D-manip-6). Resolution-
+// independent cells (no native floor) are omitted; there is nothing to judge.
+void draw_capture_health(const scene::Camera& camera, const std::vector<scene::Cell>& cells) {
+  ImGui::Separator();
+  ImGui::TextUnformatted("Capture health");
+  bool any = false;
+  for (const scene::Cell& cell : cells) {
+    if (!cell.detail.native_pixels.has_value()) {
+      continue;
+    }
+    const interact::ResolutionHealth h = interact::resolution_health(
+        cell.detail.native_pixels->first, cell.detail.native_pixels->second, cell.placement,
+        camera.resolution.width, camera.resolution.height, camera.frame);
+    if (h.verdict == interact::ResolutionVerdict::NotApplicable) {
+      continue;
+    }
+    any = true;
+    ImGui::Text("- %s: %s (%.2fx)", cell.kind_id.empty() ? "cell" : cell.kind_id.c_str(),
+                h.verdict == interact::ResolutionVerdict::Soft ? "soft" : "crisp", h.ratio);
+  }
+  if (!any) {
+    ImGui::TextDisabled("No finite-detail cells captured.");
+  }
+}
+
 } // namespace
 
 void CameraInspector::draw(std::string_view /*view_id*/) {
   const std::vector<scene::Camera> cameras = scene::cameras(state_.document());
+  const std::vector<scene::Cell> cells = scene::cells(state_.document(), state_.registry());
+
+  // The selection readout (editor.cells.resolution, D-resolution-6): a selected CELL's
+  // native/placed size + D8 health/provenance, read fresh each frame off the live pinned
+  // snapshot (Constraint 6). The project selection is keyed by content ObjectId
+  // (D-selection-1), so `primary()` answers "which cell's resolution do we show" with no new
+  // state; a stale id simply matches nothing. A selected CAMERA is served by the camera
+  // section below (its per-camera capture health).
+  const arbc::ObjectId selected = state_.selection().primary();
+  for (const scene::Cell& cell : cells) {
+    if (cell.id == selected) {
+      draw_cell_readout(cell, cameras);
+      ImGui::Separator();
+      break;
+    }
+  }
+
   ImGui::TextUnformatted("Cameras");
   ImGui::Separator();
   if (cameras.empty()) {
@@ -121,6 +245,11 @@ void CameraInspector::draw(std::string_view /*view_id*/) {
       });
     }
   }
+
+  // The per-camera resolution-health read of the cells the target camera captures — the read
+  // editor.cameras.manip deferred to this leaf (D9/D-manip-6). Pure read over the same pinned
+  // `cells` snapshot; opens no transaction.
+  draw_capture_health(*target, cells);
 }
 
 } // namespace ace::app

@@ -180,6 +180,20 @@ libarbc v0.4.0 registers `org.arbc.nested` with **no** schema, so nested inserts
 
 ---
 
+## libarbc has no content-resample verb — "resample to crisp" blocked on upstream
+
+**Source:** `tasks/refinements/editor/resolution.md` (cells.resolution, 2026-07-28) — Open questions / D-resolution-5.
+
+**Trigger:** a new libarbc release adding a generic `Resampleable` content facet (or equivalent verb).
+
+`arbc::RasterContent` exposes construction + `paint` only (`raster_content.hpp:297-362`); there is no in-place resize verb. Implementing "resample to crisp" (grow a raster's working grid to match or exceed the camera's pixel density) editor-side would require naming the concrete `RasterContent` type (A16 no-allowlist) and owning kind-specific upsampling (levelization — `arbc::media`'s resampler is the kind's floor, not the editor's). The clean fix is an **upstream generic content-resample facet** — a `Resampleable` a kind opts into and the host discovers via a `Content` virtual (a referenced `org.arbc.image` returns `nullptr` → "source-limited"; a raster implements it to resize its grid to a new version via `set_content_state`) — so the host offers "resample to crisp" without naming any kind.
+
+**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting that `Resampleable` facet / content-resize verb.
+
+**When the trigger fires** (a libarbc release adding it): bump the pin, then implement the editor-consumer leaf **`editor.cells.resample_apply`** (~1.5d) — wire a "resample to crisp" action in the Inspector through a `commands::Command` + the new verb (one journal entry, undoable, `ObjectId` preserved), gated on `DetailSource::PaintedRaster`, with the `bounds()`-read/write TSan case `selection.md` Open question 2 anticipated. That consumer is genuine agent-implementable work *once the API exists*, so it becomes a WBS leaf then, not now.
+
+---
+
 ## add(X)→remove(X)→add(X) collapsing in one drive iteration
 
 **Source:** `tasks/refinements/canvas/pending_removes_order.md` (canvas.pending_removes_order, 2026-07-28) — Open questions / D-pending_removes_order-1 accepted consequence.

@@ -429,4 +429,40 @@ arbc::Affine refit_frame_to_aspect(const arbc::Affine& frame, int old_native_w, 
   return compose(scale_about(k, top_left), frame);
 }
 
+ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affine& placement,
+                                   int cam_w, int cam_h, const arbc::Affine& cam_frame) {
+  ResolutionHealth health;
+  if (native_w <= 0 || native_h <= 0 || cam_w <= 0 || cam_h <= 0) {
+    return health; // no native floor / degenerate resolution: N/A, never a false Soft
+  }
+  // The placed region (composition) of the cell's native extent, and the camera's covered
+  // region of its output extent — each affine's own map of its pixel rectangle. A collapsed
+  // placement or frame maps its rectangle to a zero-area sliver (`empty()`): N/A, never a
+  // div-by-zero (Constraint 4). AABB-based, so an axis-aligned scale is byte-exact and a
+  // rotation carries the documented tolerance the caller's tests pin.
+  const arbc::Rect placed = placement.map_rect(
+      arbc::Rect::from_size(static_cast<double>(native_w), static_cast<double>(native_h)));
+  const arbc::Rect shot = cam_frame.map_rect(
+      arbc::Rect::from_size(static_cast<double>(cam_w), static_cast<double>(cam_h)));
+  if (placed.empty() || shot.empty()) {
+    return health;
+  }
+  // Per axis: (camera output px per composition unit) / (cell native px per composition
+  // unit). The worst (largest) axis is the softness the readout leads with — a cell stretched
+  // more on one axis is judged by that axis (D-resolution-4).
+  const double rx = (static_cast<double>(cam_w) / shot.width()) /
+                    (static_cast<double>(native_w) / placed.width());
+  const double ry = (static_cast<double>(cam_h) / shot.height()) /
+                    (static_cast<double>(native_h) / placed.height());
+  const double ratio = std::max(rx, ry);
+  if (!std::isfinite(ratio) || !(ratio > 0.0)) {
+    return health; // an infinite / non-finite region etc. — never a NaN verdict
+  }
+  health.ratio = ratio;
+  // Softness is any magnification above native (D-resolution-4): no invented tolerance
+  // band, the raw ratio is surfaced so the user judges severity.
+  health.verdict = ratio > 1.0 ? ResolutionVerdict::Soft : ResolutionVerdict::Crisp;
+  return health;
+}
+
 } // namespace ace::interact

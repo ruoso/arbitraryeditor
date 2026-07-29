@@ -9,6 +9,7 @@
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -74,6 +75,34 @@ make_content(const arbc::Registry& registry, std::string_view kind_id, std::stri
     return arbc::unexpected<std::string>(std::string(kind_id) + ": factory produced no content");
   }
   return std::move(*made);
+}
+
+// Classify a resolved content's pixel provenance from the GENERIC D11 facets, never its
+// kind id (A16 / D-resolution-2). `editable()` non-null ⇒ it owns a mutable grid
+// (PaintedRaster); else a non-empty `external_asset_ref()` ⇒ it borrows an external file
+// (ReferencedImage); else it has no detail floor (ResolutionIndependent). The native pixel
+// grid is `bounds`' dimensions for the two finite-detail sources — 1 native pixel = 1
+// content unit before placement (D-resolution-1) — and `nullopt` for the independent case
+// and for an unavailable image (empty bounds). `editable()` is a non-const facet virtual
+// but a pure discovery read (it mints nothing) — const-clean under the render walk (the
+// TSan anchor covers it). `bounds` is the same value the caller already read off this pin.
+CellDetail classify_detail(arbc::Content& content, const std::optional<arbc::Rect>& bounds) {
+  CellDetail detail;
+  if (content.editable() != nullptr) {
+    detail.source = DetailSource::PaintedRaster;
+  } else if (!content.external_asset_ref().empty()) {
+    detail.source = DetailSource::ReferencedImage;
+  } else {
+    return detail; // ResolutionIndependent (the default): no native floor, no native px
+  }
+  // A finite-detail cell: its content-space extent numerically IS its pixel grid
+  // (D-resolution-1). An absent or empty extent (an unavailable image) leaves the native
+  // grid `nullopt` — health N/A, never a false verdict (Constraint 4).
+  if (bounds.has_value() && !bounds->empty()) {
+    detail.native_pixels = std::pair<int, int>{static_cast<int>(std::lround(bounds->width())),
+                                               static_cast<int>(std::lround(bounds->height()))};
+  }
+  return detail;
 }
 
 } // namespace
@@ -277,13 +306,15 @@ std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& re
     // this adds no lock and no second walk; an unbound id (or an unbounded kind) is `nullopt`,
     // which is the honest "covers the whole plane" answer, not an error.
     std::optional<arbc::Rect> bounds;
-    if (const arbc::Content* content = document.resolve(layer->content); content != nullptr) {
+    CellDetail detail;
+    if (arbc::Content* content = document.resolve(layer->content); content != nullptr) {
       bounds = content->bounds();
+      detail = classify_detail(*content, bounds);
     }
     // An unresolvable token surfaces with an empty kind_id rather than vanishing —
     // an unknown-passthrough cell is still a cell (D-cells_model-8).
     result.push_back(Cell{layer->content, layer_id, named ? std::string(id) : std::string(),
-                          layer->transform, bounds});
+                          layer->transform, bounds, detail});
   });
   return result;
 }

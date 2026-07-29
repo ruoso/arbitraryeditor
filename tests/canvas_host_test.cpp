@@ -1575,6 +1575,87 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
   CHECK(ace::interact::pick_targets(*probe.document, registry).size() == last_targets);
 }
 
+TEST_CASE("canvas_host: UI-thread resolution-health reads run clean against the live render walk") {
+  // editor.cells.resolution Acceptance (Threading): the inspector's cell-resolution readout adds
+  // NO shared mutable state and NO mutation — it reads `scene::cells` (now also the
+  // `editable()`/`external_asset_ref()` provenance classification beside the existing
+  // `content_bounds` read, D-resolution-1/-2) and `scene::cameras` on the UI thread while a
+  // render thread walks the SAME document over the lock-free `pin()`. `editable()` /
+  // `external_asset_ref()` / `bounds()` are const reads of construction-stable content state
+  // (this leaf grows no grid, so `bounds()` stays read-only — Constraint 5), covered by the same
+  // any-thread `Content`-virtual contract the `pick_targets` anchor above asserts (arbc#23, the
+  // v0.4.0 pin). A TSan/ASan report here is a real contract violation, not a design tripwire.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // A camera to compare the cells' resolution health against.
+  apply_edit(writer, host, [&] {
+    REQUIRE(ace::scene::add_camera(*probe.document, registry, "Hero",
+                                   ace::scene::Resolution{32, 32},
+                                   arbc::Affine::translation(4.0, 4.0))
+                .valid());
+  });
+
+  constexpr int k_inserts = 24;
+  for (int i = 0; i < k_inserts; ++i) {
+    apply_edit(writer, host, [&] {
+      const bool solid = (i % 2) == 0;
+      const auto added = ace::scene::add_cell(
+          *probe.document, registry, solid ? "org.arbc.solid" : "org.arbc.raster",
+          solid ? "0.1,0.2,0.3,1" : "24x24",
+          arbc::Affine::translation(static_cast<double>(i), static_cast<double>(i)));
+      REQUIRE(added.has_value());
+    });
+    // The UI-thread read the inspector performs EVERY frame: classify each cell's provenance
+    // and compute its resolution health against each camera, straight against the live render
+    // walk. The classification (`editable()`/`external_asset_ref()`) is the new read this leaf
+    // adds; the health math is pure over the primitive values it yields.
+    for (int r = 0; r < 4; ++r) {
+      const std::vector<ace::scene::Cell> cells = ace::scene::cells(*probe.document, registry);
+      const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*probe.document);
+      for (const ace::scene::Cell& cell : cells) {
+        // A raster classifies PaintedRaster with a native grid; a solid is resolution-
+        // independent — reading either facet is the race surface under test.
+        if (!cell.detail.native_pixels.has_value()) {
+          continue;
+        }
+        for (const ace::scene::Camera& cam : cams) {
+          const ace::interact::ResolutionHealth health = ace::interact::resolution_health(
+              cell.detail.native_pixels->first, cell.detail.native_pixels->second, cell.placement,
+              cam.resolution.width, cam.resolution.height, cam.frame);
+          REQUIRE(health.verdict != ace::interact::ResolutionVerdict::NotApplicable);
+        }
+      }
+    }
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  host.stop();
+  handle->join();
+
+  // A stable final read: every raster insert carries a native grid classified PaintedRaster.
+  const std::vector<ace::scene::Cell> final_cells = ace::scene::cells(*probe.document, registry);
+  int painted = 0;
+  for (const ace::scene::Cell& cell : final_cells) {
+    if (cell.detail.source == ace::scene::DetailSource::PaintedRaster) {
+      ++painted;
+    }
+  }
+  CHECK(painted == k_inserts / 2);
+}
+
 TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a camera WRITE in one "
           "apply_edit — runs clean against the live render walk") {
   // The document's ONE writer identity, bound the way the shipped bootstrap binds it

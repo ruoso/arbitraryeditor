@@ -159,6 +159,32 @@ struct CellRemoval {
 // `commands::Command` and `dispatch` it so the edit rides the single-writer seam.
 std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> removals);
 
+// Where a cell's pixels come from, classified from the GENERIC `arbc::Content` facets
+// D11 defines (`docs/00-design.md:478`) — NEVER a `kind_id` string-switch (A16 /
+// D-resolution-2). `editable()` non-null ⇒ the content owns a mutable pixel grid (D11's
+// "editable?" axis); else a non-empty `external_asset_ref()` ⇒ it borrows an external
+// file (D11's "bytes where?" axis); else it has no finite-detail floor. So a future
+// plugin kind is classified automatically: an editable kind is resamplable, an
+// external-ref kind is source-limited, anything else is resolution-independent.
+enum class DetailSource {
+  PaintedRaster,         // owns a mutable grid — soft is fixable (resample, D8)
+  ReferencedImage,       // borrows an external file — soft is terminal (source-limited, D8)
+  ResolutionIndependent, // a solid / procedural / nested cell — no detail floor at all
+};
+
+// A cell's pixel provenance plus its native pixel grid, derived during the same pinned
+// `cells()` walk that fills `content_bounds` (D-resolution-1/-2). The inspector reads
+// this to state whether a cell's softness is fixable and to show its native resolution.
+struct CellDetail {
+  DetailSource source = DetailSource::ResolutionIndependent;
+  // The native pixel grid: the `content_bounds` dimensions for a raster/image — whose
+  // content-space extent numerically IS its pixel grid, 1 native pixel = 1 content unit
+  // before placement (D-resolution-1) — as `(width, height)`. `nullopt` for a
+  // `ResolutionIndependent` cell and for an unavailable image (empty bounds): those have
+  // no native resolution to show and no health verdict (health N/A, Constraint 4).
+  std::optional<std::pair<int, int>> native_pixels;
+};
+
 struct Cell {
   arbc::ObjectId id;      // the `Content` object (the cell's identity)
   arbc::ObjectId layer;   // the layer that places it
@@ -172,6 +198,9 @@ struct Cell {
   // excludes. `interact::pick_targets`, the inspector's "placed size", the Layers list, the
   // Overview, and fit-to-cell all read this one number.
   std::optional<arbc::Rect> content_bounds;
+  // The pixel provenance + native grid, from the same pinned snapshot (D-resolution-1/-2).
+  // The inspector's native-resolution readout and D8 health/provenance line read this.
+  CellDetail detail;
 };
 
 // Every cell in the root composition, in layer (z) order, over the lock-free `pin()`

@@ -533,8 +533,9 @@ task editor "Editor — host GUI over libarbc" {
     task resolution "Cell resolution display; resample-to-crisp; health badge" {
       effort 2d
       allocate team
+      complete 100
       depends !selection
-      note "Show a cell's native/working resolution separately from placement; 'resample to crisp' grows a raster's grid; a referenced image is source-limited (the file is the floor). The health badge flags a camera out-resolving a cell. Design: D8. Refinement: tasks/refinements/resolution_ops.md"
+      note "Show a cell's native/working resolution separately from placement; 'resample to crisp' grows a raster's grid; a referenced image is source-limited (the file is the floor). The health badge flags a camera out-resolving a cell. Design: D8. Refinement: tasks/refinements/editor/resolution.md"
     }
     task remove "Delete selected cell(s) via Document::remove_content + Delete chord" {
       effort 1d

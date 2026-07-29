@@ -29,6 +29,7 @@
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/builtin_kinds.hpp>
+#include <arbc/contract/content.hpp>
 #include <arbc/contract/registry.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/model/journal.hpp>
@@ -124,6 +125,75 @@ void register_schema_probe_kind(arbc::Registry& registry) {
                      /*binder=*/std::nullopt, /*state_walker=*/std::nullopt, std::move(schema));
 }
 
+// --- Provenance-classification probes (editor.cells.resolution; D-resolution-2) ---
+// Two finite-detail kinds the EDITOR has never heard of, exercising the two D11 axes the
+// classification reads GENERICALLY — never a `kind_id` allowlist (A16). `org.arbc.image`
+// (the real ReferencedImage kind) is not linked into this binary, so these stand-ins pin
+// the generic-facet property without the plugin.
+
+// Bytes BORROWED from an external file: overrides `external_asset_ref()` non-empty and
+// leaves `editable()` at the null default (exactly like `org.arbc.image`) — so it must
+// classify ReferencedImage. Its `bounds()` is the decoded master extent, the native grid.
+class ExternalRefProbe final : public arbc::Content {
+public:
+  std::optional<arbc::Rect> bounds() const override { return arbc::Rect{0.0, 0.0, 64.0, 48.0}; }
+  arbc::Stability stability() const override { return arbc::Stability::Static; }
+  std::optional<arbc::TimeRange> time_extent() const override { return std::nullopt; }
+  std::optional<arbc::RenderResult> render(const arbc::RenderRequest&,
+                                           std::shared_ptr<arbc::RenderCompletion>) override {
+    return std::nullopt;
+  }
+  std::string_view external_asset_ref() const override { return d_uri; }
+
+private:
+  std::string d_uri = "file:///borrowed/photo.png";
+};
+
+constexpr const char* k_external_probe_kind = "org.example.external_probe";
+
+void register_external_probe_kind(arbc::Registry& registry) {
+  arbc::ContentFactory factory =
+      [](arbc::ContentConfig) -> arbc::expected<std::unique_ptr<arbc::Content>, std::string> {
+    return std::unique_ptr<arbc::Content>(std::make_unique<ExternalRefProbe>());
+  };
+  (void)registry.add(k_external_probe_kind, std::move(factory),
+                     arbc::KindMetadata{"External Probe", "1"});
+}
+
+// OWNS a mutable pixel grid: returns a non-null `editable()` (itself) like `org.arbc.raster`,
+// under a kind id the editor cannot know — so it must classify PaintedRaster through the
+// GENERIC `editable()` facet, not a `kind_id == "org.arbc.raster"` switch. The `arbc::Editable`
+// methods are stubs; this leaf ships no grid mutation, so they are never exercised
+// (D-resolution-5).
+class EditableProbe final : public arbc::Content, public arbc::Editable {
+public:
+  std::optional<arbc::Rect> bounds() const override { return arbc::Rect{0.0, 0.0, 40.0, 30.0}; }
+  arbc::Stability stability() const override { return arbc::Stability::Static; }
+  std::optional<arbc::TimeRange> time_extent() const override { return std::nullopt; }
+  std::optional<arbc::RenderResult> render(const arbc::RenderRequest&,
+                                           std::shared_ptr<arbc::RenderCompletion>) override {
+    return std::nullopt;
+  }
+  arbc::Editable* editable() override { return this; }
+
+  arbc::StateHandle capture() override { return {}; }
+  void restore(arbc::StateHandle) override {}
+  std::size_t state_cost(arbc::StateHandle) const override { return 0; }
+  void retain(arbc::StateHandle) override {}
+  void release(arbc::StateHandle) override {}
+};
+
+constexpr const char* k_editable_probe_kind = "org.example.editable_probe";
+
+void register_editable_probe_kind(arbc::Registry& registry) {
+  arbc::ContentFactory factory =
+      [](arbc::ContentConfig) -> arbc::expected<std::unique_ptr<arbc::Content>, std::string> {
+    return std::unique_ptr<arbc::Content>(std::make_unique<EditableProbe>());
+  };
+  (void)registry.add(k_editable_probe_kind, std::move(factory),
+                     arbc::KindMetadata{"Editable Probe", "1"});
+}
+
 // The editor's own registry seeding (mirrors `commands::register_editor_kinds`).
 arbc::Registry cell_registry() {
   arbc::Registry registry;
@@ -136,6 +206,13 @@ arbc::Registry cell_registry_with_probe() {
   arbc::Registry registry = cell_registry();
   register_probe_kind(registry);        // a foreign kind WITHOUT a schema (raw-config)
   register_schema_probe_kind(registry); // a foreign kind WITH a library schema
+  return registry;
+}
+
+arbc::Registry cell_registry_with_detail_probes() {
+  arbc::Registry registry = cell_registry();
+  register_external_probe_kind(registry); // an unknown ReferencedImage-shaped kind
+  register_editable_probe_kind(registry); // an unknown PaintedRaster-shaped kind
   return registry;
 }
 
@@ -408,6 +485,124 @@ TEST_CASE("add_cell mints solid, raster and nested cells that cells() reads back
     CHECK(cell.layer.valid());
     CHECK(cell.id != cell.layer);
   }
+}
+
+// --- Provenance classification (editor.cells.resolution; D-resolution-1/-2) --------------
+
+TEST_CASE("cells() classifies pixel provenance from generic facets, never a kind allowlist") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "provenance");
+  // A registry carrying two foreign finite-detail kinds the editor cannot know: the
+  // classification must key on the generic `editable()`/`external_asset_ref()` facets
+  // (D-resolution-2), so these are classified by shape, not by id.
+  arbc::Registry registry = cell_registry_with_detail_probes();
+  const std::vector<KindInsertSchema> schemas = ace::scene::insert_schemas(registry);
+
+  // A child composition for the nested cell to embed (resolution-independent).
+  arbc::ObjectId child;
+  dispatch(state, Command{"add_child", [&child](arbc::Document& doc) {
+                            child = doc.add_composition(32.0, 32.0);
+                          }});
+  REQUIRE(child.valid());
+
+  const arbc::Affine at = arbc::Affine::identity();
+  // z-order == insertion order: bounded solid, raster, external-ref image, editable plugin,
+  // nested.
+  REQUIRE(ace::scene::add_cell(state.document(), registry, "org.arbc.solid",
+                               config_for(schemas, "org.arbc.solid",
+                                          InsertValues{{"red", "1"},
+                                                       {"green", "1"},
+                                                       {"blue", "1"},
+                                                       {"alpha", "1"},
+                                                       {"x", "0"},
+                                                       {"y", "0"},
+                                                       {"width", "256"},
+                                                       {"height", "256"}}),
+                               at)
+              .has_value());
+  REQUIRE(ace::scene::add_cell(state.document(), registry, "org.arbc.raster",
+                               config_for(schemas, "org.arbc.raster",
+                                          InsertValues{{"width", "16"}, {"height", "24"}}),
+                               at)
+              .has_value());
+  REQUIRE(
+      ace::scene::add_cell(state.document(), registry, k_external_probe_kind, "x", at).has_value());
+  REQUIRE(
+      ace::scene::add_cell(state.document(), registry, k_editable_probe_kind, "x", at).has_value());
+  REQUIRE(ace::scene::add_cell(state.document(), registry, "org.arbc.nested",
+                               config_for(schemas, "org.arbc.nested",
+                                          InsertValues{{"config", std::to_string(child.value)}}),
+                               at)
+              .has_value());
+
+  const std::vector<Cell> cells = ace::scene::cells(state.document(), registry);
+  REQUIRE(cells.size() == 5);
+
+  // A bounded solid is a real placed rect (content_bounds present) but has NO native detail
+  // floor — so it is ResolutionIndependent and its native px is nullopt EVEN THOUGH its
+  // bounds are set. Native px is gated on the provenance source, not merely on bounds.
+  CHECK(cells[0].kind_id == "org.arbc.solid");
+  CHECK(cells[0].detail.source == ace::scene::DetailSource::ResolutionIndependent);
+  CHECK(cells[0].content_bounds.has_value());
+  CHECK_FALSE(cells[0].detail.native_pixels.has_value());
+
+  // A painted raster owns a mutable grid (editable() != nullptr) — PaintedRaster, native px =
+  // its content_bounds dims (D-resolution-1).
+  CHECK(cells[1].kind_id == "org.arbc.raster");
+  CHECK(cells[1].detail.source == ace::scene::DetailSource::PaintedRaster);
+  REQUIRE(cells[1].detail.native_pixels.has_value());
+  CHECK(cells[1].detail.native_pixels->first == 16);
+  CHECK(cells[1].detail.native_pixels->second == 24);
+
+  // A referenced image borrows an external file (external_asset_ref non-empty, editable null)
+  // — ReferencedImage, native px = the decoded master extent.
+  CHECK(cells[2].kind_id == k_external_probe_kind);
+  CHECK(cells[2].detail.source == ace::scene::DetailSource::ReferencedImage);
+  REQUIRE(cells[2].detail.native_pixels.has_value());
+  CHECK(cells[2].detail.native_pixels->first == 64);
+  CHECK(cells[2].detail.native_pixels->second == 48);
+
+  // THE no-allowlist proof: an UNKNOWN editable kind (not org.arbc.raster) classifies
+  // PaintedRaster purely because editable() != nullptr — a kind_id switch would misclassify
+  // it (A16 / D-resolution-2).
+  CHECK(cells[3].kind_id == k_editable_probe_kind);
+  CHECK(cells[3].detail.source == ace::scene::DetailSource::PaintedRaster);
+  REQUIRE(cells[3].detail.native_pixels.has_value());
+  CHECK(cells[3].detail.native_pixels->first == 40);
+  CHECK(cells[3].detail.native_pixels->second == 30);
+
+  // A nested cell has neither facet — ResolutionIndependent, no native floor.
+  CHECK(cells[4].kind_id == "org.arbc.nested");
+  CHECK(cells[4].detail.source == ace::scene::DetailSource::ResolutionIndependent);
+  CHECK_FALSE(cells[4].detail.native_pixels.has_value());
+}
+
+TEST_CASE("resolution provenance probes expose exactly the generic facets they classify on") {
+  // Pin the two stand-ins against the facets the classifier reads, directly (also covering the
+  // doubles' trivial overrides): the external-ref probe borrows a file (non-empty
+  // external_asset_ref, null editable) => ReferencedImage; the editable probe owns a grid
+  // (non-null editable) => PaintedRaster. The Editable methods are inert (D-resolution-5).
+  ExternalRefProbe ext;
+  CHECK(ext.editable() == nullptr);
+  CHECK_FALSE(ext.external_asset_ref().empty());
+  REQUIRE(ext.bounds().has_value());
+  CHECK(ext.bounds()->width() == 64.0);
+  CHECK(ext.stability() == arbc::Stability::Static);
+  CHECK_FALSE(ext.time_extent().has_value());
+
+  EditableProbe ed;
+  CHECK(ed.editable() == &ed);
+  CHECK(ed.external_asset_ref().empty());
+  REQUIRE(ed.bounds().has_value());
+  CHECK(ed.bounds()->width() == 40.0);
+  CHECK(ed.stability() == arbc::Stability::Static);
+  CHECK_FALSE(ed.time_extent().has_value());
+  const arbc::StateHandle handle = ed.capture();
+  ed.retain(handle);
+  CHECK(ed.state_cost(handle) == 0);
+  ed.restore(handle);
+  ed.release(handle);
 }
 
 TEST_CASE("a failing factory mutates nothing — no content, no transaction, no journal entry") {

@@ -250,4 +250,41 @@ arbc::Affine dutch_frame(const arbc::Affine& frame, int native_w, int native_h, 
 // unchanged.
 arbc::Affine refit_frame_to_aspect(const arbc::Affine& frame, int old_native_w, int new_native_w);
 
+// --- Resolution health (editor.cells.resolution; D8/§2) -----------------------
+// The §2 "resolution health is computable, not a vibe" quantity, as a pure L1 helper
+// over PRIMITIVE geometry beside the shot/frame math — no `scene`/`camera` type crosses
+// the seam, so the `interact->scene` edge is untouched (D-resolution-3, the look_through/
+// manip discipline). It answers D8 on the cell side: how densely a camera samples a
+// cell's placed region against the cell's own native detail.
+
+// How a camera samples a cell against its native grid. `NotApplicable` is the honest
+// answer for a cell with no native floor (resolution-independent) or a degenerate input —
+// never a false `Soft` (Constraint 4). `Crisp` when the camera samples at or below native
+// (`ratio <= 1`), `Soft` when it magnifies above native (`ratio > 1`).
+enum class ResolutionVerdict { NotApplicable, Crisp, Soft };
+
+struct ResolutionHealth {
+  // The sampling ratio: the camera's output pixels per composition unit over the cell's
+  // placed region, divided by the cell's native pixels per composition unit (Constraint 4).
+  // 0 when `verdict == NotApplicable`. The WORST (softest) axis is surfaced, so a
+  // non-uniformly scaled cell reports the direction that magnifies most above native.
+  double ratio = 0.0;
+  ResolutionVerdict verdict = ResolutionVerdict::NotApplicable;
+};
+
+// The resolution-health verdict for a cell whose native pixel grid is `native_w`x`native_h`,
+// placed by `placement` (content-px -> composition), sampled by a camera of output
+// `cam_w`x`cam_h` framed by `cam_frame` (device-px -> composition). Both affines carry the
+// same "1 native/device pixel spans this many composition units" scale the shot/frame
+// helpers use, so the ratio is `(cam_w / shot_region_width) / (native_w / placed_region_width)`
+// per axis (and its height twin), worst axis surfaced — the design's "hero camera samples
+// the photo at 1.4x - slightly soft" (`docs/00-design.md:83-86`). PURE and byte-deterministic:
+// no `Document`, no I/O, no frame state. A non-positive size, or a degenerate (non-invertible
+// / zero-area) placement or frame, yields `NotApplicable` — never a div-by-zero or a false
+// `Soft`. The caller supplies `native_w/native_h` from `scene::CellDetail::native_pixels`
+// (so a `ResolutionIndependent` cell, whose native px is absent, never reaches here) and the
+// camera's `Resolution` + frame from `scene::cameras`.
+ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affine& placement,
+                                   int cam_w, int cam_h, const arbc::Affine& cam_frame);
+
 } // namespace ace::interact
