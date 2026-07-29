@@ -267,6 +267,10 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       // so this deliberately does NOT go through apply_edit (Constraint 2/12).
       const std::vector<interact::PickTarget> targets =
           interact::pick_targets(state_.document(), state_.registry());
+      // The cell transform gizmo (editor.cells.gizmo; D-gizmo-2): the always-on direct-
+      // manipulation transform for the ONE selected cell. Runs BEFORE draw_selection so a handle
+      // press claims the gesture (setting p.gizmo_cell) and selection leaves that press alone.
+      draw_cell_gizmos(view_id, p, targets, in, pane_origin.x, pane_origin.y);
       draw_selection(view_id, p, targets, in, pane_origin.x, pane_origin.y);
     }
 
@@ -471,6 +475,208 @@ void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,
   }
 }
 
+void CanvasView::draw_cell_gizmos(std::string_view view_id, Presenter& p,
+                                  const std::vector<interact::PickTarget>& targets,
+                                  const views::CanvasInput& in, float origin_x, float origin_y) {
+  (void)view_id;
+  commands::Selection& selection = state_.selection();
+  const std::optional<arbc::Affine> view_inv = p.camera.inverse();
+  if (!view_inv) {
+    return; // degenerate viewport camera: no gizmo this frame
+  }
+
+  // The transform gizmo shows only for exactly ONE selected CELL (D-gizmo-6): a multi-select
+  // shows the selection outline but no transform gizmo (group transform is
+  // editor.cells.group_transform), and a selected CAMERA keeps its shipped frame gizmo
+  // (draw_frame_gizmos). An unbounded cell (no extent) has no handles.
+  const arbc::ObjectId primary = selection.primary();
+  const interact::PickTarget* target = nullptr;
+  if (selection.size() == 1) {
+    for (const interact::PickTarget& t : targets) {
+      if (t.id == primary && t.kind == interact::PickKind::Cell && t.extent) {
+        target = &t;
+        break;
+      }
+    }
+  }
+  if (target == nullptr) {
+    if (!in.down) { // drop any stale grab / pivot when the selection is no longer one cell
+      p.gizmo_cell.reset();
+      p.gizmo_cell_handle = interact::CellHandle::None;
+    }
+    p.gizmo_cell_pivot.reset();
+    p.gizmo_cell_pivot_for.reset();
+    return;
+  }
+
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  auto to_screen = [&](arbc::Vec2 comp) {
+    const arbc::Vec2 dev = p.camera.apply(comp);
+    return ImVec2(origin_x + static_cast<float>(dev.x), origin_y + static_cast<float>(dev.y));
+  };
+  const arbc::Vec2 pointer_comp = view_inv->apply(arbc::Vec2{in.focus_x, in.focus_y});
+  const double scale = p.camera.max_scale();
+  const double edge_tol = scale > 0.0 ? 6.0 / scale : 0.0;
+  const double corner_tol = scale > 0.0 ? 9.0 / scale : 0.0;
+  const bool space = ImGui::IsKeyDown(ImGuiKey_Space);
+  const bool cmd = in.ctrl || in.super; // Cmd/Ctrl bypasses snap (§6:258) / gates shear
+
+  const arbc::Rect extent = *target->extent;
+
+  // The persistent draggable pivot: seed / reset to the placed-box center when the cell changes.
+  if (!p.gizmo_cell_pivot || p.gizmo_cell_pivot_for != primary) {
+    p.gizmo_cell_pivot = interact::cell_pivot(target->placement, extent);
+    p.gizmo_cell_pivot_for = primary;
+  }
+  arbc::Vec2 pivot = *p.gizmo_cell_pivot;
+
+  const ImU32 col_handle = accent(255);
+  const ImU32 col_pivot = camera_frame(255);
+  const ImU32 col_guide = IM_COL32(255, 90, 200, 230);
+
+  // Stroke the placed outline, the 8 scale handles, and the pivot dot for `placement`/`pv`.
+  auto draw_handles = [&](const arbc::Affine& placement, arbc::Vec2 pv) {
+    const arbc::Vec2 tl = placement.apply({extent.x0, extent.y0});
+    const arbc::Vec2 tr = placement.apply({extent.x1, extent.y0});
+    const arbc::Vec2 br = placement.apply({extent.x1, extent.y1});
+    const arbc::Vec2 bl = placement.apply({extent.x0, extent.y1});
+    draw_list->AddQuad(to_screen(tl), to_screen(tr), to_screen(br), to_screen(bl), col_handle,
+                       2.0F);
+    const arbc::Vec2 handles[8] = {tl,
+                                   tr,
+                                   br,
+                                   bl,
+                                   {(tl.x + tr.x) * 0.5, (tl.y + tr.y) * 0.5},
+                                   {(tr.x + br.x) * 0.5, (tr.y + br.y) * 0.5},
+                                   {(br.x + bl.x) * 0.5, (br.y + bl.y) * 0.5},
+                                   {(bl.x + tl.x) * 0.5, (bl.y + tl.y) * 0.5}};
+    constexpr float hs = 3.0F;
+    for (const arbc::Vec2& q : handles) {
+      const ImVec2 s = to_screen(q);
+      draw_list->AddRectFilled(ImVec2(s.x - hs, s.y - hs), ImVec2(s.x + hs, s.y + hs), col_handle);
+    }
+    const ImVec2 sp = to_screen(pv);
+    draw_list->AddCircleFilled(sp, 4.0F, col_pivot);
+    draw_list->AddCircle(sp, 4.0F, IM_COL32(0, 0, 0, 180));
+  };
+
+  // --- an active grab: preview the dragged placement and commit ONE set_layer_transform on
+  // release (D-gizmo-4). Space held ⇒ the drag is a nav pan of the VIEW, inert on the cell.
+  if (p.gizmo_cell) {
+    const interact::CellHandle handle = p.gizmo_cell_handle;
+    arbc::Affine preview = p.gizmo_cell_start;
+    std::vector<interact::SnapGuide> guides;
+    if (!space) {
+      if (handle == interact::CellHandle::Pivot) {
+        pivot = pointer_comp; // move the pivot only — UI session state, no document change
+        p.gizmo_cell_pivot = pivot;
+      } else if (handle == interact::CellHandle::Body) {
+        const arbc::Affine moved =
+            interact::move_cell(p.gizmo_cell_start, pointer_comp.x - p.gizmo_cell_grab_comp.x,
+                                pointer_comp.y - p.gizmo_cell_grab_comp.y);
+        std::vector<interact::PickTarget> others;
+        for (const interact::PickTarget& t : targets) {
+          if (t.id != primary) {
+            others.push_back(t);
+          }
+        }
+        const interact::SnapResult snap =
+            interact::snap_placement(moved, p.gizmo_cell_extent, others, corner_tol, cmd);
+        preview = snap.placement;
+        guides = snap.guides;
+      } else if (handle == interact::CellHandle::Rotate) {
+        const double angle = interact::drag_angle(pivot, p.gizmo_cell_grab_comp, pointer_comp);
+        preview = interact::rotate_cell(p.gizmo_cell_start, pivot, angle, in.shift);
+      } else if (interact::is_cell_edge(handle) && cmd) {
+        preview =
+            interact::shear_cell(p.gizmo_cell_start, p.gizmo_cell_extent, handle, pointer_comp,
+                                 pivot); // Cmd/Ctrl + edge = shear (advanced), about pivot
+      } else if (interact::is_cell_scale_handle(handle)) {
+        preview = interact::scale_cell(p.gizmo_cell_start, p.gizmo_cell_extent, handle,
+                                       pointer_comp, pivot, in.shift, in.alt);
+      }
+    }
+    draw_handles(preview, pivot);
+    for (const interact::SnapGuide& g : guides) {
+      draw_list->AddLine(to_screen(g.a), to_screen(g.b), col_guide, 1.0F);
+    }
+    if (in.released) {
+      const arbc::ObjectId layer = p.gizmo_cell_layer;
+      // Click vs drag, keyed off ACTUAL pointer travel since the press (not `preview != start`,
+      // which snapping can trip on a zero-travel body press): a press that never moved is a CLICK.
+      const double move_tol = scale > 0.0 ? 3.0 / scale : 0.0; // ~3 screen px of slop
+      const double dx = pointer_comp.x - p.gizmo_cell_grab_comp.x;
+      const double dy = pointer_comp.y - p.gizmo_cell_grab_comp.y;
+      const bool dragged = (dx * dx + dy * dy) > move_tol * move_tol;
+      if (!dragged) {
+        // Not a drag. A BODY click was a selection gesture all along (draw_selection skipped this
+        // press because p.gizmo_cell was set): hand it back to the policy now so a plain click
+        // re-picks the topmost and a Cmd/Ctrl-click cycles select-behind over the selected cell
+        // (D7 — the gizmo must not swallow the body click). A click on a handle is an inert no-op.
+        if (handle == interact::CellHandle::Body && !space) {
+          const interact::SelectionChange change = interact::click_selection(
+              targets, pointer_comp, edge_tol, corner_tol, interact::PickModifiers{in.shift, cmd},
+              selection.primary());
+          apply_selection_change(selection, change);
+        }
+      } else if (handle != interact::CellHandle::Pivot && !(preview == p.gizmo_cell_start)) {
+        // A real drag: commit ONE set_layer_transform. A pivot move and an inert (Space-held) drag
+        // add no journal entry (Constraint 3).
+        apply_edit(
+            [this, layer, preview] { state_.document().set_layer_transform(layer, preview); });
+      }
+      p.gizmo_cell.reset();
+      p.gizmo_cell_handle = interact::CellHandle::None;
+    } else if (!in.down) { // lost activation without a release edge: drop the grab, no commit
+      p.gizmo_cell.reset();
+      p.gizmo_cell_handle = interact::CellHandle::None;
+    }
+    return;
+  }
+
+  // --- no active grab: draw the gizmo, arrow-nudge, and start a grab on a handle press.
+  draw_handles(target->placement, pivot);
+
+  // Arrow-nudge: one set_layer_transform per discrete key press (Constraint 3), only over the
+  // hovered pane with no drag/Space in flight.
+  if (in.hovered && !space && !in.down) {
+    double nx = 0.0;
+    double ny = 0.0;
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, /*repeat=*/false)) {
+      nx -= interact::k_cell_nudge;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, /*repeat=*/false)) {
+      nx += interact::k_cell_nudge;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, /*repeat=*/false)) {
+      ny -= interact::k_cell_nudge;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, /*repeat=*/false)) {
+      ny += interact::k_cell_nudge;
+    }
+    if (nx != 0.0 || ny != 0.0) {
+      const arbc::ObjectId layer = target->layer;
+      const arbc::Affine nudged = interact::move_cell(target->placement, nx, ny);
+      apply_edit([this, layer, nudged] { state_.document().set_layer_transform(layer, nudged); });
+    }
+  }
+
+  const interact::CellHandle hover =
+      interact::hit_cell(*target, pivot, pointer_comp, edge_tol, corner_tol);
+  // A left-press over any handle (or the body) starts the grab, when Space is up. The gizmo is the
+  // always-on default for the selected cell (D-gizmo-2), so a Cmd/Ctrl-drag over its body MOVES it
+  // with snap bypassed (§6:258) rather than select-behind; select-behind still applies to presses
+  // outside this cell's gizmo (where hit_cell is None and draw_selection handles the press).
+  if (in.pressed && hover != interact::CellHandle::None && !space) {
+    p.gizmo_cell = primary;
+    p.gizmo_cell_layer = target->layer;
+    p.gizmo_cell_handle = hover;
+    p.gizmo_cell_start = target->placement;
+    p.gizmo_cell_grab_comp = pointer_comp;
+    p.gizmo_cell_extent = extent;
+  }
+}
+
 void CanvasView::draw_selection(std::string_view view_id, Presenter& p,
                                 const std::vector<interact::PickTarget>& targets,
                                 const views::CanvasInput& in, float origin_x, float origin_y) {
@@ -507,7 +713,12 @@ void CanvasView::draw_selection(std::string_view view_id, Presenter& p,
   const bool space = ImGui::IsKeyDown(ImGuiKey_Space);
   const bool cmd = in.ctrl || in.super; // D7's "Cmd/Ctrl" needs both halves (D-selection-10)
 
-  if (in.pressed && !space) {
+  // A press that started a cell handle-drag (draw_cell_gizmos ran first and set p.gizmo_cell) is a
+  // TRANSFORM gesture on the already-selected cell, not a selection gesture: leave it alone so it
+  // neither re-picks (which a Cmd/Ctrl-drag would misread as select-behind) nor arms a marquee. A
+  // body press that turns out to be a plain CLICK (no drag) is handed back to this policy by
+  // draw_cell_gizmos itself on the release edge, so select-behind over the selected cell survives.
+  if (in.pressed && !space && !p.gizmo_cell) {
     const interact::SelectionChange change =
         interact::click_selection(targets, pointer_comp, edge_tol, corner_tol,
                                   interact::PickModifiers{in.shift, cmd}, selection.primary());

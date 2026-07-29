@@ -287,4 +287,85 @@ struct ResolutionHealth {
 ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affine& placement,
                                    int cam_w, int cam_h, const arbc::Affine& cam_frame);
 
+// --- Cell transform gizmo (editor.cells.gizmo; D7/D8/§6) ----------------------
+// The cell's placement is its placing layer's `Affine` (content-px -> composition): it maps
+// the cell's CONTENT extent `arbc::Content::bounds()` into composition space. These verbs are
+// the richer sibling of the camera-frame verbs above — move / scale (8 handles) / rotate /
+// shear about a draggable pivot — reframed as PURE placement math (D8, the load-bearing rule):
+// they take/return the placement `Affine` (+ the content extent + a composition-space pivot +
+// modifier bools) and NEVER a resolution value or a pixel. A handle-drag is PLACEMENT, never a
+// resample. `interact` names no `scene`/`commands`/ImGui type, so these sit beside
+// `recrop_frame`/`move_frame`/`dutch_frame` and are unit-tested headless (the bulk of coverage).
+
+// Which part of a selected cell's gizmo a composition-space point grabs. Corners/edges are the
+// eight scale handles; Rotate is the ring just OUTSIDE a corner; Pivot is the draggable pivot
+// dot; Body is the interior move grab; None is a miss. The `hit_cell` test lives in `pick.hpp`
+// (it anchors handles to `placed_quad`); this enum is the shared vocabulary the transform verbs
+// below select on.
+enum class CellHandle {
+  None,
+  Body, // the interior move grab
+  Pivot,
+  ScaleTopLeft,
+  ScaleTopRight,
+  ScaleBottomLeft,
+  ScaleBottomRight,
+  ScaleLeft,
+  ScaleRight,
+  ScaleTop,
+  ScaleBottom,
+  Rotate,
+};
+
+// True for the four corner scale handles.
+bool is_cell_corner(CellHandle handle);
+// True for the four edge scale handles.
+bool is_cell_edge(CellHandle handle);
+// True for any of the eight scale handles (corner or edge).
+bool is_cell_scale_handle(CellHandle handle);
+
+// The default pivot: the center of the placed extent (composition space). The gizmo seeds the
+// draggable pivot here (§6:233); scale/rotate/shear compose about whatever pivot the caller
+// passes (Alt = from pivot/center).
+arbc::Vec2 cell_pivot(const arbc::Affine& placement, const arbc::Rect& extent);
+
+// The signed angle (radians) swept about `pivot` going from composition-space `from` to `to` —
+// the rotate gesture's angle input (`atan2` difference), the cell analog of the camera dutch's
+// inline `a1 - a0` (`canvas_view.cpp` D-manip-5).
+double drag_angle(arbc::Vec2 pivot, arbc::Vec2 from, arbc::Vec2 to);
+
+// One arrow-nudge step, in composition units (Constraint 3: one entry per discrete nudge).
+inline constexpr double k_cell_nudge = 1.0;
+
+// Move: translate the placement by `(dx, dy)` composition units — the linear part is untouched,
+// so the cell slides with no scale/rotation change (§6 move = drag body / arrow-nudge). The
+// content resolution and `content_bounds` cannot change (D8).
+arbc::Affine move_cell(const arbc::Affine& placement, double dx, double dy);
+
+// Scale by dragging `handle` (a corner or edge) to composition-space `pointer`, about the
+// opposite corner/edge midpoint by default or about `pivot` when `about_pivot` (Alt). A CORNER
+// scales PROPORTIONALLY by default (uniform, aspect preserved) and FREELY (independent x/y) when
+// `free_distort` (Shift — the one place Shift relaxes, §6/D8); an EDGE scales 1D along its own
+// axis. The scale is in the placed box's OWN (possibly rotated/sheared) axes, so a rotated cell
+// scales along its edges, not the global axes. Only the linear part changes — never the pixel
+// count (D8). A non-scale handle, a degenerate extent/placement, a non-finite pointer, or a drag
+// that would collapse/flip the box returns the placement UNCHANGED (Constraint 4).
+arbc::Affine scale_cell(const arbc::Affine& placement, const arbc::Rect& extent, CellHandle handle,
+                        arbc::Vec2 pointer, arbc::Vec2 pivot, bool free_distort, bool about_pivot);
+
+// Rotate: compose a pure rotation of `angle_rad` about composition-space `pivot` onto the
+// placement (§6 rotate; grabbed outside a corner). `snap_15` rounds to the nearest 15° (Shift),
+// reusing the `dutch_frame` idiom. Lengths preserved, so no resample (D8). A degenerate
+// placement or non-finite input returns it unchanged.
+arbc::Affine rotate_cell(const arbc::Affine& placement, arbc::Vec2 pivot, double angle_rad,
+                         bool snap_15);
+
+// Shear: the advanced modifier+edge drag (§6). Dragging edge `edge` to `pointer` produces an
+// off-diagonal linear part about `pivot` — a Top/Bottom edge shears horizontally (along the
+// box's width axis as a function of its height coordinate), a Left/Right edge shears vertically.
+// Only the linear part changes — never the pixel count (D8). A non-edge handle, a degenerate
+// extent/placement, or a non-finite input returns the placement unchanged.
+arbc::Affine shear_cell(const arbc::Affine& placement, const arbc::Rect& extent, CellHandle edge,
+                        arbc::Vec2 pointer, arbc::Vec2 pivot);
+
 } // namespace ace::interact

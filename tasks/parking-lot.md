@@ -194,6 +194,16 @@ libarbc v0.4.0 registers `org.arbc.nested` with **no** schema, so nested inserts
 
 ---
 
+## Camera frame gizmo chrome unification with cell handle helpers
+
+**Source:** `tasks/refinements/editor/gizmo.md` (cells.gizmo, 2026-07-29) — Open questions / D-gizmo-6.
+
+**Trigger:** a decision to refactor the camera frame chrome for aesthetic/consistency reasons after the cell gizmo and camera gizmo have both shipped and been used.
+
+`editor.cells.gizmo` ships the richer cell handle set and the reusable `interact::placed_quad` anchor both gizmos already share, but leaves the shipped, working camera frame chrome (`draw_frame_gizmos`, `src/app/canvas_view.cpp`) as-is (D-gizmo-6). Whether to later refactor the camera frame to draw over the same handle helpers is an aesthetic/consistency call a human should weigh against the churn of touching a shipped, tested gizmo with no behavioural change — it is not a feature and cannot be closed by an implementer, so it is not a WBS leaf.
+
+---
+
 ## add(X)→remove(X)→add(X) collapsing in one drive iteration
 
 **Source:** `tasks/refinements/canvas/pending_removes_order.md` (canvas.pending_removes_order, 2026-07-28) — Open questions / D-pending_removes_order-1 accepted consequence.

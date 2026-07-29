@@ -262,4 +262,185 @@ SelectionChange marquee_selection(std::span<const PickTarget> targets, const arb
   return SelectionChange{shift ? SelectOp::Add : SelectOp::Replace, std::move(ids)};
 }
 
+CellHandle hit_cell(const PickTarget& target, arbc::Vec2 pivot, arbc::Vec2 point, double edge_tol,
+                    double corner_tol) {
+  (void)edge_tol; // a cell body is a filled region (the `inside` test), not an outline band
+  if (!finite(point) || !finite(pivot)) {
+    return CellHandle::None;
+  }
+  const std::optional<std::array<arbc::Vec2, 4>> quad = placed_quad(target);
+  if (!quad) {
+    return CellHandle::None; // unbounded / degenerate content has no gizmo
+  }
+  const arbc::Vec2 tl = (*quad)[0];
+  const arbc::Vec2 tr = (*quad)[1];
+  const arbc::Vec2 br = (*quad)[2];
+  const arbc::Vec2 bl = (*quad)[3];
+  const auto d = [](arbc::Vec2 a, arbc::Vec2 b) { return std::hypot(a.x - b.x, a.y - b.y); };
+
+  // 1. The pivot dot wins (drawn on top, §6:233).
+  if (d(point, pivot) <= corner_tol) {
+    return CellHandle::Pivot;
+  }
+  // 2. Corners win over everything else within `corner_tol`.
+  const arbc::Vec2 corners[4] = {tl, tr, bl, br};
+  const CellHandle corner_ids[4] = {CellHandle::ScaleTopLeft, CellHandle::ScaleTopRight,
+                                    CellHandle::ScaleBottomLeft, CellHandle::ScaleBottomRight};
+  CellHandle best = CellHandle::None;
+  double best_d = corner_tol;
+  for (int i = 0; i < 4; ++i) {
+    const double dd = d(point, corners[i]);
+    if (dd <= best_d) {
+      best_d = dd;
+      best = corner_ids[i];
+    }
+  }
+  if (best != CellHandle::None) {
+    return best;
+  }
+  // Whether `point` is inside the placed box — content-space test, exact for any affine (as the
+  // body pick is, D-selection-3), so a rotated cell's rotate ring and body are the rotated ones.
+  bool inside = false;
+  const std::optional<arbc::Affine> inv = target.placement.inverse();
+  if (inv && target.extent) {
+    const arbc::Vec2 local = inv->apply(point);
+    const arbc::Rect& e = *target.extent;
+    inside =
+        finite(local) && local.x >= e.x0 && local.x <= e.x1 && local.y >= e.y0 && local.y <= e.y1;
+  }
+  // 3. The rotate ring just OUTSIDE a corner (beyond the corner handle, off the box, §6 rotate).
+  if (!inside) {
+    const double rotate_tol = corner_tol * 3.0;
+    double rd = d(point, corners[0]);
+    for (int i = 1; i < 4; ++i) {
+      rd = std::min(rd, d(point, corners[i]));
+    }
+    if (rd <= rotate_tol) {
+      return CellHandle::Rotate;
+    }
+  }
+  // 4. Edge-midpoint scale handles.
+  const arbc::Vec2 mids[4] = {{(tl.x + tr.x) * 0.5, (tl.y + tr.y) * 0.5},
+                              {(bl.x + br.x) * 0.5, (bl.y + br.y) * 0.5},
+                              {(tl.x + bl.x) * 0.5, (tl.y + bl.y) * 0.5},
+                              {(tr.x + br.x) * 0.5, (tr.y + br.y) * 0.5}};
+  const CellHandle edge_ids[4] = {CellHandle::ScaleTop, CellHandle::ScaleBottom,
+                                  CellHandle::ScaleLeft, CellHandle::ScaleRight};
+  best_d = corner_tol;
+  for (int i = 0; i < 4; ++i) {
+    const double dd = d(point, mids[i]);
+    if (dd <= best_d) {
+      best_d = dd;
+      best = edge_ids[i];
+    }
+  }
+  if (best != CellHandle::None) {
+    return best;
+  }
+  // 5. The body interior is the move grab.
+  return inside ? CellHandle::Body : CellHandle::None;
+}
+
+namespace {
+
+// One snap candidate line along an axis, carrying the ORTHOGONAL span of the object that owns it
+// (so a vertical guide spans both boxes vertically).
+struct SnapLine {
+  double pos;
+  double omin;
+  double omax;
+};
+
+// The nearest `lines` entry to any of the moving object's three candidate positions `mvals`,
+// within `tol`. Sets `delta` (the nudge), `owner` (the matched line), returns whether one snapped.
+bool best_snap(const std::vector<SnapLine>& lines, const double (&mvals)[3], double tol,
+               double& delta, SnapLine& owner) {
+  double best_abs = tol;
+  bool found = false;
+  for (const SnapLine& line : lines) {
+    for (const double mv : mvals) {
+      const double diff = line.pos - mv;
+      if (std::abs(diff) <= best_abs) {
+        best_abs = std::abs(diff);
+        delta = diff;
+        owner = line;
+        found = true;
+      }
+    }
+  }
+  return found;
+}
+
+} // namespace
+
+SnapResult snap_placement(const arbc::Affine& candidate, const arbc::Rect& moving_extent,
+                          std::span<const PickTarget> others, double tol, bool bypass,
+                          std::span<const double> grid_x, std::span<const double> grid_y) {
+  SnapResult out;
+  out.placement = candidate;
+  if (bypass || !(tol > 0.0) || !candidate.inverse() || moving_extent.empty() ||
+      !finite(moving_extent)) {
+    return out; // Cmd/Ctrl bypass or a degenerate candidate: unsnapped, no guides (§6:258)
+  }
+  const arbc::Rect m = candidate.map_rect(moving_extent);
+  if (m.empty() || !finite(m)) {
+    return out;
+  }
+  const double mxs[3] = {m.x0, (m.x0 + m.x1) * 0.5, m.x1};
+  const double mys[3] = {m.y0, (m.y0 + m.y1) * 0.5, m.y1};
+
+  std::vector<SnapLine> xlines;
+  std::vector<SnapLine> ylines;
+  for (const PickTarget& t : others) {
+    if (!t.extent || t.extent->empty() || !finite(*t.extent) || !t.placement.inverse()) {
+      continue;
+    }
+    const arbc::Rect r = t.placement.map_rect(*t.extent);
+    if (r.empty() || !finite(r)) {
+      continue;
+    }
+    const double xs[3] = {r.x0, (r.x0 + r.x1) * 0.5, r.x1};
+    const double ys[3] = {r.y0, (r.y0 + r.y1) * 0.5, r.y1};
+    for (const double x : xs) {
+      xlines.push_back({x, r.y0, r.y1});
+    }
+    for (const double y : ys) {
+      ylines.push_back({y, r.x0, r.x1});
+    }
+  }
+  for (const double gx : grid_x) {
+    xlines.push_back({gx, m.y0, m.y1});
+  }
+  for (const double gy : grid_y) {
+    ylines.push_back({gy, m.x0, m.x1});
+  }
+
+  double dx = 0.0;
+  double dy = 0.0;
+  SnapLine xowner{};
+  SnapLine yowner{};
+  out.snapped_x = best_snap(xlines, mxs, tol, dx, xowner);
+  out.snapped_y = best_snap(ylines, mys, tol, dy, yowner);
+
+  arbc::Affine snapped = candidate;
+  if (out.snapped_x) {
+    snapped.tx += dx;
+  }
+  if (out.snapped_y) {
+    snapped.ty += dy;
+  }
+  out.placement = snapped;
+  if (out.snapped_x) {
+    const double y0 = std::min(m.y0 + dy, xowner.omin);
+    const double y1 = std::max(m.y1 + dy, xowner.omax);
+    out.guides.push_back({{xowner.pos, y0}, {xowner.pos, y1}});
+  }
+  if (out.snapped_y) {
+    const double x0 = std::min(m.x0 + dx, yowner.omin);
+    const double x1 = std::max(m.x1 + dx, yowner.omax);
+    out.guides.push_back({{x0, yowner.pos}, {x1, yowner.pos}});
+  }
+  return out;
+}
+
 } // namespace ace::interact

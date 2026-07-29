@@ -210,6 +210,22 @@ private:
     arbc::Vec2 gizmo_grab_comp{};                              // pointer in composition at grab
     int gizmo_res_w = 0;
     int gizmo_res_h = 0;
+    // --- cell transform gizmo (editor.cells.gizmo; D-gizmo-4) -------------------
+    // The in-progress cell handle-drag, if any: previewed as UI-thread session state (the gizmo
+    // redraws at the dragged placement `Affine`, no journal churn) and committed as ONE
+    // set_layer_transform through apply_edit on release (D8: a handle-drag is PLACEMENT, never a
+    // resample). `gizmo_cell` is unset when no grab is active.
+    std::optional<arbc::ObjectId> gizmo_cell; // the cell being transformed
+    arbc::ObjectId gizmo_cell_layer;          // its placing layer (set_layer_transform target)
+    interact::CellHandle gizmo_cell_handle = interact::CellHandle::None;
+    arbc::Affine gizmo_cell_start = arbc::Affine::identity(); // placement at grab (preview base)
+    arbc::Vec2 gizmo_cell_grab_comp{};                        // pointer in composition at grab
+    arbc::Rect gizmo_cell_extent{};                           // the cell's content extent at grab
+    // The draggable pivot, in COMPOSITION units, and the cell it belongs to. Seeded to the placed
+    // box center; a Pivot-handle drag moves it (UI-only, no commit). Reset when the primary cell
+    // changes.
+    std::optional<arbc::Vec2> gizmo_cell_pivot;
+    std::optional<arbc::ObjectId> gizmo_cell_pivot_for;
     // --- marquee gesture (editor.cells.selection; Constraint 1) -----------------
     // The ONLY selection-adjacent per-pane state this leaf adds — and it is a GESTURE, not a
     // selection: the one project-level `commands::Selection` lives on `AppState` (D19/A5/A7)
@@ -234,6 +250,20 @@ private:
   void draw_frame_gizmos(std::string_view view_id, Presenter& p,
                          const std::vector<scene::Camera>& cameras, const views::CanvasInput& in,
                          float origin_x, float origin_y);
+
+  // Draw the cell transform gizmo over the free-viewport pane and drive a direct-manipulation
+  // handle-drag for the ONE selected cell (editor.cells.gizmo; D-gizmo-2/-4). When exactly one
+  // cell is the selection primary, hit-test its 8 scale handles / rotate ring / draggable pivot /
+  // body, preview a move / scale / rotate / shear / pivot-move drag as session state (redraw at
+  // the dragged placement, no journal churn), snap the candidate to the other placed objects with
+  // alignment guides (Cmd/Ctrl bypasses), and commit ONE set_layer_transform through apply_edit
+  // on release (one undo step per gesture). Arrow keys nudge by one entry each. The transform and
+  // snap math is pure L1 interact; this only maps composition<->screen and commits. NOT gated on
+  // `dockmodel::ToolSelection` (D-gizmo-2). `origin_x`/`origin_y` are the pane's top-left screen
+  // px.
+  void draw_cell_gizmos(std::string_view view_id, Presenter& p,
+                        const std::vector<interact::PickTarget>& targets,
+                        const views::CanvasInput& in, float origin_x, float origin_y);
 
   // Drive the project-level selection over this pane and draw its chrome (editor.cells.selection;
   // D7/D19). Prunes stale ids against `targets` (Constraint 10), applies the L1 pick/modifier

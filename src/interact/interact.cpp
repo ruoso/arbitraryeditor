@@ -465,4 +465,240 @@ ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affin
   return health;
 }
 
+// --- Cell transform gizmo (editor.cells.gizmo; D7/D8/§6) ----------------------
+
+namespace {
+
+constexpr double k_cell_min_scale = 1e-3; // below this a scale drag collapses/flips: no-op
+constexpr double k_basis_eps = 1e-9;      // a box axis at/below this is degenerate
+
+bool finite_rect(const arbc::Rect& r) {
+  return std::isfinite(r.x0) && std::isfinite(r.y0) && std::isfinite(r.x1) && std::isfinite(r.y1);
+}
+bool finite_pt(arbc::Vec2 p) { return std::isfinite(p.x) && std::isfinite(p.y); }
+
+// The (U, V) coordinates of composition-space vector `w` in the placed box's own (possibly
+// non-orthogonal, sheared) edge basis B = [U V]; `det` is B's determinant (nonzero).
+arbc::Vec2 basis_coords(arbc::Vec2 w, arbc::Vec2 u, arbc::Vec2 v, double det) {
+  return {(w.x * v.y - w.y * v.x) / det, (-w.x * u.y + w.y * u.x) / det};
+}
+
+// The affine that applies the 2x2 `S = [[s00,s01],[s10,s11]]` in the box basis B = [U V] about
+// composition pivot `pv`: M = B S B^-1, translated so `pv` is fixed. Scale is S = diag(sx,sy);
+// a shear is an off-diagonal S. The caller guards `det != 0`.
+arbc::Affine basis_delta(arbc::Vec2 u, arbc::Vec2 v, double s00, double s01, double s10, double s11,
+                         arbc::Vec2 pv) {
+  const double det = u.x * v.y - v.x * u.y;
+  const double bs00 = s00 * u.x + s10 * v.x;
+  const double bs01 = s01 * u.x + s11 * v.x;
+  const double bs10 = s00 * u.y + s10 * v.y;
+  const double bs11 = s01 * u.y + s11 * v.y;
+  const double a = (bs00 * v.y - bs01 * u.y) / det;
+  const double c = (-bs00 * v.x + bs01 * u.x) / det;
+  const double b = (bs10 * v.y - bs11 * u.y) / det;
+  const double d = (-bs10 * v.x + bs11 * u.x) / det;
+  return arbc::Affine{a, b, c, d, pv.x - (a * pv.x + c * pv.y), pv.y - (b * pv.x + d * pv.y)};
+}
+
+// The four placed corners + the two edge basis vectors of `placement` over `extent`.
+struct PlacedBox {
+  arbc::Vec2 tl, tr, bl, br, u, v;
+};
+PlacedBox placed_box(const arbc::Affine& placement, const arbc::Rect& extent) {
+  PlacedBox box;
+  box.tl = placement.apply({extent.x0, extent.y0});
+  box.tr = placement.apply({extent.x1, extent.y0});
+  box.bl = placement.apply({extent.x0, extent.y1});
+  box.br = placement.apply({extent.x1, extent.y1});
+  box.u = {box.tr.x - box.tl.x, box.tr.y - box.tl.y};
+  box.v = {box.bl.x - box.tl.x, box.bl.y - box.tl.y};
+  return box;
+}
+
+// The dragged reference point and the default (opposite) fixed point for a scale/shear handle.
+bool handle_anchors(const PlacedBox& box, CellHandle handle, arbc::Vec2& dragged,
+                    arbc::Vec2& opposite) {
+  switch (handle) {
+  case CellHandle::ScaleTopLeft:
+    dragged = box.tl;
+    opposite = box.br;
+    return true;
+  case CellHandle::ScaleTopRight:
+    dragged = box.tr;
+    opposite = box.bl;
+    return true;
+  case CellHandle::ScaleBottomLeft:
+    dragged = box.bl;
+    opposite = box.tr;
+    return true;
+  case CellHandle::ScaleBottomRight:
+    dragged = box.br;
+    opposite = box.tl;
+    return true;
+  case CellHandle::ScaleLeft:
+    dragged = mid(box.tl, box.bl);
+    opposite = mid(box.tr, box.br);
+    return true;
+  case CellHandle::ScaleRight:
+    dragged = mid(box.tr, box.br);
+    opposite = mid(box.tl, box.bl);
+    return true;
+  case CellHandle::ScaleTop:
+    dragged = mid(box.tl, box.tr);
+    opposite = mid(box.bl, box.br);
+    return true;
+  case CellHandle::ScaleBottom:
+    dragged = mid(box.bl, box.br);
+    opposite = mid(box.tl, box.tr);
+    return true;
+  default:
+    return false;
+  }
+}
+
+} // namespace
+
+bool is_cell_corner(CellHandle handle) {
+  switch (handle) {
+  case CellHandle::ScaleTopLeft:
+  case CellHandle::ScaleTopRight:
+  case CellHandle::ScaleBottomLeft:
+  case CellHandle::ScaleBottomRight:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_cell_edge(CellHandle handle) {
+  switch (handle) {
+  case CellHandle::ScaleLeft:
+  case CellHandle::ScaleRight:
+  case CellHandle::ScaleTop:
+  case CellHandle::ScaleBottom:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool is_cell_scale_handle(CellHandle handle) {
+  return is_cell_corner(handle) || is_cell_edge(handle);
+}
+
+arbc::Vec2 cell_pivot(const arbc::Affine& placement, const arbc::Rect& extent) {
+  return placement.apply({(extent.x0 + extent.x1) * 0.5, (extent.y0 + extent.y1) * 0.5});
+}
+
+double drag_angle(arbc::Vec2 pivot, arbc::Vec2 from, arbc::Vec2 to) {
+  return std::atan2(to.y - pivot.y, to.x - pivot.x) -
+         std::atan2(from.y - pivot.y, from.x - pivot.x);
+}
+
+arbc::Affine move_cell(const arbc::Affine& placement, double dx, double dy) {
+  arbc::Affine out = placement;
+  out.tx += dx;
+  out.ty += dy;
+  return out;
+}
+
+arbc::Affine scale_cell(const arbc::Affine& placement, const arbc::Rect& extent, CellHandle handle,
+                        arbc::Vec2 pointer, arbc::Vec2 pivot, bool free_distort, bool about_pivot) {
+  if (!is_cell_scale_handle(handle) || extent.empty() || !finite_rect(extent) ||
+      !placement.inverse() || !finite_pt(pointer) || (about_pivot && !finite_pt(pivot))) {
+    return placement; // a non-scale handle / degenerate input: a safe no-op (Constraint 4)
+  }
+  const PlacedBox box = placed_box(placement, extent);
+  arbc::Vec2 dragged{};
+  arbc::Vec2 opposite{};
+  if (!handle_anchors(box, handle, dragged, opposite)) {
+    return placement;
+  }
+  const arbc::Vec2 fixed = about_pivot ? pivot : opposite;
+
+  if (is_cell_corner(handle) && !free_distort) {
+    // Proportional (uniform, aspect-preserving) about `fixed` — the recrop_frame idiom.
+    const double rx = dragged.x - fixed.x;
+    const double ry = dragged.y - fixed.y;
+    const double ref = rx * rx + ry * ry;
+    if (!(ref > 0.0)) {
+      return placement;
+    }
+    const double k = ((pointer.x - fixed.x) * rx + (pointer.y - fixed.y) * ry) / ref;
+    if (!(k > k_cell_min_scale)) {
+      return placement; // a collapse/flip drag: unchanged, never a degenerate placement
+    }
+    return compose(scale_about(k, fixed), placement);
+  }
+
+  // Anisotropic scale in the box's OWN axes about `fixed` — 1D for an edge (the opposite-axis
+  // coordinate of the dragged point is ~0, so that axis stays at 1), free x/y for a Shift corner.
+  const double det = box.u.x * box.v.y - box.v.x * box.u.y;
+  if (!(std::abs(det) > 0.0)) {
+    return placement;
+  }
+  const arbc::Vec2 cd = basis_coords({dragged.x - fixed.x, dragged.y - fixed.y}, box.u, box.v, det);
+  const arbc::Vec2 cp = basis_coords({pointer.x - fixed.x, pointer.y - fixed.y}, box.u, box.v, det);
+  const double sx = std::abs(cd.x) > k_basis_eps ? cp.x / cd.x : 1.0;
+  const double sy = std::abs(cd.y) > k_basis_eps ? cp.y / cd.y : 1.0;
+  if (!std::isfinite(sx) || !std::isfinite(sy) || !(sx > k_cell_min_scale) ||
+      !(sy > k_cell_min_scale)) {
+    return placement; // a collapse/flip drag on either active axis: unchanged
+  }
+  return compose(basis_delta(box.u, box.v, sx, 0.0, 0.0, sy, fixed), placement);
+}
+
+arbc::Affine rotate_cell(const arbc::Affine& placement, arbc::Vec2 pivot, double angle_rad,
+                         bool snap_15) {
+  if (!placement.inverse() || !finite_pt(pivot) || !std::isfinite(angle_rad)) {
+    return placement;
+  }
+  double angle = angle_rad;
+  if (snap_15) {
+    constexpr double step = 3.14159265358979323846 / 12.0; // 15 degrees (Shift, §6)
+    angle = std::round(angle / step) * step;
+  }
+  return compose(rotate_about(angle, pivot), placement);
+}
+
+arbc::Affine shear_cell(const arbc::Affine& placement, const arbc::Rect& extent, CellHandle edge,
+                        arbc::Vec2 pointer, arbc::Vec2 pivot) {
+  if (!is_cell_edge(edge) || extent.empty() || !finite_rect(extent) || !placement.inverse() ||
+      !finite_pt(pointer) || !finite_pt(pivot)) {
+    return placement;
+  }
+  const PlacedBox box = placed_box(placement, extent);
+  arbc::Vec2 dragged{};
+  arbc::Vec2 opposite{};
+  if (!handle_anchors(box, edge, dragged, opposite)) {
+    return placement;
+  }
+  const double det = box.u.x * box.v.y - box.v.x * box.u.y;
+  if (!(std::abs(det) > 0.0)) {
+    return placement;
+  }
+  const arbc::Vec2 cd = basis_coords({dragged.x - pivot.x, dragged.y - pivot.y}, box.u, box.v, det);
+  const arbc::Vec2 cp = basis_coords({pointer.x - pivot.x, pointer.y - pivot.y}, box.u, box.v, det);
+  if (edge == CellHandle::ScaleTop || edge == CellHandle::ScaleBottom) {
+    // Horizontal shear: slide the box's width coordinate as a function of its height coordinate.
+    if (!(std::abs(cd.y) > k_basis_eps)) {
+      return placement;
+    }
+    const double sh = (cp.x - cd.x) / cd.y;
+    if (!std::isfinite(sh)) {
+      return placement;
+    }
+    return compose(basis_delta(box.u, box.v, 1.0, sh, 0.0, 1.0, pivot), placement);
+  }
+  // Vertical shear on a Left/Right edge: slide height as a function of width.
+  if (!(std::abs(cd.x) > k_basis_eps)) {
+    return placement;
+  }
+  const double sh = (cp.y - cd.y) / cd.x;
+  if (!std::isfinite(sh)) {
+    return placement;
+  }
+  return compose(basis_delta(box.u, box.v, 1.0, 0.0, sh, 1.0, pivot), placement);
+}
+
 } // namespace ace::interact

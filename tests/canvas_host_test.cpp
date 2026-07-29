@@ -541,6 +541,63 @@ TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean agains
   handle->join();
 }
 
+TEST_CASE("canvas_host: a stream of UI-thread cell TRANSFORM commits runs clean against the render "
+          "+ gizmo read (cells.gizmo TSan anchor)") {
+  // The document's ONE writer identity, bound the shipped way (D-writer_thread-6): the writer
+  // starts BEFORE the document, the document is built ON it, and it is stopped only after the host
+  // is destroyed. The declaration order below IS that contract: `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  // editor.cells.gizmo's new threading surface (Constraint 11): the gizmo commit is a REAL
+  // writer-thread mutation (`set_layer_transform`, unlike selection's read-only gestures), and the
+  // gizmo ASSEMBLY (`pick_targets`) is a lock-free `pin()` read run every UI frame. This drives a
+  // rapid transform-gesture stream through apply_edit on the writer thread while the render thread
+  // loops drive_once AND the UI thread re-reads pick_targets, so both reads genuinely overlap the
+  // writes in wall-clock time. No new lock, no new thread — the writer-identity + pin() seam covers
+  // it, which is what this anchor pins under ASan/TSan.
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // Stream the transform commits: many rounds, each a set_layer_transform of the probe's layer to a
+  // fresh (always-invertible) placement, with a pick_targets read interleaved each round.
+  constexpr int k_gestures = 64;
+  arbc::Affine last = arbc::Affine::identity();
+  for (int i = 0; i < k_gestures; ++i) {
+    const double s = 1.0 + static_cast<double>(i % 8) * 0.25; // a varying, non-degenerate scale
+    last = arbc::Affine{s, 0.0, 0.0, s, static_cast<double>(i), static_cast<double>(-i)};
+    apply_edit(writer, host, [&] { probe.document->set_layer_transform(probe.layer, last); });
+    const std::vector<ace::interact::PickTarget> targets =
+        ace::interact::pick_targets(*probe.document, registry);
+    (void)targets; // the gizmo's per-frame assembly read, overlapping the writer + render reads
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  // The final committed placement is what the gizmo reads back — stable and finite.
+  bool found = false;
+  for (const ace::interact::PickTarget& tgt :
+       ace::interact::pick_targets(*probe.document, registry)) {
+    if (tgt.layer == probe.layer) {
+      found = true;
+      CHECK(tgt.placement == last);
+    }
+  }
+  CHECK(found);
+
+  host.stop();
+  handle->join();
+}
+
 // --- editor.canvas.nav: the per-entry camera channel + deep-zoom observability ------
 
 namespace {

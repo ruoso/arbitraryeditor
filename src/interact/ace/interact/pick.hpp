@@ -182,6 +182,49 @@ SelectionChange click_selection(std::span<const PickTarget> targets, arbc::Vec2 
 SelectionChange marquee_selection(std::span<const PickTarget> targets, const arbc::Rect& rect,
                                   bool shift);
 
+// --- Cell gizmo hit-test + snapping (editor.cells.gizmo; §6) --------------------------------
+
+// Which cell-gizmo handle composition-space `point` grabs for `target` (a single selected cell),
+// with the pivot dot at composition `pivot`. Handles are anchored to `placed_quad` — the EXACT
+// placed parallelogram, never an AABB (D-gizmo-7) — so a rotated/sheared cell's handles sit on
+// its rotated box. Precedence: the Pivot dot, then the four corners (within `corner_tol`), then
+// the Rotate ring just OUTSIDE a corner, then the four edge midpoints (within `corner_tol`), then
+// the Body interior (the move grab). Tolerances are composition units (the caller converts screen
+// px through the view scale). A non-invertible placement, an unbounded/degenerate extent, or a
+// non-finite `point` is `None`.
+CellHandle hit_cell(const PickTarget& target, arbc::Vec2 pivot, arbc::Vec2 point, double edge_tol,
+                    double corner_tol);
+
+// One on-canvas alignment guide (§6:260): a composition-space line segment the L4 overlay strokes
+// while a snap is engaged.
+struct SnapGuide {
+  arbc::Vec2 a;
+  arbc::Vec2 b;
+};
+
+// The result of `snap_placement`: the (possibly nudged) placement plus the guides to draw.
+struct SnapResult {
+  arbc::Affine placement = arbc::Affine::identity();
+  std::vector<SnapGuide> guides;
+  bool snapped_x = false;
+  bool snapped_y = false;
+};
+
+// Snap the moving cell's placed AABB edges/centers to the OTHER placed objects' edges/centers
+// (§6): the candidate placement (mapping `moving_extent`) is nudged by up to `tol` composition
+// units so a moving edge/center lands flush on a target edge/center, emitting the alignment
+// guide(s). `others` is every OTHER placed object drawn from `pick_targets` — cells AND camera
+// frames both contribute their `placement.map_rect(extent)` AABB, and the caller EXCLUDES the
+// moving object so it is never its own target (a camera is snapped-to exactly like a cell). Two
+// competing targets resolve to the nearer; a candidate outside every tolerance is returned
+// unchanged with no guides. `bypass` (Cmd/Ctrl held, §6:258) returns the candidate unsnapped.
+// `grid_x`/`grid_y` are optional composition-space grid lines folded into the target set — no
+// caller populates them yet (grid display is `editor.canvas.grid`, D-gizmo-5). A non-invertible
+// candidate or a degenerate/non-finite `moving_extent` is a safe no-op.
+SnapResult snap_placement(const arbc::Affine& candidate, const arbc::Rect& moving_extent,
+                          std::span<const PickTarget> others, double tol, bool bypass = false,
+                          std::span<const double> grid_x = {}, std::span<const double> grid_y = {});
+
 // --- The one assembly adapter (A17 (b); src/interact/pick_targets.cpp) ---------------------
 
 // The document's z-ordered stack of placed objects: every cell from `scene::cells` in layer

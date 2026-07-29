@@ -380,6 +380,12 @@ task editor "Editor — host GUI over libarbc" {
       depends !arbc_v040, !pending_removes_order, !arbc_router_attach_split
       note "ruoso/arbitrarycomposer#25 shipped `HostViewport::attach_settler()`/`detach_settler()` plus `Config::install_settler = false` in v0.4.0 — precisely the seam D-writer_thread-8 asked for. Today the render thread posts the WHOLE HostViewport construction and destruction to the writer thread through submit_sync (src/render/canvas_renderer.cpp:73,150; src/render/canvas_host.cpp:116) for one line inside the ctor: `Document::set_external_load_settler` is writer-thread-only. That costs a synchronous round trip per canvas add, per remove and per resize rebuild, and gives up scoped ownership of the viewport. Construct with `install_settler = false` on the render thread, post ONLY the `attach_settler()`/`detach_settler()` pair, and the render thread owns the viewport lifetime again. Upstream leaves the install counting and the N-viewports-per-document rule unchanged — only WHEN they happen moves — so the proof obligation is the existing TSan anchors in tests/canvas_host_test.cpp passing unmodified, plus the tripwire that `doc.on_writer_thread()` holds inside the attach/detach closures and NOWHERE else (a construction that quietly stayed posted would pass every test while delivering none of the benefit). ORDERING: depends on editor.canvas.pending_removes_order deliberately, not just on the pin. Both leaves rewrite `CanvasHost` — pending_removes_order changes how drive_once CONSUMES the pending maps (src/render/canvas_host.cpp:288-329), this leaf changes how the viewport entries those maps name are CONSTRUCTED and destroyed. Landing the 0.5d one first means it is written against the host as it stands today rather than rebased onto a restructured lifetime, and it keeps the add/remove pre-emption rule settled before the construction path moves underneath it. The reverse order costs a rebase of the smaller leaf for no gain. RE-DEFER 2026-07-28: arbc#25 split only the settler slot; DamageRouter::register_sink remains welded to the ctor — render-thread construction races the router. Blocked on arbc_router_attach_split consuming a future libarbc pin that moves the router registration into attach/detach. Source-of-debt: tasks/parking-lot.md 'HostViewport settler attach/detach split'; tasks/refinements/editor/writer_thread.md D-writer_thread-8. Design: docs/01-architecture.md A4.1/A5. Refinement: tasks/refinements/canvas/settler_attach_split.md"
     }
+    task grid "Composition grid: display toggle + spacing setting + snap-to-grid wiring" {
+      effort 2d
+      allocate team
+      depends editor.cells.gizmo
+      note "The composition grid docs/00-design.md:260 names: a display toggle + spacing setting (local UI state), and feeding the grid lines into the gizmo's already-general snap_placement engine (interact/pick.hpp) so a placement snaps to grid. Deferred from editor.cells.gizmo because snap-to-an-invisible-grid with no spacing control is a non-affordance; the snap engine was built to consume grid lines the moment a grid exists. Source-of-debt: tasks/refinements/editor/gizmo.md. Design: docs/00-design.md D7/D8 SS6."
+    }
     task arbc_router_split_pin "Bump libarbc pin to the release that splits DamageRouter registration into attach/detach_settler" {
       effort 0.5d
       allocate team
@@ -527,8 +533,15 @@ task editor "Editor — host GUI over libarbc" {
     task gizmo "Transform gizmo: move / scale / rotate / shear; pivot; snapping" {
       effort 3d
       allocate team
+      complete 100
       depends !selection
-      note "Move (body), scale (corners proportional-by-default, edges 1D), rotate (Shift 15deg), shear (modifier), draggable pivot; snapping to cell edges/centers, camera frames, grid. Handle-drag is PLACEMENT, never resample. Design: D7/D8. Refinement: tasks/refinements/transform_gizmo.md"
+      note "Move (body), scale (corners proportional-by-default, edges 1D), rotate (Shift 15deg), shear (modifier), draggable pivot; snapping to cell edges/centers, camera frames, grid. Handle-drag is PLACEMENT, never resample. Design: D7/D8. Refinement: tasks/refinements/editor/gizmo.md"
+    }
+    task group_transform "Group transform: apply one affine delta across a multi-object selection" {
+      effort 1.5d
+      allocate team
+      depends !gizmo
+      note "Transform a multi-object selection: apply one affine delta about a shared pivot (the union of the selected placed extents, interact::selected_extent, pick.hpp:136-137) across every selected cell's placing layer, coalesced into one journal entry via doc.transact(name).coalesce(key) and a batch commands::Command (the natural home for the transform_cells_command this leaf's single-object path did not need -- D-gizmo-3). Kept out of scope of editor.cells.gizmo because the single-object gizmo is the D7/SS6 primitive and the batch-coalesce is a distinct concern. Source-of-debt: tasks/refinements/editor/gizmo.md. Design: docs/00-design.md D7/D8, docs/01-architecture.md A17."
     }
     task resolution "Cell resolution display; resample-to-crisp; health badge" {
       effort 2d
