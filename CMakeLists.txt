@@ -196,6 +196,28 @@ ace_component(commands DEPENDS base project scene)
 # the encoder, and scripts/check_levels.py pins the same containment as a rule
 # (EXTERNAL_ALLOWED["stb_write"] = {"commands"}).
 target_include_directories(ace_commands PRIVATE "${CMAKE_SOURCE_DIR}/third_party")
+# editor.cameras.truetype_captions (A27, D-truetype_captions-2): the SECOND vendored
+# stb-class header (third_party/stb/stb_truetype.h) rasterizes offline captions from a
+# bundled Inter face. The `.ttf` is turned into a linked `const std::uint8_t[]` TU by a
+# pure-CMake build step (file(READ ... HEX)) so the face is embedded exactly as the old
+# glyph table was — no runtime asset load, nothing for a headless job to fail to find.
+# The generated TU lives under the build dir, so the src/commands glob does not see it;
+# it is added to ace_commands explicitly. Regenerates only when the .ttf or the codegen
+# script changes.
+set(_inter_ttf "${CMAKE_SOURCE_DIR}/assets/fonts/Inter-Regular.ttf")
+set(_inter_gen "${CMAKE_CURRENT_BINARY_DIR}/generated/inter_regular_ttf.cpp")
+add_custom_command(
+  OUTPUT "${_inter_gen}"
+  COMMAND ${CMAKE_COMMAND}
+          -DINPUT=${_inter_ttf}
+          -DOUTPUT=${_inter_gen}
+          -DSYMBOL=k_inter_regular_ttf
+          -DHEADER=ace/commands/inter_regular_ttf.hpp
+          -P "${CMAKE_SOURCE_DIR}/cmake/embed_font.cmake"
+  DEPENDS "${_inter_ttf}" "${CMAKE_SOURCE_DIR}/cmake/embed_font.cmake"
+  COMMENT "Embedding Inter-Regular.ttf -> inter_regular_ttf.cpp"
+  VERBATIM)
+target_sources(ace_commands PRIVATE "${_inter_gen}")
 ace_component(dockmodel DEPENDS base platform)
 # L2 — render posts its HostViewport ctor/dtor (the document's WRITER-THREAD-ONLY settler and
 # damage-sink slots) to the writer thread, hence the L2 -> L1 `writer` edge (D-writer_thread-8).

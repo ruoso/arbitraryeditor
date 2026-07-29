@@ -1,12 +1,15 @@
 #include <ace/commands/contact_sheet.hpp>
 #include <ace/commands/export.hpp>
+#include <ace/commands/inter_regular_ttf.hpp>
 #include <ace/scene/camera.hpp>
 
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
+#include <arbc/media/pixel_traits.hpp>
 #include <arbc/runtime/document.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -15,71 +18,73 @@
 #include <utility>
 #include <vector>
 
+// The ONE translation unit in the build that instantiates the vendored TrueType
+// rasterizer (A27, D-truetype_captions-2), mirroring png_encode.cpp's stb_image_write
+// containment: reached through the PRIVATE `third_party` include dir, pinned by
+// `scripts/check_levels.py`'s `EXTERNAL_ALLOWED["stb_truetype"] = {"commands"}`.
+// STBTT_STATIC keeps every stb symbol internal to this TU. `#pragma STDC FP_CONTRACT
+// OFF` is what makes the LINEAR caption composite bit-reproducible across gcc/clang: it
+// forbids the compiler from fusing a `mul + add` into an FMA, which the two toolchains
+// contract differently, and the two goldens are byte-exact with no tolerance
+// (Constraint 10).
+#pragma STDC FP_CONTRACT OFF
+#define STBTT_STATIC
+#define STB_TRUETYPE_IMPLEMENTATION
+#include <stb/stb_truetype.h>
+
 namespace ace::commands {
 namespace {
 
-// The one place a CODE POINT becomes a cell. Everything outside the two table ranges
-// — a control character, a DEL, the C1 controls, a CJK ideograph, an emoji, and
-// U+FFFD for ill-formed input — is UNMAPPED, and a maximal run of unmapped code points
-// collapses to ONE fallback box (D-sheet-4, kept by D-latin1-4).
-bool is_mapped(char32_t code_point) {
-  return (code_point >= k_glyph_first && code_point <= k_glyph_last) ||
-         (code_point >= k_latin1_first && code_point <= k_latin1_last);
+// The bundled Inter face, parsed once from the embedded blob (function-local static, so
+// the parse is thread-safe and happens on first caption draw). `stbtt_fontinfo` holds
+// only offsets and a pointer into `k_inter_regular_ttf`, whose storage is static and
+// outlives every use — so returning it by value is a POD copy of those offsets.
+const stbtt_fontinfo& face() {
+  static const stbtt_fontinfo info = [] {
+    stbtt_fontinfo f{};
+    stbtt_InitFont(&f, k_inter_regular_ttf, stbtt_GetFontOffsetForIndex(k_inter_regular_ttf, 0));
+    return f;
+  }();
+  return info;
 }
 
-// The 8 scanlines of the cell `code_point` draws as. Two range tests are the ONLY
-// mapping, so no value can index outside a table (Constraint 3).
-const std::uint8_t* glyph_rows(char32_t code_point) {
-  if (code_point >= k_glyph_first && code_point <= k_glyph_last) {
-    const std::size_t index = static_cast<std::size_t>(code_point - k_glyph_first);
-    return k_glyph_table.data() + index * k_glyph_cell_height;
-  }
-  if (code_point >= k_latin1_first && code_point <= k_latin1_last) {
-    const std::size_t index = static_cast<std::size_t>(code_point - k_latin1_first);
-    return k_latin1_glyph_table.data() + index * k_glyph_cell_height;
-  }
-  return k_fallback_glyph.data();
+// The rasterization scale for `scale`: the face's em box mapped to
+// `k_caption_pixel_height * scale` pixels. A fixed pixel height at a fixed sub-pixel
+// policy is what keeps the raster deterministic and platform-independent (Constraint 10).
+float pixel_scale(int scale) {
+  return stbtt_ScaleForPixelHeight(&face(), static_cast<float>(k_caption_pixel_height * scale));
 }
 
-// Walk `text` as cells, calling `visit(rows, cell_index)` once per drawn cell. The ONE
-// iteration primitive every public caption function routes through — which is why
-// decoding here fixes measurement, truncation and drawing at once (D-latin1-1).
-template <class Visit> int for_each_cell(std::string_view text, Visit visit) {
-  int cells = 0;
-  bool in_unmapped_run = false;
-  std::size_t pos = 0;
-  while (pos < text.size()) {
-    const char32_t code_point = next_code_point(text, pos);
-    if (is_mapped(code_point)) {
-      in_unmapped_run = false;
-    } else if (in_unmapped_run) {
-      continue; // still inside the SAME run — one box covers the whole of it
-    } else {
-      in_unmapped_run = true;
-    }
-    visit(glyph_rows(code_point), cells);
-    ++cells;
-  }
-  return cells;
+// The horizontal advance for one code point in pixels, rounded once. Uncovered code
+// points map to glyph 0 (`.notdef`) inside stb, so they advance by the face's `.notdef`
+// advance — no special case here (D-truetype_captions-5/6).
+int advance_px(char32_t code_point, float sf) {
+  int advance = 0;
+  int left_side_bearing = 0;
+  stbtt_GetCodepointHMetrics(&face(), static_cast<int>(code_point), &advance, &left_side_bearing);
+  return static_cast<int>(std::lround(static_cast<float>(advance) * sf));
 }
 
-// Fill an axis-aligned rect with one opaque colour, clipped to `target`. The only
-// pixel-writing primitive the captions use: no read of what is underneath, so no
-// blend can hide here (D-sheet-2).
-void fill_rect(Srgb8Image& target, int x, int y, int w, int h, std::uint8_t value) {
-  const int x0 = std::max(0, x);
-  const int y0 = std::max(0, y);
-  const int x1 = std::min(target.width, x + w);
-  const int y1 = std::min(target.height, y + h);
-  for (int row = y0; row < y1; ++row) {
-    for (int col = x0; col < x1; ++col) {
-      const std::size_t at = (static_cast<std::size_t>(row) * target.width + col) * 4;
-      target.pixels[at] = value;
-      target.pixels[at + 1] = value;
-      target.pixels[at + 2] = value;
-      target.pixels[at + 3] = 255;
-    }
+// Composite one 8-bit coverage sample of a grey ink over the destination pixel `at` in
+// the LINEAR working space, re-encoding to straight-alpha sRGB8 — the premultiplied-
+// linear `over` `render` uses (D-truetype_captions-3). `ink_linear` is 0 (black shadow)
+// or 1 (white text). A coverage edge is an alpha blend, not a copy, which is exactly why
+// A21 clause (2)'s copy-only rule is narrowed to the tile image and text composites here.
+void composite_coverage(Srgb8Image& target, std::size_t at, std::uint8_t coverage,
+                        float ink_linear) {
+  // The caller only composites covered samples (`coverage != 0`), so `src_a > 0` and
+  // therefore `out_a >= src_a > 0` — the divide below is always well-defined.
+  const float src_a = static_cast<float>(coverage) / 255.0F;
+  const float inv = 1.0F - src_a;
+  const float dst_a = arbc::unorm8_decode(target.pixels[at + 3]);
+  const float out_a = src_a + dst_a * inv;
+  const float src_premul = ink_linear * src_a;
+  for (std::size_t channel = 0; channel < 3; ++channel) {
+    const float dst_premul = arbc::srgb8_to_linear(target.pixels[at + channel]) * dst_a;
+    const float out_premul = src_premul + dst_premul * inv;
+    target.pixels[at + channel] = arbc::linear_to_srgb8(out_premul / out_a);
   }
+  target.pixels[at + 3] = arbc::unorm8_encode(out_a);
 }
 
 // The long edge becomes `tile_edge`; the short edge follows by rounded integer
@@ -188,64 +193,48 @@ char32_t next_code_point(std::string_view text, std::size_t& pos) {
   return value;
 }
 
-int text_cells(std::string_view text) {
-  return for_each_cell(text, [](const std::uint8_t*, int) {});
-}
-
 int text_width(std::string_view text, int scale) {
   if (scale <= 0) {
     return 0;
   }
-  return text_cells(text) * k_glyph_cell_width * scale;
-}
-
-int text_set_bits(std::string_view text) {
-  int bits = 0;
-  for_each_cell(text, [&bits](const std::uint8_t* rows, int) {
-    for (int row = 0; row < k_glyph_cell_height; ++row) {
-      for (int col = 0; col < k_glyph_width; ++col) {
-        if ((rows[row] & (1U << (k_glyph_width - 1 - col))) != 0U) {
-          ++bits;
-        }
-      }
-    }
-  });
-  return bits;
+  const float sf = pixel_scale(scale);
+  int width = 0;
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    width += advance_px(next_code_point(text, pos), sf);
+  }
+  return width;
 }
 
 std::string fit_text(std::string_view text, int max_width, int scale) {
   if (scale <= 0 || max_width <= 0) {
     return {};
   }
-  const int budget = max_width / (k_glyph_cell_width * scale); // cells that fit
-  if (budget <= 0) {
-    return {};
-  }
-  if (text_cells(text) <= budget) {
+  if (text_width(text, scale) <= max_width) {
     return std::string(text);
   }
-  // Truncation is VISIBLE: the ellipsis is what tells the user the name continues.
-  // With room for nothing else, the ellipsis alone is still the honest answer.
-  if (budget <= 3) {
-    return std::string(static_cast<std::size_t>(budget), '.');
+  // Truncation is VISIBLE: the ellipsis is what tells the user the name continues. If not
+  // even the ellipsis fits, the honest answer is nothing (width 0, still <= max_width),
+  // which keeps `text_width(result) <= max_width` a total law (Constraint 4).
+  const int ellipsis = text_width("...", scale);
+  if (ellipsis > max_width) {
+    return {};
   }
-  const int keep = budget - 3;
-  int cells = 0;
-  bool in_unmapped_run = false;
+  const float sf = pixel_scale(scale);
+  const int budget = max_width - ellipsis;
+  int used = 0;
   std::size_t take = 0;
   std::size_t pos = 0;
-  // The walk advances by decoded CODE POINT and `take` is the byte offset AFTER the
-  // last accepted one, so the cut can never land inside a multi-byte sequence: valid
-  // UTF-8 in is valid UTF-8 out, and re-measuring the result agrees with the cell count
-  // this loop computed (D-latin1-5).
+  // The walk advances by decoded CODE POINT and `take` is the byte offset AFTER the last
+  // accepted one, so the cut can never land inside a multi-byte sequence: valid UTF-8 in
+  // is valid UTF-8 out, and the result measures `used + ellipsis <= max_width` because
+  // advances are additive per code point with no kerning (D-latin1-5).
   while (pos < text.size()) {
-    const bool mapped = is_mapped(next_code_point(text, pos));
-    const int add = (mapped || !in_unmapped_run) ? 1 : 0;
-    if (cells + add > keep) {
+    const int advance = advance_px(next_code_point(text, pos), sf);
+    if (used + advance > budget) {
       break;
     }
-    cells += add;
-    in_unmapped_run = !mapped;
+    used += advance;
     take = pos;
   }
   return std::string(text.substr(0, take)) + "...";
@@ -257,24 +246,62 @@ void draw_text(Srgb8Image& target, int x, int y, std::string_view text, int scal
           static_cast<std::size_t>(target.width) * static_cast<std::size_t>(target.height) * 4) {
     return;
   }
-  // Two passes, shadow then glyph, so a later cell's shadow can never eat an earlier
-  // cell's white pixel: the white count is then exactly `text_set_bits * scale^2`,
-  // which is what the caption's anti-vacuity law asserts.
+  const float sf = pixel_scale(scale);
+  int ascent = 0;
+  int descent = 0;
+  int line_gap = 0;
+  stbtt_GetFontVMetrics(&face(), &ascent, &descent, &line_gap);
+  // The baseline sits `ascent` pixels below the strip top, so the tallest covered glyph
+  // reaches the strip top and no higher; every write is clipped to the strip and to the
+  // text's own advance span, so no ink leaves the caption strip (Constraint 7).
+  const int baseline = y + static_cast<int>(std::lround(static_cast<float>(ascent) * sf));
+  const int strip_x0 = x;
+  const int strip_x1 = x + text_width(text, scale);
+  const int strip_y0 = y;
+  const int strip_y1 = y + k_glyph_cell_height * scale;
+  // Two passes, shadow then white, so a later glyph's shadow never composites over an
+  // earlier glyph's white text (D-truetype_captions-3, keeping the D-sheet-4 pair).
   for (int pass = 0; pass < 2; ++pass) {
-    const std::uint8_t value = pass == 0 ? std::uint8_t{0} : std::uint8_t{255};
+    const float ink = pass == 0 ? 0.0F : 1.0F;
     const int offset = pass == 0 ? scale : 0;
-    for_each_cell(text, [&](const std::uint8_t* rows, int cell) {
-      const int cell_x = x + cell * k_glyph_cell_width * scale + offset;
-      const int cell_y = y + offset;
-      for (int row = 0; row < k_glyph_cell_height; ++row) {
-        for (int col = 0; col < k_glyph_width; ++col) {
-          if ((rows[row] & (1U << (k_glyph_width - 1 - col))) == 0U) {
+    int pen = x;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+      const char32_t code_point = next_code_point(text, pos);
+      int glyph_w = 0;
+      int glyph_h = 0;
+      int glyph_x = 0;
+      int glyph_y = 0;
+      unsigned char* bitmap = stbtt_GetCodepointBitmap(
+          &face(), sf, sf, static_cast<int>(code_point), &glyph_w, &glyph_h, &glyph_x, &glyph_y);
+      if (bitmap != nullptr) {
+        for (int row = 0; row < glyph_h; ++row) {
+          const int ty = baseline + glyph_y + row + offset;
+          if (ty < strip_y0 || ty >= strip_y1 || ty < 0 || ty >= target.height) {
             continue;
           }
-          fill_rect(target, cell_x + col * scale, cell_y + row * scale, scale, scale, value);
+          for (int col = 0; col < glyph_w; ++col) {
+            const std::uint8_t coverage =
+                bitmap[static_cast<std::size_t>(row) * static_cast<std::size_t>(glyph_w) +
+                       static_cast<std::size_t>(col)];
+            if (coverage == 0) {
+              continue;
+            }
+            const int tx = pen + glyph_x + col + offset;
+            if (tx < strip_x0 || tx >= strip_x1 || tx < 0 || tx >= target.width) {
+              continue;
+            }
+            const std::size_t at =
+                (static_cast<std::size_t>(ty) * static_cast<std::size_t>(target.width) +
+                 static_cast<std::size_t>(tx)) *
+                4;
+            composite_coverage(target, at, coverage, ink);
+          }
         }
+        stbtt_FreeBitmap(bitmap, nullptr);
       }
-    });
+      pen += advance_px(code_point, sf);
+    }
   }
 }
 

@@ -15,24 +15,29 @@
 //     multiplier performs in the other direction. So there is no image filter here,
 //     no mip chain, no `arbc/media/image_resampler.hpp` include and no new L2 entry
 //     point; `commands` keeps its shipped dependency set exactly.
-//   * COMPOSITION COPIES, IT NEVER BLENDS (D-sheet-2). The sheet is allocated filled
-//     with the chosen background, tile rects never overlap, and every tile was
-//     rendered with the SAME background the sheet is filled with — so under a tile
-//     the destination is either fully transparent or exactly that tile's own opaque
-//     backing, `over` degenerates to `replace`, and the correct composite is reached
-//     with ZERO colour arithmetic in L1. That is directly testable as a byte-identity
-//     between each tile rect and an independent render of the same camera, which any
-//     later filter, premultiply or blend breaks immediately.
+//   * THE TILE IMAGE COPIES, IT NEVER BLENDS (D-sheet-2, narrowed by
+//     D-truetype_captions-4). The sheet is allocated filled with the chosen background,
+//     tile rects never overlap, and every tile was rendered with the SAME background the
+//     sheet is filled with — so under a tile the destination is either fully transparent
+//     or exactly that tile's own opaque backing, `over` degenerates to `replace`, and
+//     each tile rect is reached with ZERO colour arithmetic. That is directly testable
+//     as a byte-identity between each tile rect and an independent render of the same
+//     camera, which any later filter, premultiply or blend breaks immediately. Only the
+//     CAPTION text composites (below) — the copy-only law is scoped to the tile image.
 //
-// Captions come from an embedded bitmap glyph table (`src/commands/glyphs.cpp`,
-// D-sheet-4) covering ASCII and the printable Latin-1 Supplement (D-latin1-2), walked
-// as DECODED CODE POINTS (D-latin1-1) because a camera name is free text carrying UTF-8
-// bytes — because §8 makes `views`/`dock` the ONLY layer that sees ImGui and this
-// is a headless L1 job: there is no font atlas to borrow. Glyphs are 1-bit cells
-// scaled by integer pixel replication and written as opaque white over an opaque
-// black shadow — legible on light, dark, mid-grey and transparent backgrounds
-// WITHOUT analysing the background, which is what keeps colour math out of
-// `commands` and keeps a caption a pure pixel write under D-sheet-2.
+// Captions rasterize a build-embedded TrueType face — Inter Regular (static `glyf`,
+// OFL 1.1), turned into a linked `const` byte array by a CMake step and rasterized by
+// vendored `stb/stb_truetype.h` (A27, D-truetype_captions-1/2). §8 makes `views`/`dock`
+// the ONLY layer that sees ImGui, so a headless L1 job has no font atlas to borrow; an
+// embedded face is the dependency-free, background-blind way to draw real text in
+// `commands`, and it is walked as DECODED CODE POINTS (D-latin1-1) because a camera name
+// is free UTF-8 text. `stb_truetype` yields an 8-bit COVERAGE bitmap per glyph, so a
+// caption is an antialiased composite of coverage over the strip background in the LINEAR
+// working space (libarbc's `srgb8_to_linear`/`linear_to_srgb8`, the transfer `render`
+// already uses), keeping the white-glyph + black-shadow legibility pair
+// (D-truetype_captions-3). An uncovered code point renders the face's own `.notdef`, so
+// the missing-glyph box is the font's business, not a hand-drawn table's
+// (D-truetype_captions-5).
 //
 // `plan_contact_sheet` lives in <ace/commands/export.hpp>: it needs `ExportOptions`
 // and `ShotCameraFn`, and that header includes this one so `ExportPlan` can carry the
@@ -57,37 +62,20 @@ namespace ace::commands {
 using Srgb8Image = base::Srgb8Image;
 using Rgba8 = base::Rgba8;
 
-// ---- the caption face (D-sheet-4) -------------------------------------------
+// ---- the caption face (A27, D-truetype_captions-1) --------------------------
 
-// A 5x7 glyph in a 6x8 cell: the spare column and the spare row are the advance
-// padding, and the spare row is exactly where a bottom-row shadow lands, which is
-// what makes a caption strip of `k_glyph_cell_height * scale` pixels sufficient.
-inline constexpr int k_glyph_width = 5;
-inline constexpr int k_glyph_cell_width = 6;
+// The caption strip is `k_glyph_cell_height * caption_scale` pixels tall (the layout
+// below). The bundled face is rasterized at `k_caption_pixel_height * scale` pixels so a
+// glyph's em box PLUS the one-pixel-per-scale shadow offset fits inside that strip:
+// 7 < 8 leaves exactly the shadow row (D-truetype_captions-6). `k_glyph_cell_height` is
+// kept from the retired table only to define the strip geometry — the glyph SHAPES are
+// now the font's, not a hand-drawn cell's.
 inline constexpr int k_glyph_cell_height = 8;
-// U+0020 .. U+007E, the printable ASCII range.
-inline constexpr int k_glyph_count = 95;
-inline constexpr char32_t k_glyph_first = U' ';
-inline constexpr char32_t k_glyph_last = U'~';
-// U+00A0 .. U+00FF, the printable Latin-1 Supplement (`editor.cameras.caption_latin1`,
-// A21 as amended). A SECOND contiguous block rather than one widened array: the
-// shipped ASCII bytes stay byte-identical, and `[0x7F, 0x9F]` — DEL and the C1
-// controls — stays deliberately UNMAPPED, so a control character still boxes.
-inline constexpr int k_latin1_glyph_count = 96;
-inline constexpr char32_t k_latin1_first = char32_t{0x00A0};
-inline constexpr char32_t k_latin1_last = char32_t{0x00FF};
+inline constexpr int k_caption_pixel_height = 7;
 
-// The tables themselves, defined in `src/commands/glyphs.cpp` — one byte per scanline,
-// the glyph's five columns in the LOW FIVE BITS, leftmost column = bit 4.
-extern const std::array<std::uint8_t, k_glyph_count * k_glyph_cell_height> k_glyph_table;
-extern const std::array<std::uint8_t, k_latin1_glyph_count * k_glyph_cell_height>
-    k_latin1_glyph_table;
-// The hollow box drawn for any code point the tables do not map. One box per unmapped
-// RUN, so a CJK name does not explode into one box per character.
-extern const std::array<std::uint8_t, k_glyph_cell_height> k_fallback_glyph;
-
-// The code point an ill-formed maximal subpart decodes to. Itself unmapped, so
-// malformed input joins the same fallback run as any other undrawable text.
+// The code point an ill-formed maximal subpart decodes to (Unicode 3.9). It is outside
+// the face's coverage, so malformed input renders the face's `.notdef`, exactly as any
+// other uncovered code point does (D-truetype_captions-5).
 inline constexpr char32_t k_replacement_code_point = 0xFFFDU;
 
 // Decode the scalar at `pos` and advance `pos` past it. Total: an ill-formed sequence
@@ -97,31 +85,29 @@ inline constexpr char32_t k_replacement_code_point = 0xFFFDU;
 // out-of-range sequences (D-latin1-1).
 char32_t next_code_point(std::string_view text, std::size_t& pos);
 
-// How many CELLS `text` draws as. `text` is decoded as UTF-8: one cell per mapped code
-// point, and one per maximal run of unmapped ones. `"Café"` (5 UTF-8 bytes) is four
-// cells — `C`, `a`, `f`, `é` — while `"中文"` is one box (D-latin1-4).
-int text_cells(std::string_view text);
-
-// The pixel width `draw_text` occupies for `text` at `scale`. Zero for a
-// non-positive scale.
+// The pixel width `draw_text` occupies for `text` at `scale`: the sum of the face's
+// scaled horizontal advances over the decoded code points. Zero for the empty string or
+// a non-positive scale, monotone non-decreasing as text is appended, and the exact
+// measure `fit_text` respects so a fitted caption re-measures consistently
+// (D-truetype_captions-6).
 int text_width(std::string_view text, int scale);
 
-// The exact number of GLYPH (white) pixels `draw_text` writes for `text` at scale 1
-// — the table's set-bit count over the cells `text` actually draws. The measure the
-// caption's anti-vacuity law is asserted against.
-int text_set_bits(std::string_view text);
-
-// The longest prefix of `text` that fits `max_width` pixels at `scale`, with a
-// trailing `...` when anything was dropped (Constraint 4: a caption never leaves its
-// tile column). Empty when not even one cell fits. The cut lands on a CODE-POINT
-// boundary, so valid UTF-8 in is valid UTF-8 out (D-latin1-5).
+// The longest prefix of `text` that fits `max_width` pixels at `scale`, with a trailing
+// `...` when anything was dropped (Constraint 4: a caption never leaves its tile column).
+// Empty when not even the ellipsis fits. The cut lands on a CODE-POINT boundary, so valid
+// UTF-8 in is valid UTF-8 out (D-latin1-5), and `text_width(result, scale)` is never
+// greater than `max_width`.
 std::string fit_text(std::string_view text, int max_width, int scale);
 
-// Draw `text` into `target` with its top-left cell at (x, y), integer-scaled by
-// nearest-neighbour pixel replication: every set bit's opaque black shadow at
-// (+scale, +scale) first, then every set bit as opaque white. Clipped to `target` —
-// out-of-bounds pixels are dropped, never wrapped and never a write past the end.
-// No antialiasing, no alpha ramp, no read of what is underneath (D-sheet-4).
+// Draw `text` into `target` with its caption strip's top-left at (x, y). Each decoded
+// code point is rasterized through the embedded face at `k_caption_pixel_height * scale`
+// pixels and composited as 8-bit COVERAGE over the destination in the LINEAR working
+// space: a black shadow at (+scale, +scale) first, then white text, each an antialiased
+// alpha composite (D-truetype_captions-3). An uncovered code point — and U+FFFD from
+// malformed input — renders the face's own `.notdef` (D-truetype_captions-5). Writes are
+// clipped to the `k_glyph_cell_height * scale` strip and to `[x, x + text_width)`, so no
+// ink leaves the strip (Constraint 7); a `target` whose buffer does not match its
+// declared geometry is left untouched.
 void draw_text(Srgb8Image& target, int x, int y, std::string_view text, int scale);
 
 // ---- the layout (D-sheet-3) --------------------------------------------------

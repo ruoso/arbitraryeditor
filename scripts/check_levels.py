@@ -53,6 +53,11 @@ EXTERNAL_ALLOWED = {
     # it (src/commands/png_encode.cpp). Containment is CI-enforced here rather than
     # conventional — the editor's mirror of libarbc's codec line.
     "stb_write": {"commands"},
+    # The editor's offline TEXT line (A27 / editor.cameras.truetype_captions): the
+    # SECOND vendored stb-class header, confined to `commands` where the caption face
+    # is rasterized (src/commands/contact_sheet.cpp). `stb_write` stays the sole
+    # ENCODE dependency; this is the sole rasterizer.
+    "stb_truetype": {"commands"},
 }
 EXTERNAL_RE = {
     "imgui": re.compile(r'#\s*include\s*[<"]imgui'),
@@ -60,6 +65,7 @@ EXTERNAL_RE = {
     "gl_api": re.compile(r'#\s*include\s*[<"](GL/|GLES|glad|SDL_opengl)'),
     "arbc": re.compile(r'#\s*include\s*[<"]arbc/'),
     "stb_write": re.compile(r'#\s*include\s*[<"](stb/)?stb_image_write'),
+    "stb_truetype": re.compile(r'#\s*include\s*[<"](stb/)?stb_truetype'),
 }
 ACE_INCLUDE_RE = re.compile(r'#\s*include\s*<ace/([a-z_]+)/')
 
