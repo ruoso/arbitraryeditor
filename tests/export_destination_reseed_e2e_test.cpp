@@ -153,8 +153,11 @@ struct E2EState {
 void wire_service(ExportService& service, AppState& state) {
   service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
   service.set_revision([&state] { return state.document().pin()->revision(); });
-  service.set_renderer([&state](const arbc::Affine& camera, int width, int height,
-                                const std::optional<ace::commands::Rgba8>& background) {
+  // This lane asserts WHERE files land, not batch coherence, so it renders through the
+  // 2-arg path and ignores the batch pin (the pinning itself is covered by export_test.cpp
+  // / canvas_host_test.cpp / export_e2e_test.cpp).
+  service.set_renderer([&state](const arbc::DocStatePtr&, const arbc::Affine& camera, int width,
+                                int height, const std::optional<ace::commands::Rgba8>& background) {
     if (!background) {
       return ace::render::render_document_srgb8(state.document(), width, height, camera);
     }

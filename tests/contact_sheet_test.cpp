@@ -223,7 +223,9 @@ Srgb8Image gradient_render(int width, int height, int key) {
 
 // A well-formed uniform render, enough for the report/progress/cancel matrix.
 ace::commands::RenderFn stub_renderer() {
-  return [](const arbc::Affine&, int width, int height, const std::optional<Rgba8>& background) {
+  // The stub ignores the batch pin (D-pinned-1) — a leading unused `DocStatePtr`.
+  return [](const arbc::DocStatePtr&, const arbc::Affine&, int width, int height,
+            const std::optional<Rgba8>& background) {
     Srgb8Image image;
     image.width = width;
     image.height = height;
@@ -362,7 +364,10 @@ std::vector<Srgb8Image> render_tiles(const ContactSheetPlan& plan,
   std::vector<Srgb8Image> renders;
   renders.reserve(plan.tiles.size());
   for (const ContactTile& tile : plan.tiles) {
-    renders.push_back(render(tile.render_camera, tile.width, tile.height, background));
+    // The compose-logic cases render against the 2-arg path (a null pin the closures
+    // ignore); run_export's own pinning is exercised by export_test.cpp / canvas_host_test.
+    renders.push_back(
+        render(arbc::DocStatePtr{}, tile.render_camera, tile.width, tile.height, background));
   }
   return renders;
 }
@@ -1150,7 +1155,8 @@ TEST_CASE("contact_sheet: cancel between tiles writes no partial sheet") {
   ExportRunner runner;
   runner.filesystem = &fs;
   runner.cancel = &cancel;
-  runner.render = [&](const arbc::Affine&, int width, int height, const std::optional<Rgba8>&) {
+  runner.render = [&](const arbc::DocStatePtr&, const arbc::Affine&, int width, int height,
+                      const std::optional<Rgba8>&) {
     // Let the whole batch through, then stop on the SECOND tile render.
     if (width == 64 || height == 64) {
       if (++tile_calls == 2) {
@@ -1403,7 +1409,8 @@ TEST_CASE("contact_sheet: a job still in its SHEET phase at teardown is joined f
     {
       ExportService service(threads, fs);
       service.set_shot_camera(real_shot_camera());
-      service.set_renderer([&doc, &in_sheet, &tiles](const arbc::Affine&, int width, int height,
+      service.set_renderer([&doc, &in_sheet, &tiles](const arbc::DocStatePtr&, const arbc::Affine&,
+                                                     int width, int height,
                                                      const std::optional<Rgba8>&) {
         in_sheet.store(true);
         tiles.fetch_add(1);
@@ -1435,8 +1442,11 @@ TEST_CASE("contact_sheet: the composed sheet is byte-exact vs the golden") {
   const std::unique_ptr<arbc::Document> doc = build_sheet_doc();
   // The renderer callable the L4 shell binds, VERBATIM (src/app/shell.cpp:385-394).
   const ace::commands::RenderFn shipped =
-      [&doc](const arbc::Affine& camera, int width, int height,
+      [&doc](const arbc::DocStatePtr&, const arbc::Affine& camera, int width, int height,
              const std::optional<Rgba8>& background) -> ace::render::Srgb8Image {
+    // The compose golden asserts byte-identity against direct 2-arg renders, so this
+    // closure renders through the 2-arg path and ignores the batch pin (the pinning
+    // itself is exercised in export_test.cpp / canvas_host_test.cpp).
     if (!background) {
       return ace::render::render_document_srgb8(*doc, width, height, camera);
     }
@@ -1520,8 +1530,11 @@ TEST_CASE("contact_sheet: the composed sheet is byte-exact vs the golden") {
 TEST_CASE("contact_sheet: an accented caption composes byte-exact vs the golden") {
   const std::unique_ptr<arbc::Document> doc = build_sheet_doc();
   const ace::commands::RenderFn shipped =
-      [&doc](const arbc::Affine& camera, int width, int height,
+      [&doc](const arbc::DocStatePtr&, const arbc::Affine& camera, int width, int height,
              const std::optional<Rgba8>& background) -> ace::render::Srgb8Image {
+    // The compose golden asserts byte-identity against direct 2-arg renders, so this
+    // closure renders through the 2-arg path and ignores the batch pin (the pinning
+    // itself is exercised in export_test.cpp / canvas_host_test.cpp).
     if (!background) {
       return ace::render::render_document_srgb8(*doc, width, height, camera);
     }

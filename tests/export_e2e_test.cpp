@@ -17,6 +17,7 @@
 // destination override rides the shipped folder seam.
 #include <ace/app/camera_inspector.hpp>
 #include <ace/app/canvas_view.hpp>
+#include <ace/app/export_wiring.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
@@ -282,15 +283,10 @@ TEST_CASE("export e2e: the Export panel writes PNGs named by camera, at N x, wit
   ExportService service(threads, fs);
   service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
   service.set_revision([&state] { return state.document().pin()->revision(); });
-  service.set_renderer([&state](const arbc::Affine& camera, int width, int height,
-                                const std::optional<ace::commands::Rgba8>& background) {
-    if (!background) {
-      return ace::render::render_document_srgb8(state.document(), width, height, camera);
-    }
-    return ace::render::render_document_srgb8_over(
-        state.document(), width, height, camera,
-        {background->r, background->g, background->b, background->a});
-  });
+  service.set_pin([&state] { return state.document().pin(); });
+  // The SHIPPED renderer closure itself (shell.cpp binds the very same factory), so this
+  // e2e's real-pixel batches cover the production wiring rather than a hand-copied twin.
+  service.set_renderer(ace::app::make_export_renderer(state));
   service.set_destination_picker(
       [&export_dialog](const std::function<void(std::optional<std::filesystem::path>)>& on_pick) {
         export_dialog.show(on_pick);
@@ -489,6 +485,60 @@ TEST_CASE("export e2e: the Export panel writes PNGs named by camera, at N x, wit
     ctx->ItemClick("export/###export_bg_filled"); // back to the transparent default
     ctx->Yield(2);
     IM_CHECK(facts_of(state) == before);
+
+    // --- (6b) The informational live-vs-pinned notice (editor.cameras.export_pinned) ----
+    // With ONE pin the batch is coherent, so `document_changed_during_export` is now an
+    // INFORMATIONAL note ("you exported the pre-edit version"), never the retired coherence
+    // warning. A clean batch leaves it clear; a batch with a concurrent writer edit sets it
+    // and the reworded note is surfaced on the panel.
+    const std::string notice_ref = "export/###export_changed_notice";
+    // (a) An edit-free batch: start == end, the flag is false, and no note is drawn.
+    before = facts_of(state);
+    const std::shared_ptr<const ace::commands::ExportReport> quiet = run_and_wait();
+    IM_CHECK(quiet != nullptr);
+    IM_CHECK(!quiet->document_changed_during_export);
+    ctx->Yield(2);
+    IM_CHECK(!ctx->ItemExists(notice_ref.c_str())); // no note when nothing moved
+    IM_CHECK(facts_of(state) == before);            // the export itself touched nothing
+
+    // (b) A batch with a concurrent writer edit. A larger render gives a window in which
+    // to commit AFTER the batch has pinned: once the first item has rendered, the pin is
+    // already taken, so an edit now advances the LIVE document past the pinned version and
+    // fires the informational flag. Retried until the edit is observed to straddle the pin
+    // (the job renders on its own thread); the batch stays byte-frozen throughout.
+    canvas.apply_edit([&state] {
+      for (const ace::scene::Camera& camera : ace::scene::cameras(state.document())) {
+        ace::scene::set_camera_resolution(state.document(), state.registry(), camera.id,
+                                          ace::scene::Resolution{128, 128});
+      }
+    });
+    IM_CHECK(pump_until(ctx, [&] { return cameras()[0].resolution.width == 128; }));
+    ctx->ItemInputValue("export/###export_scale", 2);
+    ctx->Yield(2);
+    std::shared_ptr<const ace::commands::ExportReport> moved;
+    for (int attempt = 0;
+         attempt < 30 && (moved == nullptr || !moved->document_changed_during_export); ++attempt) {
+      ctx->ItemClick(run_button.c_str());
+      // Wait until item 1 has rendered (the pin is taken before it), then commit exactly
+      // one edit — guaranteed after the pin.
+      pump_until(ctx, [&] {
+        return service.progress()->done >= 1 || terminal(service.progress()->state);
+      });
+      if (!terminal(service.progress()->state)) {
+        canvas.apply_edit([&state, attempt] {
+          ace::scene::rename_camera(state.document(), state.registry(),
+                                    ace::scene::cameras(state.document())[0].id,
+                                    "moved " + std::to_string(attempt));
+        });
+      }
+      pump_until(ctx, [&] { return !service.running(); });
+      moved = service.report();
+    }
+    IM_CHECK(moved != nullptr);
+    IM_CHECK(moved->document_changed_during_export); // the report state: live moved past pinned
+    IM_CHECK(moved->written == 2);                   // both items still written from the frozen pin
+    ctx->Yield(3);
+    IM_CHECK(ctx->ItemExists(notice_ref.c_str())); // the reworded note is surfaced
 
     // --- (7) Progress and cancel are observable ----------------------------------------
     // A batch big enough that cancel lands BETWEEN items rather than after the last one.

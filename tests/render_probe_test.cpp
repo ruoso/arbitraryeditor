@@ -17,6 +17,12 @@
 // render_offline byte-exact golden (docs §9). GL-free — both run on the plain
 // headless ace_tests lane, no GL context (D-render_probe-5).
 
+TEST_CASE("render_probe: the render component reports its levelization name") {
+  // The §8 component-identity stub (render.hpp): a stable name the levelization
+  // narrative refers to, pinned so the diagnostic string cannot silently drift.
+  CHECK(std::string(ace::render::name()) == "render");
+}
+
 TEST_CASE("render_probe: the trivial Document builds with a solid cell") {
   const ace::project::ProbeDocument probe = ace::project::build_probe_document();
 

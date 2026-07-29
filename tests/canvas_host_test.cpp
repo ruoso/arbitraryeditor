@@ -2002,14 +2002,17 @@ TEST_CASE("canvas_host: an export job renders the live document clean against th
   ace::commands::ExportService service(threads, filesystem);
   service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
   service.set_revision([&doc] { return doc->pin()->revision(); });
-  // The SHIPPED renderer, reading the live document off the export thread.
-  service.set_renderer([&doc](const arbc::Affine& camera, int width, int height,
-                              const std::optional<ace::commands::Rgba8>& background) {
+  service.set_pin([&doc] { return doc->pin(); });
+  // The SHIPPED renderer — now #27's caller-pinned path (A20 / export_pinned) — reading a
+  // FROZEN version off the export thread while the writer commits new versions.
+  service.set_renderer([&doc](const arbc::DocStatePtr& pin, const arbc::Affine& camera, int width,
+                              int height, const std::optional<ace::commands::Rgba8>& background) {
     if (!background) {
-      return ace::render::render_document_srgb8(*doc, width, height, camera);
+      return ace::render::render_document_srgb8_pinned(*doc, pin, width, height, camera);
     }
-    return ace::render::render_document_srgb8_over(
-        *doc, width, height, camera, {background->r, background->g, background->b, background->a});
+    return ace::render::render_document_srgb8_over_pinned(
+        *doc, pin, width, height, camera,
+        {background->r, background->g, background->b, background->a});
   });
 
   ace::commands::ExportOptions options;
@@ -2049,9 +2052,127 @@ TEST_CASE("canvas_host: an export job renders the live document clean against th
                                                        0x0D, 0x0A, 0x1A, 0x0A};
     CHECK(std::equal(k_sig.begin(), k_sig.end(), bytes.begin()));
   }
-  // D-export-8: batch coherence is REPORTED, not enforced — the flag is exactly the
-  // start/end revision comparison, never a guess about what the user was doing.
+  // D-pinned-2: the flag is exactly the pinned-start/live-end revision comparison — now
+  // an informational "the live document moved on" note, never a coherence warning.
   CHECK(report->document_changed_during_export == (report->start_revision != report->end_revision));
+}
+
+TEST_CASE("canvas_host: a batch export holds ONE pin across a concurrent writer, byte-identical to "
+          "a quiet batch (cameras.export_pinned TSan anchor)") {
+  // editor.cameras.export_pinned: the export job holds ONE `DocStatePtr` on the export
+  // thread while the writer commits new versions on the writer thread — the lock-free
+  // pinned-read contract (A4.1 / issue #23). Two acceptance obligations meet here: (a) NO
+  // TSan data-race report (the sanitizer's own verdict on this lane), and (b) the exported
+  // bytes match a no-concurrent-writer run — the pin isolates the reader. Both batches use
+  // the SAME frozen pin, so the mid-batch commits cannot change a single output byte.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem filesystem;
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  auto doc = build_on_writer(writer, [] { return build_raster_doc(); });
+  std::vector<arbc::ObjectId> camera_ids;
+  writer.submit_sync([&] {
+    for (int i = 0; i < 4; ++i) {
+      camera_ids.push_back(ace::scene::add_camera(*doc, registry, "pin " + std::to_string(i),
+                                                  ace::scene::Resolution{24, 24},
+                                                  arbc::Affine::translation(4.0 * i, 4.0)));
+    }
+  });
+  REQUIRE(camera_ids.size() == 4);
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+  host.add("canvas#1", *doc, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // ONE frozen version, shared by both batches (and retained across every writer commit
+  // below via the `shared_ptr` refcount the library owns). The export renders THIS version
+  // regardless of when the job actually pins, which is what makes the byte-comparison
+  // deterministic rather than a timing gamble.
+  const arbc::DocStatePtr frozen = doc->pin();
+  const auto wire = [&](ace::commands::ExportService& service) {
+    service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
+    service.set_revision([&doc] { return doc->pin()->revision(); });
+    service.set_pin([frozen] { return frozen; });
+    service.set_renderer([&doc](const arbc::DocStatePtr& pin, const arbc::Affine& camera, int width,
+                                int height, const std::optional<ace::commands::Rgba8>& background) {
+      if (!background) {
+        return ace::render::render_document_srgb8_pinned(*doc, pin, width, height, camera);
+      }
+      return ace::render::render_document_srgb8_over_pinned(
+          *doc, pin, width, height, camera,
+          {background->r, background->g, background->b, background->a});
+    });
+  };
+
+  // (1) A QUIET batch — no concurrent writer — establishes the reference bytes.
+  std::vector<std::vector<std::uint8_t>> quiet_bytes;
+  {
+    ace::commands::ExportOptions options;
+    options.destination = scratch.root / "quiet";
+    ace::commands::ExportService service(threads, filesystem);
+    wire(service);
+    REQUIRE(service.start(
+        ace::commands::plan_export(*doc, camera_ids, options, service.shot_camera()), options));
+    service.join();
+    const std::shared_ptr<const ace::commands::ExportReport> report = service.report();
+    REQUIRE(report != nullptr);
+    REQUIRE(report->written == 4);
+    for (const ace::commands::ExportItemResult& item : report->items) {
+      REQUIRE(item.written);
+      quiet_bytes.push_back(ace_test::read_file_bytes(item.path));
+    }
+  }
+
+  // (2) A CONCURRENT batch — the writer commits new versions throughout, while the export
+  // holds `frozen`. Renames and mints land on the LIVE document; the frozen render ignores
+  // every one of them.
+  std::vector<std::vector<std::uint8_t>> live_bytes;
+  {
+    ace::commands::ExportOptions options;
+    options.destination = scratch.root / "concurrent";
+    ace::commands::ExportService service(threads, filesystem);
+    wire(service);
+    REQUIRE(service.start(
+        ace::commands::plan_export(*doc, camera_ids, options, service.shot_camera()), options));
+    for (int i = 0; i < 24 && service.running(); ++i) {
+      apply_edit(writer, host, [&] {
+        ace::scene::rename_camera(*doc, registry, camera_ids[i % camera_ids.size()],
+                                  "live " + std::to_string(i));
+        if (i % 8 == 0) {
+          ace::scene::add_camera(*doc, registry, "extra " + std::to_string(i),
+                                 ace::scene::Resolution{16, 16}, arbc::Affine::identity());
+        }
+      });
+    }
+    service.join();
+    const std::shared_ptr<const ace::commands::ExportReport> report = service.report();
+    REQUIRE(report != nullptr);
+    REQUIRE(report->written == 4);
+    for (const ace::commands::ExportItemResult& item : report->items) {
+      REQUIRE(item.written);
+      live_bytes.push_back(ace_test::read_file_bytes(item.path));
+    }
+  }
+
+  host.stop();
+  handle->join();
+
+  // (b) Byte-identical to the no-concurrent-writer run — the held pin isolated the reader
+  // from every mid-batch commit.
+  REQUIRE(quiet_bytes.size() == live_bytes.size());
+  for (std::size_t i = 0; i < quiet_bytes.size(); ++i) {
+    INFO("item " << i);
+    REQUIRE(quiet_bytes[i].size() > 8);
+    CHECK(quiet_bytes[i] == live_bytes[i]);
+  }
 }
 
 TEST_CASE("canvas_host: the contact-sheet phase renders the live document clean against the "
@@ -2096,13 +2217,15 @@ TEST_CASE("canvas_host: the contact-sheet phase renders the live document clean 
   ace::commands::ExportService service(threads, filesystem);
   service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
   service.set_revision([&doc] { return doc->pin()->revision(); });
-  service.set_renderer([&doc](const arbc::Affine& camera, int width, int height,
-                              const std::optional<ace::commands::Rgba8>& background) {
+  service.set_pin([&doc] { return doc->pin(); });
+  service.set_renderer([&doc](const arbc::DocStatePtr& pin, const arbc::Affine& camera, int width,
+                              int height, const std::optional<ace::commands::Rgba8>& background) {
     if (!background) {
-      return ace::render::render_document_srgb8(*doc, width, height, camera);
+      return ace::render::render_document_srgb8_pinned(*doc, pin, width, height, camera);
     }
-    return ace::render::render_document_srgb8_over(
-        *doc, width, height, camera, {background->r, background->g, background->b, background->a});
+    return ace::render::render_document_srgb8_over_pinned(
+        *doc, pin, width, height, camera,
+        {background->r, background->g, background->b, background->a});
   });
 
   ace::commands::ExportOptions options;

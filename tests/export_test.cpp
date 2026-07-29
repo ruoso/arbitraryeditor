@@ -20,6 +20,7 @@
 #include <arbc/builtin_kinds.hpp>
 #include <arbc/contract/registry.hpp>
 #include <arbc/kind_raster/raster_content.hpp>
+#include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/media/surface_format.hpp>
 #include <arbc/runtime/document.hpp>
 
@@ -112,6 +113,29 @@ std::unique_ptr<arbc::Document> build_export_doc() {
   return doc;
 }
 
+// A `w`x`h` opaque raster of one premultiplied-linear colour, attached to `root` at
+// `at` — a bounded, positioned patch so distinct cameras frame visibly different pixels.
+arbc::ObjectId add_solid_patch(arbc::Document& doc, arbc::ObjectId root, int w, int h,
+                               std::array<float, 4> premul, const arbc::Affine& at) {
+  arbc::DecodedImage img;
+  img.width = w;
+  img.height = h;
+  img.format = arbc::k_working_rgba32f;
+  img.bytes.resize(static_cast<std::size_t>(w) * h * 4 * sizeof(float));
+  auto* fp = reinterpret_cast<float*>(img.bytes.data());
+  for (int i = 0; i < w * h; ++i) {
+    fp[i * 4] = premul[0];
+    fp[i * 4 + 1] = premul[1];
+    fp[i * 4 + 2] = premul[2];
+    fp[i * 4 + 3] = premul[3];
+  }
+  const arbc::ObjectId content =
+      doc.add_content(std::make_shared<arbc::RasterContent>(std::move(img)));
+  const arbc::ObjectId layer = doc.add_layer(content, at);
+  doc.attach_layer(root, layer);
+  return content;
+}
+
 // ---- test doubles -----------------------------------------------------------
 
 // An in-memory filesystem that RECORDS every write, so "wrote nothing" is a real
@@ -166,21 +190,23 @@ public:
 // A stub renderer producing a well-formed (uniform, half-transparent) image of the
 // requested size — enough for the report/progress/cancel matrix, and cheap.
 ace::commands::RenderFn stub_renderer(std::atomic<int>* calls = nullptr) {
-  return
-      [calls](const arbc::Affine&, int width, int height, const std::optional<Rgba8>& background) {
-        if (calls != nullptr) {
-          calls->fetch_add(1);
-        }
-        Srgb8Image image;
-        image.width = width;
-        image.height = height;
-        image.pixels.assign(static_cast<std::size_t>(width) * height * 4, 0);
-        for (std::size_t i = 0; i < image.pixels.size(); i += 4) {
-          image.pixels[i] = 200;
-          image.pixels[i + 3] = background ? background->a : 128;
-        }
-        return image;
-      };
+  // The stub simply IGNORES the pin (D-pinned-1): the plan/refusal/cancel/progress/report
+  // matrix is version-agnostic, so a leading unused `DocStatePtr` keeps it headless.
+  return [calls](const arbc::DocStatePtr&, const arbc::Affine&, int width, int height,
+                 const std::optional<Rgba8>& background) {
+    if (calls != nullptr) {
+      calls->fetch_add(1);
+    }
+    Srgb8Image image;
+    image.width = width;
+    image.height = height;
+    image.pixels.assign(static_cast<std::size_t>(width) * height * 4, 0);
+    for (std::size_t i = 0; i < image.pixels.size(); i += 4) {
+      image.pixels[i] = 200;
+      image.pixels[i + 3] = background ? background->a : 128;
+    }
+    return image;
+  };
 }
 
 // ---- a test-local PNG chunk walker (D-export-11's anti-vacuity layer) ---------
@@ -522,16 +548,20 @@ TEST_CASE("export: run_export reports every outcome as a value") {
   RecordingFileSystem empty_fs;
   ExportRunner broken = runner;
   broken.filesystem = &empty_fs;
-  broken.render = [](const arbc::Affine&, int, int, const std::optional<Rgba8>&) {
-    return Srgb8Image{};
-  };
+  broken.render = [](const arbc::DocStatePtr&, const arbc::Affine&, int, int,
+                     const std::optional<Rgba8>&) { return Srgb8Image{}; };
   const ExportReport failed = run_export(plan, options, broken);
   CHECK(failed.failed == 3);
   CHECK(failed.written == 0);
   CHECK(empty_fs.writes.empty());
 }
 
-TEST_CASE("export: a mid-batch document edit is reported, not silently mixed in") {
+TEST_CASE("export: the revision fields are the pinned-vs-live note, not a coherence warning") {
+  // D-pinned-2: with one pin the batch is coherent, so `start_revision` is the PINNED
+  // version the whole batch rendered, `end_revision` is the LIVE version at completion,
+  // and the flag `end != start` is INFORMATIONAL — the live document advanced past the
+  // exported version, NOT that the output was mixed. A mid-batch commit fires the flag
+  // yet every item is still written from the frozen pin.
   CameraDoc doc;
   const arbc::ObjectId a = doc.add("Alpha", 8, 8);
   const arbc::ObjectId b = doc.add("Beta", 8, 8);
@@ -540,16 +570,118 @@ TEST_CASE("export: a mid-batch document edit is reported, not silently mixed in"
   const ExportPlan plan = plan_export(*doc.document, {a, b}, options, real_shot_camera());
 
   RecordingFileSystem fs;
-  std::uint64_t revision = 3;
+  const std::uint64_t pinned = doc.document->pin()->revision();
   ExportRunner runner;
-  runner.render = stub_renderer();
   runner.filesystem = &fs;
-  runner.revision = [&revision] { return revision++; }; // "moved" between the two reads
+  // The real pin (frozen at run_export's first act) and the live end read, exactly as L4
+  // binds them. A stub renderer that commits a document edit on its first call advances
+  // the LIVE document mid-batch, without changing what the frozen pin renders.
+  runner.pin = [&doc] { return doc.document->pin(); };
+  runner.revision = [&doc] { return doc.document->pin()->revision(); };
+  int calls = 0;
+  runner.render = [&doc, &calls](const arbc::DocStatePtr&, const arbc::Affine&, int width,
+                                 int height, const std::optional<Rgba8>&) {
+    if (calls++ == 0) {
+      doc.add("Late", 8, 8); // a mid-batch commit — the on-screen document moves on
+    }
+    Srgb8Image image;
+    image.width = width;
+    image.height = height;
+    image.pixels.assign(static_cast<std::size_t>(width) * height * 4, 200);
+    return image;
+  };
 
   const ExportReport report = run_export(plan, options, runner);
-  CHECK(report.start_revision == 3);
-  CHECK(report.end_revision == 4);
-  CHECK(report.document_changed_during_export);
+  CHECK(report.start_revision == pinned);             // the version pinned before item 1
+  CHECK(report.end_revision > report.start_revision); // the live document advanced
+  CHECK(report.document_changed_during_export);       // informational, not "incoherent"
+  CHECK(report.written == 2);                         // both items written from the frozen pin
+}
+
+TEST_CASE("export: a batch renders one frozen version even under a concurrent edit") {
+  // The pin's whole point (D-pinned-1): `run_export` pins ONCE before the first item, so
+  // an edit committed mid-batch cannot change any output. Two cameras over visibly
+  // different content give the batch teeth; the assertion is byte-identity against an
+  // edit-free batch, with an anti-vacuity guard proving the edit WOULD have changed item
+  // 2 under a re-pinning render.
+  CameraDoc doc;
+  // Red patch on the left half, green on the right — two cameras each framing one region
+  // render distinct, non-blank frames.
+  add_solid_patch(*doc.document, doc.root, 32, 32, {0.8F, 0.0F, 0.0F, 1.0F},
+                  arbc::Affine::identity());
+  add_solid_patch(*doc.document, doc.root, 32, 32, {0.0F, 0.6F, 0.0F, 1.0F},
+                  arbc::Affine::translation(32.0, 0.0));
+  const arbc::ObjectId cam_a = doc.add("A", 32, 32, arbc::Affine::identity());
+  const arbc::ObjectId cam_b = doc.add("B", 32, 32, arbc::Affine::translation(32.0, 0.0));
+
+  ExportOptions options;
+  options.destination = k_dest;
+  const ExportPlan plan = plan_export(*doc.document, {cam_a, cam_b}, options, real_shot_camera());
+  REQUIRE(plan.items.size() == 2);
+
+  // The version pinned before ANY batch runs — a `DocStatePtr` RETAINS it, so it survives
+  // the mid-batch edit and drives the anti-vacuity re-pin below.
+  const arbc::DocStatePtr frozen = doc.document->pin();
+
+  // The shipped pinned renderer, reading whatever version `run_export` handed it.
+  const ace::commands::RenderFn pinned_render = [&doc](const arbc::DocStatePtr& pin,
+                                                       const arbc::Affine& cam, int width,
+                                                       int height, const std::optional<Rgba8>&) {
+    return ace::render::render_document_srgb8_pinned(*doc.document, pin, width, height, cam);
+  };
+
+  // (1) The edit-free batch — the baseline output.
+  RecordingFileSystem clean_fs;
+  ExportRunner clean;
+  clean.filesystem = &clean_fs;
+  clean.render = pinned_render;
+  clean.pin = [&doc] { return doc.document->pin(); };
+  const ExportReport clean_report = run_export(plan, options, clean);
+  REQUIRE(clean_report.written == 2);
+  REQUIRE(clean_fs.files.size() == 2);
+  // The two cameras really did frame different content (a real batch, not two identical
+  // frames).
+  CHECK(clean_fs.files.at(plan.items[0].path) != clean_fs.files.at(plan.items[1].path));
+
+  // (2) The concurrent batch — an opaque covering layer is committed BETWEEN item 1 and
+  // item 2. `run_export` pinned the original version first, so both items still render it.
+  RecordingFileSystem dirty_fs;
+  int calls = 0;
+  ExportRunner dirty;
+  dirty.filesystem = &dirty_fs;
+  dirty.pin = [&doc] { return doc.document->pin(); };
+  dirty.render = [&doc, &calls](const arbc::DocStatePtr& pin, const arbc::Affine& cam, int width,
+                                int height, const std::optional<Rgba8>&) {
+    if (calls++ == 1) {
+      // A mid-batch commit that genuinely changes the composition: an opaque layer over all.
+      const arbc::ObjectId content = doc.document->add_content(
+          std::make_shared<arbc::SolidContent>(arbc::Rgba{0.0F, 0.0F, 0.9F, 1.0F}));
+      doc.document->attach_layer(doc.root,
+                                 doc.document->add_layer(content, arbc::Affine::identity()));
+    }
+    return ace::render::render_document_srgb8_pinned(*doc.document, pin, width, height, cam);
+  };
+  const ExportReport dirty_report = run_export(plan, options, dirty);
+  REQUIRE(dirty_report.written == 2);
+
+  // THE INVARIANT (.tji): every produced item is byte-identical to the edit-free batch.
+  REQUIRE(dirty_fs.files.size() == clean_fs.files.size());
+  for (const auto& [path, bytes] : clean_fs.files) {
+    REQUIRE(dirty_fs.files.count(path) == 1);
+    INFO(path.string());
+    CHECK(dirty_fs.files.at(path) == bytes); // the frozen pin => identical PNG bytes
+  }
+
+  // ANTI-VACUITY: the mid-batch edit WOULD have changed item 2 under a re-pinning render —
+  // a fresh 2-arg render of item B's camera on the now-edited document differs from the
+  // frozen render. Without this, the byte-identity above could pass on an inert edit.
+  const ExportItem& item_b = plan.items[1];
+  const ace::render::Srgb8Image frozen_b = ace::render::render_document_srgb8_pinned(
+      *doc.document, frozen, item_b.width, item_b.height, item_b.render_camera);
+  const ace::render::Srgb8Image live_b = ace::render::render_document_srgb8(
+      *doc.document, item_b.width, item_b.height, item_b.render_camera);
+  CHECK(ace::render::frame_has_content(frozen_b)); // the camera framed real content
+  CHECK(frozen_b.pixels != live_b.pixels);         // the edit was visible; the pin froze it out
 }
 
 TEST_CASE("export: progress is monotone and terminal") {
@@ -605,8 +737,8 @@ TEST_CASE("export: cancel takes effect between items and leaves complete files")
   ExportRunner runner;
   runner.filesystem = &fs;
   runner.cancel = &cancel;
-  runner.render = [&calls, &cancel](const arbc::Affine&, int width, int height,
-                                    const std::optional<Rgba8>&) {
+  runner.render = [&calls, &cancel](const arbc::DocStatePtr&, const arbc::Affine&, int width,
+                                    int height, const std::optional<Rgba8>&) {
     // Ask to stop DURING the 2nd item: a started item still finishes, so its file is
     // whole (Constraint 10 — `render_offline` exposes no cancellation hook).
     if (++calls == 2) {
@@ -680,18 +812,24 @@ TEST_CASE("export: render-through-camera at the camera's own resolution is golde
   CHECK(ace::render::frame_has_content(image));
   CHECK(ace_test::compare_golden("export_camera_64x64.rgba8", image.pixels));
 
-  // The export path adds no pixel of its own at N == 1 with a TRANSPARENT background:
-  // the renderer callable the L4 shell binds returns the identical bytes.
+  // The PINNED export path adds no pixel of its own at N == 1 with a TRANSPARENT
+  // background: the renderer callable the L4 shell binds — now over #27's caller-pinned
+  // `render_offline` — returns bytes byte-identical to the 2-arg golden above. Constraint
+  // 6: the pin changed batch COHERENCE, not pixels.
   const ace::commands::RenderFn shipped =
-      [&doc](const arbc::Affine& cam, int width, int height,
+      [&doc](const arbc::DocStatePtr& pin, const arbc::Affine& cam, int width, int height,
              const std::optional<Rgba8>& background) -> ace::render::Srgb8Image {
     if (!background) {
-      return ace::render::render_document_srgb8(*doc, width, height, cam);
+      return ace::render::render_document_srgb8_pinned(*doc, pin, width, height, cam);
     }
-    return ace::render::render_document_srgb8_over(
-        *doc, width, height, cam, {background->r, background->g, background->b, background->a});
+    return ace::render::render_document_srgb8_over_pinned(
+        *doc, pin, width, height, cam,
+        {background->r, background->g, background->b, background->a});
   };
-  CHECK(shipped(camera, 64, 64, std::nullopt).pixels == image.pixels);
+  CHECK(shipped(doc->pin(), camera, 64, 64, std::nullopt).pixels == image.pixels);
+  // A null pin renders nothing (the library's UnsupportedFormat), surfaced as an empty
+  // image — never a crash (Constraint 4).
+  CHECK(shipped(arbc::DocStatePtr{}, camera, 64, 64, std::nullopt).pixels.empty());
 
   // …and the encoded PNG is byte-exact too (legitimate because the encoder is a
   // CHECKED-IN header with pinned settings, not a fetched dependency).
@@ -716,6 +854,15 @@ TEST_CASE("export: the filled background composites in the linear working space"
       ace::render::render_document_srgb8_over(*doc, 64, 64, camera, white);
   REQUIRE(filled.pixels.size() == transparent.pixels.size());
   CHECK(ace_test::compare_golden("export_filled_bg_64x64.rgba8", filled.pixels));
+
+  // The PINNED filled-background entry point is byte-identical to the 2-arg `_over`
+  // above — the export path takes it when a background is chosen, and Constraint 6 holds
+  // here too. A null pin degrades to an empty image, not a crash.
+  CHECK(ace::render::render_document_srgb8_over_pinned(*doc, doc->pin(), 64, 64, camera, white)
+            .pixels == filled.pixels);
+  CHECK(ace::render::render_document_srgb8_over_pinned(*doc, arbc::DocStatePtr{}, 64, 64, camera,
+                                                       white)
+            .pixels.empty());
 
   // An opaque background yields a fully opaque image (what the panel's report surfaces).
   for (std::size_t i = 3; i < filled.pixels.size(); i += 4) {
@@ -831,19 +978,19 @@ TEST_CASE("export: a job still running at teardown is joined before the document
       ExportService service(threads, fs);
       service.set_shot_camera(real_shot_camera());
       // The renderer READS the document — exactly what makes a missed join fatal.
-      service.set_renderer([&doc, &worker_running, &rendered](const arbc::Affine&, int width,
-                                                              int height,
-                                                              const std::optional<Rgba8>&) {
-        worker_running.store(true);
-        rendered.fetch_add(1);
-        (void)ace::scene::cameras(*doc.document);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        Srgb8Image image;
-        image.width = width;
-        image.height = height;
-        image.pixels.assign(static_cast<std::size_t>(width) * height * 4, 128);
-        return image;
-      });
+      service.set_renderer(
+          [&doc, &worker_running, &rendered](const arbc::DocStatePtr&, const arbc::Affine&,
+                                             int width, int height, const std::optional<Rgba8>&) {
+            worker_running.store(true);
+            rendered.fetch_add(1);
+            (void)ace::scene::cameras(*doc.document);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            Srgb8Image image;
+            image.width = width;
+            image.height = height;
+            image.pixels.assign(static_cast<std::size_t>(width) * height * 4, 128);
+            return image;
+          });
       REQUIRE(service.start(plan_export(*doc.document, ids, options, real_shot_camera()), options));
       // Wait until the worker is genuinely IN the document — the shell's frame loop is
       // what does this in production. Then leave the scope with the job in flight:

@@ -258,8 +258,11 @@ TEST_CASE("contact_sheet e2e: the Export panel writes one tiled sheet, opt-in, w
 
   // The shipped renderer callable, held by name so the test body can recompose a sheet
   // with the IDENTICAL renderer the service used (phase 6).
+  // The recompose-and-byte-compare below renders through the 2-arg path; this lane
+  // asserts sheet composition, not batch pinning, so the closure ignores the batch pin
+  // (the pin is exercised in export_test.cpp / canvas_host_test.cpp / export_e2e_test.cpp).
   const ace::commands::RenderFn render_fn =
-      [&state](const arbc::Affine& camera, int width, int height,
+      [&state](const arbc::DocStatePtr&, const arbc::Affine& camera, int width, int height,
                const std::optional<ace::commands::Rgba8>& background) {
         if (!background) {
           return ace::render::render_document_srgb8(state.document(), width, height, camera);
@@ -482,7 +485,8 @@ TEST_CASE("contact_sheet e2e: the Export panel writes one tiled sheet, opt-in, w
     const std::optional<ace::commands::Rgba8> opaque_black = ace::commands::Rgba8{0, 0, 0, 255};
     std::vector<ace::commands::Srgb8Image> renders;
     for (const ace::commands::ContactTile& tile : replay.tiles) {
-      renders.push_back((*e2e->render)(tile.render_camera, tile.width, tile.height, opaque_black));
+      renders.push_back((*e2e->render)(arbc::DocStatePtr{}, tile.render_camera, tile.width,
+                                       tile.height, opaque_black));
     }
     const ace::commands::Srgb8Image recomposed =
         ace::commands::compose_contact_sheet(replay, renders, opaque_black);
@@ -528,8 +532,8 @@ TEST_CASE("contact_sheet e2e: the Export panel writes one tiled sheet, opt-in, w
     IM_CHECK(accented_replay.tiles[1].caption == "Café"); // fits the tile, drawn in full
     std::vector<ace::commands::Srgb8Image> accented_renders;
     for (const ace::commands::ContactTile& tile : accented_replay.tiles) {
-      accented_renders.push_back(
-          (*e2e->render)(tile.render_camera, tile.width, tile.height, std::nullopt));
+      accented_renders.push_back((*e2e->render)(arbc::DocStatePtr{}, tile.render_camera, tile.width,
+                                                tile.height, std::nullopt));
     }
     const ace::commands::Srgb8Image accented =
         ace::commands::compose_contact_sheet(accented_replay, accented_renders, std::nullopt);

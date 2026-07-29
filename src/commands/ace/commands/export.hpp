@@ -49,6 +49,13 @@
 
 namespace arbc {
 class Document;
+// A pin of a document version (`Document::pin()`), a `shared_ptr<const DocRoot>` that
+// RETAINS its version. `commands` already reads `pin()->revision()` (app_state.cpp), so
+// holding one is within its existing `arbc` dependency — no new include or DAG edge
+// (Constraint 7). Forward-declared here (like `Document`) rather than pulling the model
+// header into this L1 surface; identical to `arbc/model/model.hpp`'s alias.
+class DocRoot;
+using DocStatePtr = std::shared_ptr<const DocRoot>;
 } // namespace arbc
 
 namespace ace::commands {
@@ -182,27 +189,46 @@ struct ExportReport {
   std::size_t refused = 0;
   ExportState state = ExportState::Idle;
   std::string reason; // carried from the plan when there was nothing to do
-  // Batch coherence is REPORTED, not enforced (D-export-8): `render_offline` pins the
-  // CURRENT version per call, so an edit landing mid-batch can make item 3 reflect a
-  // document item 1 did not. Blocking edits contradicts D14's async promise and A4's
-  // responsive UI; freezing the version is not available (the library renders a
-  // `const Document&`, not a pin). Two `revision()` reads turn a silent incoherence
-  // into a stated one.
+  // Batch coherence is ENFORCED, not reported (D-pinned-1/2, superseding D-export-8):
+  // `run_export` takes ONE `arbc::DocStatePtr` before the first item and renders every
+  // item and the contact sheet against that frozen version through libarbc #27's 4-arg
+  // `render_offline`, so an edit landing mid-batch can no longer make item 3 reflect a
+  // state item 1 did not. These two fields are therefore INFORMATIONAL, not a warning:
+  // `start_revision` is the PINNED version the whole batch rendered; `end_revision` is
+  // the LIVE document version at completion; the flag is `end != start`, meaning "the
+  // on-screen document advanced past what you exported" — the user's post-Export edits
+  // are NOT in the output (the batch was pinned before them), which is real information,
+  // never a claim the output is incoherent.
   std::uint64_t start_revision = 0;
   std::uint64_t end_revision = 0;
   bool document_changed_during_export = false;
 };
 
-// The injected offline render (D-export-1). `background` nullopt = transparent.
-using RenderFn = std::function<Srgb8Image(const arbc::Affine& camera, int width, int height,
-                                          const std::optional<Rgba8>& background)>;
+// The injected offline render (D-export-1/D-pinned-1). `pin` is the ONE `DocStatePtr`
+// the batch pinned; every item and the contact sheet render against it, so the render is
+// version-stable across the batch. `background` nullopt = transparent. A null `pin`
+// renders nothing (an empty image), surfaced as a failed item — never a crash
+// (Constraint 4). A stub renderer that ignores `pin` keeps the headless matrix working.
+using RenderFn =
+    std::function<Srgb8Image(const arbc::DocStatePtr& pin, const arbc::Affine& camera, int width,
+                             int height, const std::optional<Rgba8>& background)>;
+
+// The injected once-per-batch document pin (D-pinned-1): `run_export` calls this ONCE
+// before the first item and hands the result to every `RenderFn` call. Bound at L4 to
+// `[]{ return app_state.document().pin(); }`. Empty (a pure-stub runner) leaves the pin
+// null, on which `start_revision` falls back to `RevisionFn` so the headless cases keep
+// working.
+using PinFn = std::function<arbc::DocStatePtr()>;
 
 // The injected comp -> device render-camera derivation: `interact::viewport_camera_for_shot`.
 using ShotCameraFn = std::function<arbc::Affine(const arbc::Affine& frame, int native_w,
                                                 int native_h, int out_w, int out_h)>;
 
-// The injected any-thread document-revision read (`document.pin()->revision()`), for
-// D-export-8's coherence flag. Empty leaves both revisions 0 and the flag false.
+// The injected any-thread document-revision read (`document.pin()->revision()`). Now the
+// LIVE-END read (D-pinned-2): `end_revision` is this value at completion, while
+// `start_revision` is the pinned version. Also the `start_revision` FALLBACK when no
+// `PinFn` is installed (a pure-stub runner). Empty leaves both revisions 0 and the flag
+// false.
 using RevisionFn = std::function<std::uint64_t()>;
 
 // The injected progress publication (A18). Empty publishes nothing.
@@ -280,7 +306,11 @@ struct ExportRunner {
   // Checked BETWEEN items, and between contact-sheet TILES (Constraint 10): a single
   // `render_offline` call is not interruptible and must not be pretended otherwise.
   const std::atomic<bool>* cancel = nullptr;
-  RevisionFn revision; // optional (D-export-8)
+  RevisionFn revision; // optional (D-pinned-2, the live-end read)
+  // The once-per-batch pin (D-pinned-1). Called ONCE before the first item; the result
+  // rides every `render` call. Optional: a null pin flows to the library's empty-image
+  // path (Constraint 4), and leaves `start_revision` to the `RevisionFn` fallback.
+  PinFn pin;
 };
 
 // Run `plan`: for each item, render -> encode -> write, publishing a fresh progress
@@ -323,6 +353,10 @@ public:
   void set_renderer(RenderFn render);
   void set_shot_camera(ShotCameraFn shot_camera);
   void set_revision(RevisionFn revision);
+  // The once-per-batch pin provider (D-pinned-1). Installed once by L4 at bootstrap
+  // beside `set_renderer`/`set_revision`; a job started without it renders null-pinned
+  // (empty) frames, so production always binds it.
+  void set_pin(PinFn pin);
   void set_destination_picker(PickDirectoryFn picker);
 
   // The derivation the panel needs to build a plan. Never null once L4 has bound it.
@@ -363,6 +397,7 @@ private:
   RenderFn render_;
   ShotCameraFn shot_camera_;
   RevisionFn revision_;
+  PinFn pin_;
   PickDirectoryFn pick_directory_;
   ExportPlan plan_;
   ExportOptions options_;

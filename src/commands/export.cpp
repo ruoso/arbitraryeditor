@@ -216,7 +216,21 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
     runner.publish(progress);
   };
 
-  if (runner.revision) {
+  // One pin for the whole batch (Constraint 1 / D-pinned-1): taken ONCE here, held across
+  // every item AND the contact-sheet phase, and dropped when this function returns. Every
+  // render — item and tile — renders against it, so an edit landing mid-batch cannot
+  // change any output. A null pin (a pure-stub runner with no `PinFn`) flows to the
+  // library's empty-image path per render (Constraint 4), never a crash.
+  const arbc::DocStatePtr pin = runner.pin ? runner.pin() : arbc::DocStatePtr{};
+
+  // `start_revision` is the PINNED version the whole batch renders (D-pinned-2);
+  // `end_revision` starts equal and is re-read LIVE at completion. The injected
+  // `RevisionFn` is the fallback for a stub runner that supplies no pin, so the existing
+  // headless cases keep reporting.
+  if (pin) {
+    report.start_revision = pin->revision();
+    report.end_revision = report.start_revision;
+  } else if (runner.revision) {
     report.start_revision = runner.revision();
     report.end_revision = report.start_revision;
   }
@@ -268,7 +282,7 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
       ++report.refused;
     } else {
       const Srgb8Image image =
-          runner.render(item.render_camera, item.width, item.height, options.background);
+          runner.render(pin, item.render_camera, item.width, item.height, options.background);
       const std::size_t expected =
           static_cast<std::size_t>(item.width) * static_cast<std::size_t>(item.height) * 4;
       if (image.width != item.width || image.height != item.height ||
@@ -332,7 +346,7 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
         // D-sheet-1: one call to the SAME injected renderer the batch uses, at the
         // tile's own fitted size. No resample, no filter, no second code path.
         renders.push_back(
-            runner.render(tile.render_camera, tile.width, tile.height, options.background));
+            runner.render(pin, tile.render_camera, tile.width, tile.height, options.background));
         ++done;
       }
       // A half-composed grid is a byte-valid PNG indistinguishable from a complete
@@ -372,6 +386,11 @@ ExportReport run_export(const ExportPlan& plan, const ExportOptions& options,
   }
 
   report.state = cancelled ? ExportState::Cancelled : ExportState::Finished;
+  // The LIVE end read (D-pinned-2): `end_revision` is where the on-screen document stands
+  // now, `start_revision` is the frozen version this batch rendered, and the flag is
+  // informational — `end != start` means the live document advanced PAST the exported
+  // version (the user's post-Export edits are not in the output), never that the output
+  // is incoherent.
   if (runner.revision) {
     report.end_revision = runner.revision();
     report.document_changed_during_export = report.end_revision != report.start_revision;
@@ -402,6 +421,8 @@ void ExportService::set_shot_camera(ShotCameraFn shot_camera) {
 }
 
 void ExportService::set_revision(RevisionFn revision) { revision_ = std::move(revision); }
+
+void ExportService::set_pin(PinFn pin) { pin_ = std::move(pin); }
 
 void ExportService::set_destination_picker(PickDirectoryFn picker) {
   pick_directory_ = std::move(picker);
@@ -441,6 +462,10 @@ bool ExportService::start(ExportPlan plan, ExportOptions options) {
   runner.filesystem = &filesystem_;
   runner.cancel = &cancel_;
   runner.revision = revision_;
+  // The pin is taken ONCE inside `run_export` (on the export thread) via this provider,
+  // then held for the whole batch (D-pinned-1). Passing the provider rather than a pin
+  // means the frozen version is the one current when the job actually starts rendering.
+  runner.pin = pin_;
   // A18: the worker never mutates a shared struct — it builds a self-contained value
   // and REPLACES the published pointer, so a snapshot the UI holds stays valid and
   // internally consistent across any number of later publications.

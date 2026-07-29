@@ -6,9 +6,16 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 namespace arbc {
 class Document;
+// A pin of a document version (`Document::pin()`), a `shared_ptr<const DocRoot>` that
+// RETAINS its version — forward-declared here (matching the `Document` forward decl
+// above) so the pinned export entry points can name it without pulling the model
+// header into this L2 surface. Identical to `arbc/model/model.hpp`'s alias.
+class DocRoot;
+using DocStatePtr = std::shared_ptr<const DocRoot>;
 } // namespace arbc
 
 namespace ace::render {
@@ -40,6 +47,19 @@ using Srgb8Image = base::Srgb8Image;
 Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height,
                                  const arbc::Affine& camera = arbc::Affine::identity());
 
+// `render_document_srgb8` against a version the CALLER pinned (libarbc #27's 4-arg
+// `render_offline(document, state, viewport, backend)`, `arbc/runtime/offline.hpp:42`).
+// A batch export pins ONCE and renders every item and the contact sheet against the
+// one frozen `DocStatePtr`, so a writer commit mid-batch cannot make item 3 reflect a
+// state item 1 did not (editor.cameras.export_pinned, A20). Byte-identical to the 2-arg
+// `render_document_srgb8` when `state` is a pin of `document`'s current version — the
+// pin changes batch COHERENCE, not pixels. A null pin renders nothing and returns an
+// empty image (the library's `SurfaceError::UnsupportedFormat` on a null pin), which the
+// export kernel surfaces as a failed item rather than a crash (Constraint 4).
+Srgb8Image render_document_srgb8_pinned(const arbc::Document& document,
+                                        const arbc::DocStatePtr& state, int width, int height,
+                                        const arbc::Affine& camera);
+
 // `render_document_srgb8` with a FILLED background composited underneath the frame
 // (D14's transparent-vs-filled knob; D-export-5). `background` is one straight-alpha
 // sRGB8 RGBA quad, in the same encoding the returned image uses.
@@ -62,6 +82,15 @@ Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int 
 Srgb8Image render_document_srgb8_over(const arbc::Document& document, int width, int height,
                                       const arbc::Affine& camera,
                                       std::array<std::uint8_t, 4> background);
+
+// `render_document_srgb8_over` against a caller-pinned version, the filled-background
+// sibling of `render_document_srgb8_pinned` (same #27 4-arg overload, same null-pin →
+// empty-image posture). The batch export takes this path when a filled background is
+// chosen; the working-space composite is identical to the 2-arg `_over`.
+Srgb8Image render_document_srgb8_over_pinned(const arbc::Document& document,
+                                             const arbc::DocStatePtr& state, int width, int height,
+                                             const arbc::Affine& camera,
+                                             std::array<std::uint8_t, 4> background);
 
 // The probe convenience: build the probe document (ace::project) and render it.
 Srgb8Image render_probe_srgb8(int width, int height);

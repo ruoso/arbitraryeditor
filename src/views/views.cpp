@@ -455,10 +455,18 @@ void draw_export(commands::ExportService& service, commands::AppState& state,
     if (report->contact_sheet && !report->contact_sheet->message.empty()) {
       ImGui::TextWrapped("%s", report->contact_sheet->message.c_str());
     }
-    // D-export-8: batch coherence is REPORTED, not enforced — an edit that landed
-    // mid-batch is stated rather than silently mixed in.
+    // D-pinned-2 (superseding D-export-8): the batch is coherent by construction — one
+    // pin froze the version every item and the sheet rendered — so this flag is now
+    // INFORMATIONAL, not a warning. It fires when the live document advanced past the
+    // exported version, i.e. edits made after Export are not in the output. A stale
+    // "your export might be incoherent" notice would be worse than none. Drawn as a
+    // disabled (non-interactive) row carrying a stable ###id so the e2e can assert the
+    // note is surfaced exactly when the flag is set.
     if (report->document_changed_during_export) {
-      ImGui::TextDisabled("The document changed during this export.");
+      ImGui::BeginDisabled();
+      ImGui::Selectable("Exported the document as it was when the export started; it has "
+                        "changed since.###export_changed_notice");
+      ImGui::EndDisabled();
     }
   }
 }

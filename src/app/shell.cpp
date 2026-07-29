@@ -1,5 +1,6 @@
 #include <ace/app/camera_inspector.hpp>
 #include <ace/app/canvas_view.hpp>
+#include <ace/app/export_wiring.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
@@ -459,18 +460,17 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     // releases the `Document` a running export is reading (Constraint 8). The explicit
     // join below makes that ordering visible rather than incidental.
     ace::commands::ExportService export_service(threads, filesystem);
-    export_service.set_renderer([&app_state](const arbc::Affine& camera, int width, int height,
-                                             const std::optional<ace::commands::Rgba8>& background)
-                                    -> ace::render::Srgb8Image {
-      if (!background) {
-        return ace::render::render_document_srgb8(app_state.document(), width, height, camera);
-      }
-      return ace::render::render_document_srgb8_over(
-          app_state.document(), width, height, camera,
-          {background->r, background->g, background->b, background->a});
-    });
+    // The renderer forwards the batch's ONE pin into libarbc #27's caller-pinned
+    // `render_offline` (A20 / editor.cameras.export_pinned), so every item and the contact
+    // sheet render one frozen version; the pin rides through the injection as data, so
+    // `commands` still never calls `render` (Constraint 2). Factored into
+    // `make_export_renderer` so the export e2e drives THIS closure rather than a twin.
+    export_service.set_renderer(make_export_renderer(app_state));
     export_service.set_shot_camera(&ace::interact::viewport_camera_for_shot);
     export_service.set_revision([&app_state] { return app_state.document().pin()->revision(); });
+    // The once-per-batch pin: the export job pins the current version before its first
+    // item and renders the whole batch against it (D-pinned-1). Lock-free, any-thread.
+    export_service.set_pin([&app_state] { return app_state.document().pin(); });
     if (folder_dialog) {
       ace::app::FolderDialog& dialog = *folder_dialog;
       export_service.set_destination_picker(

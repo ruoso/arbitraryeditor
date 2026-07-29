@@ -15,24 +15,23 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 
 namespace ace::render {
+namespace {
 
-const char* name() { return "render"; }
+// The offline render result, whichever overload produced it: pin-per-call or
+// caller-pinned. A failed render (an unstorable working space, or a null pin on the
+// #27 overload) is `!has_value()`, on which every entry point returns an empty image.
+using FrameResult = arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError>;
 
-Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height,
-                                 const arbc::Affine& camera) {
-  arbc::CpuBackend backend;
-  const arbc::Viewport viewport{width, height, camera};
-  // render_offline sources the root composition as the anchor and returns the
-  // frame in the composition's working space (premultiplied linear rgba32f).
-  const auto frame = arbc::render_offline(document, viewport, backend);
-  // A straight-alpha sRGB8 target; convert() does the un-premultiply + gamma
-  // encode the library owns (D-render_probe-4), leaving the editor the
-  // invisible translator (D10) rather than an owner of colour math.
+// The straight-alpha sRGB8 tail shared by the pin-per-call and caller-pinned entry
+// points: a straight-alpha target; convert() does the un-premultiply + gamma encode the
+// library owns (D-render_probe-4), leaving the editor the invisible translator (D10)
+// rather than an owner of colour math. Empty image on the (defensive) error path.
+Srgb8Image to_srgb8(arbc::CpuBackend& backend, const FrameResult& frame, int width, int height) {
   const auto srgb = backend.make_surface(width, height, arbc::k_fast_rgba8srgb);
-
   Srgb8Image image;
   if (frame.has_value() && srgb.has_value()) {
     backend.convert(**srgb, **frame);
@@ -44,22 +43,17 @@ Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int 
   return image;
 }
 
-Srgb8Image render_document_srgb8_over(const arbc::Document& document, int width, int height,
-                                      const arbc::Affine& camera,
-                                      std::array<std::uint8_t, 4> background) {
-  arbc::CpuBackend backend;
-  const arbc::Viewport viewport{width, height, camera};
-  const auto frame = arbc::render_offline(document, viewport, backend);
+// The filled-background tail: a second surface in the SAME working space the frame came
+// back in (whatever the composition configured), so the background fill and the
+// source-over blend both happen in linear premultiplied floats — never over the encoded
+// sRGB8 bytes (D10 / D-export-5). Empty image on the (defensive) error path.
+Srgb8Image to_srgb8_over(arbc::CpuBackend& backend, const FrameResult& frame, int width, int height,
+                         std::array<std::uint8_t, 4> background) {
   const auto srgb = backend.make_surface(width, height, arbc::k_fast_rgba8srgb);
-
   Srgb8Image image;
   if (!frame.has_value() || !srgb.has_value()) {
     return image;
   }
-  // A second surface in the SAME working space the frame came back in (whatever the
-  // composition configured), so the background fill and the source-over blend both
-  // happen in linear premultiplied floats — never over the encoded sRGB8 bytes
-  // (D10 / D-export-5).
   const auto filled = backend.make_surface(width, height, (*frame)->format());
   if (!filled.has_value()) {
     return image;
@@ -83,6 +77,49 @@ Srgb8Image render_document_srgb8_over(const arbc::Document& document, int width,
   image.height = height;
   image.pixels.assign(bytes.begin(), bytes.end());
   return image;
+}
+
+} // namespace
+
+const char* name() { return "render"; }
+
+Srgb8Image render_document_srgb8(const arbc::Document& document, int width, int height,
+                                 const arbc::Affine& camera) {
+  arbc::CpuBackend backend;
+  const arbc::Viewport viewport{width, height, camera};
+  // render_offline sources the root composition as the anchor and returns the
+  // frame in the composition's working space (premultiplied linear rgba32f).
+  return to_srgb8(backend, arbc::render_offline(document, viewport, backend), width, height);
+}
+
+Srgb8Image render_document_srgb8_pinned(const arbc::Document& document,
+                                        const arbc::DocStatePtr& state, int width, int height,
+                                        const arbc::Affine& camera) {
+  arbc::CpuBackend backend;
+  const arbc::Viewport viewport{width, height, camera};
+  // The #27 4-arg overload renders `state`'s retained version rather than pinning the
+  // current one, so a batch that passes one `state` to every call renders one frozen
+  // frame regardless of concurrent writer commits (A20 / editor.cameras.export_pinned).
+  return to_srgb8(backend, arbc::render_offline(document, state, viewport, backend), width, height);
+}
+
+Srgb8Image render_document_srgb8_over(const arbc::Document& document, int width, int height,
+                                      const arbc::Affine& camera,
+                                      std::array<std::uint8_t, 4> background) {
+  arbc::CpuBackend backend;
+  const arbc::Viewport viewport{width, height, camera};
+  return to_srgb8_over(backend, arbc::render_offline(document, viewport, backend), width, height,
+                       background);
+}
+
+Srgb8Image render_document_srgb8_over_pinned(const arbc::Document& document,
+                                             const arbc::DocStatePtr& state, int width, int height,
+                                             const arbc::Affine& camera,
+                                             std::array<std::uint8_t, 4> background) {
+  arbc::CpuBackend backend;
+  const arbc::Viewport viewport{width, height, camera};
+  return to_srgb8_over(backend, arbc::render_offline(document, state, viewport, backend), width,
+                       height, background);
 }
 
 Srgb8Image render_probe_srgb8(int width, int height) {
