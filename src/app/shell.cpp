@@ -344,14 +344,6 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
       }
       return doc.pending_external_loads() > 0;
     });
-    ace::views::register_view_body(
-        ace::dockmodel::ViewType::Canvas, [&canvas](std::string_view view_id) {
-          // The dockspace owns the canvas#N window; render at the
-          // pane's pixel size (Constraint 7). A degenerate pane
-          // draws nothing.
-          const ImVec2 avail = ImGui::GetContentRegionAvail();
-          canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y));
-        });
     // The History view IS the undo journal made visible and click-navigable (D18
     // "History is a view"; editor.panels.history). It reads the one owned session's
     // journal and loops the shipped undo/redo verbs, so the body captures the same
@@ -372,6 +364,19 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     // it renders each open view by its instance id and syncs the tab ✕ back into
     // the authoritative DockLayout.
     ace::dock::Dockspace dockspace;
+    // The Canvas view body: draws each canvas#N pane at its pixel size (Constraint 7; a degenerate
+    // pane draws nothing) and routes the plain pointer gesture by the rail's ACTIVE MODAL TOOL
+    // (editor.canvas.tool_dispatch, D20). The active tool lives on `Dockspace::tools()` (A11), so
+    // this registration is deferred until AFTER `dockspace` is declared — the wiring gap the leaf
+    // closes: previously the body captured only `[&canvas]` and had no path to the tool state.
+    // Cleared at teardown (below) before `dockspace`/`canvas` are destroyed; the seam is
+    // process-global.
+    ace::views::register_view_body(
+        ace::dockmodel::ViewType::Canvas, [&canvas, &dockspace](std::string_view view_id) {
+          const ImVec2 avail = ImGui::GetContentRegionAvail();
+          canvas.draw_content(view_id, static_cast<int>(avail.x), static_cast<int>(avail.y),
+                              dockspace.tools().active());
+        });
     // The saved-workspace preset store (editor.dock.workspaces): persisted through
     // the native FileSystem seam (the same one the session bootstrap used) under
     // the per-user prefs root. Wired into the dockspace so the rail's switcher can

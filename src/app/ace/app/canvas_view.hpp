@@ -1,6 +1,8 @@
 #pragma once
 
+#include <ace/app/tool_dispatch.hpp>
 #include <ace/app/view_framing.hpp>
+#include <ace/dockmodel/tool_rail.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/interact/pick.hpp>
 #include <ace/platform/threads.hpp>
@@ -75,7 +77,15 @@ public:
   // `pane_height` device pixels (the dockspace owns Begin/End + the tab ✕). Lazily adds
   // the host entry + presenter on this id's first appearance. A zero/degenerate pane
   // renders nothing (Constraint 7). Requires a current GL context.
-  void draw_content(std::string_view view_id, int pane_width, int pane_height);
+  //
+  // `active_tool` is the rail's active modal tool (`dockmodel::ToolSelection::active()`, threaded
+  // from `Dockspace::tools()`; editor.canvas.tool_dispatch / D20). It routes what a plain canvas
+  // drag does — Select runs the gizmo + pick/marquee stack, Pan pans the transient viewport
+  // camera, Brush/Eyedropper are inert seams — while the always-on wheel-zoom + Space-pan run for
+  // every tool (Constraint 3). Defaults to `Select` so the many render-only / Select-behaviour
+  // e2e rigs and the offscreen smoke keep their existing (Select) behaviour unchanged.
+  void draw_content(std::string_view view_id, int pane_width, int pane_height,
+                    dockmodel::ToolId active_tool = dockmodel::ToolId::Select);
 
   // THE edit seam (D-writer_thread-11). POST `edit` to the document's one writer thread, block
   // until it has run, run the writer-turn epilogue there too, and then wake EVERY live canvas.
@@ -329,6 +339,27 @@ private:
   void draw_selection(std::string_view view_id, Presenter& p,
                       const std::vector<interact::PickTarget>& targets,
                       const views::CanvasInput& in, float origin_x, float origin_y);
+
+  // The Pan-tool arm (editor.canvas.tool_dispatch, D-nav-4 / Constraint 5): a plain left-button
+  // drag pans the transient viewport camera `p.camera` through the SAME `interact::pan` math the
+  // always-on Space-pan uses — an ADDITIONAL left-button pan path ON TOP of Space, not a
+  // replacement (Constraint 3). Transient only: it mutates UI-thread session state and rides the
+  // per-frame `request_camera` submit, so it opens no `transact`, journals nothing, and never
+  // touches `apply_edit` (D15). Skipped while Space is held so the always-on path is not
+  // double-applied. No-op when no drag is in flight.
+  void dispatch_pan(Presenter& p, const views::CanvasInput& in);
+
+  // The Brush-tool arm (editor.canvas.tool_dispatch, D-tool_dispatch-3): an INERT named seam the
+  // downstream `editor.paint.brush` fills (a dab into `org.arbc.raster`). A plain drag does nothing
+  // beyond the always-on viewport gestures — deliberately NOT a selection fallback, because D20
+  // makes the active tool decide the drag (a silent select-fallback would make "Brush is active"
+  // indistinguishable from Select until the paint leaf lands).
+  void dispatch_brush(Presenter& p, const views::CanvasInput& in);
+
+  // The Eyedropper-tool arm (editor.canvas.tool_dispatch, D-tool_dispatch-3): the inert twin of
+  // `dispatch_brush`, filled by `editor.color.color` (sample sRGB through the active camera). Inert
+  // for the same reason: the tool, not a fallback, decides the drag (D20).
+  void dispatch_eyedropper(Presenter& p, const views::CanvasInput& in);
 
   // Project `presenters_` into the pure rule's input rows, SORTED by `dockmodel::view_id_less`
   // — the map's own byte order is not the view-id order (it puts "canvas#10" before "canvas#2"),

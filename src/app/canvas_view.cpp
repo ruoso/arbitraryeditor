@@ -101,7 +101,8 @@ CanvasView::CanvasView(commands::AppState& state, writer::WriterThread& writer)
 
 CanvasView::~CanvasView() { destroy(); }
 
-void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane_height) {
+void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane_height,
+                              dockmodel::ToolId active_tool) {
   if (pane_width <= 0 || pane_height <= 0) {
     return; // degenerate pane — render nothing until it has area (Constraint 7).
   }
@@ -297,29 +298,59 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
         }
       }
 
-      // The camera-frame gizmo overlay (editor.cameras.manip; D-manip-4): hit-test/drag the
-      // shot frames in the free viewport and commit a reframe. Drawn over the pane, under the
-      // picker (which is drawn last). Free viewport only — reframing a shot is a scene edit,
-      // distinct from looking through one (D9).
-      draw_frame_gizmos(view_id, p, cameras, in, pane_origin.x, pane_origin.y);
+      // Route the plain canvas pointer gesture by the active modal tool
+      // (editor.canvas.tool_dispatch; D20 / A11 amendment). The nav gestures above (wheel-zoom,
+      // Space-pan, reset/fit, the grid and scale-bar chrome) ran ALREADY, unconditionally, so they
+      // survive under EVERY tool (Constraint 3); only the object-interaction / pan behaviour a
+      // plain drag drives is gated here. The dispatch is a compile-time-exhaustive `switch` over
+      // the closed D20 set (via the pure `dispatch_arm` mapping), never a `Tool` vtable
+      // (D-tool_dispatch-2): the `interact` math it selects among already lives in L1, and this is
+      // the sole L4 site reading the active `ToolId` to choose among it (D-tool_dispatch-1).
+      switch (dispatch_arm(active_tool)) {
+      case DispatchArm::ObjectInteraction: {
+        // Select (D7's ONE select tool): today's gizmo + pick/marquee stack, now GATED to Select
+        // (D-gizmo-2 narrows the previously always-on default to "under the Select tool" by adding
+        // this arm it owns, touching no gizmo code).
+        // The camera-frame gizmo overlay (editor.cameras.manip; D-manip-4): hit-test/drag the shot
+        // frames in the free viewport and commit a reframe. Drawn over the pane, under the picker
+        // (which is drawn last). Free viewport only — reframing a shot is a scene edit, distinct
+        // from looking through one (D9).
+        draw_frame_gizmos(view_id, p, cameras, in, pane_origin.x, pane_origin.y);
 
-      // The project-level selection over the SAME press (editor.cells.selection; D7's ONE
-      // select tool): a press over a camera border both selects that camera and starts the
-      // grab above — one gesture, not two (Constraint 11). The pick stack is assembled in L1
-      // (A17) as a plain lock-free `pin()` read; it opens no transaction and takes no lease,
-      // so this deliberately does NOT go through apply_edit (Constraint 2/12).
-      const std::vector<interact::PickTarget> targets =
-          interact::pick_targets(state_.document(), state_.registry());
-      // The cell transform gizmo (editor.cells.gizmo; D-gizmo-2): the always-on direct-
-      // manipulation transform for the ONE selected cell. Runs BEFORE draw_selection so a handle
-      // press claims the gesture (setting p.gizmo_cell) and selection leaves that press alone.
-      draw_cell_gizmos(view_id, p, targets, in, pane_origin.x, pane_origin.y);
-      // The group transform gizmo (editor.cells.group_transform; D-group_transform-5): the
-      // multi-select counterpart of the cell gizmo above. draw_cell_gizmos returns early for a
-      // ≥2 selection and this returns early for a <2 selection, so at most one owns the press;
-      // like the cell gizmo it runs BEFORE draw_selection so a handle press claims the gesture.
-      draw_group_gizmo(view_id, p, targets, in, pane_origin.x, pane_origin.y);
-      draw_selection(view_id, p, targets, in, pane_origin.x, pane_origin.y);
+        // The project-level selection over the SAME press (editor.cells.selection; D7's ONE select
+        // tool): a press over a camera border both selects that camera and starts the grab above —
+        // one gesture, not two (Constraint 11). The pick stack is assembled in L1 (A17) as a plain
+        // lock-free `pin()` read; it opens no transaction and takes no lease, so this deliberately
+        // does NOT go through apply_edit (Constraint 2/12).
+        const std::vector<interact::PickTarget> targets =
+            interact::pick_targets(state_.document(), state_.registry());
+        // The cell transform gizmo (editor.cells.gizmo; D-gizmo-2): the direct-manipulation
+        // transform for the ONE selected cell. Runs BEFORE draw_selection so a handle press claims
+        // the gesture (setting p.gizmo_cell) and selection leaves that press alone.
+        draw_cell_gizmos(view_id, p, targets, in, pane_origin.x, pane_origin.y);
+        // The group transform gizmo (editor.cells.group_transform; D-group_transform-5): the
+        // multi-select counterpart of the cell gizmo above. draw_cell_gizmos returns early for a
+        // ≥2 selection and this returns early for a <2 selection, so at most one owns the press;
+        // like the cell gizmo it runs BEFORE draw_selection so a handle press claims the gesture.
+        draw_group_gizmo(view_id, p, targets, in, pane_origin.x, pane_origin.y);
+        draw_selection(view_id, p, targets, in, pane_origin.x, pane_origin.y);
+        break;
+      }
+      case DispatchArm::ViewportPan:
+        // Pan (D-nav-4): a left-button drag pans the transient viewport camera through the same
+        // `interact::pan` math Space uses. `p.camera` is submitted below on the shared per-entry
+        // channel, so no separate commit is needed here.
+        dispatch_pan(p, in);
+        break;
+      case DispatchArm::Brush:
+        // Inert seam filled by editor.paint.brush (D-tool_dispatch-3).
+        dispatch_brush(p, in);
+        break;
+      case DispatchArm::Eyedropper:
+        // Inert seam filled by editor.color.color (D-tool_dispatch-3).
+        dispatch_eyedropper(p, in);
+        break;
+      }
     }
 
     // Submit the resolved camera — the shot's affine while looking through, else the free
@@ -402,6 +433,41 @@ void CanvasView::draw_camera_picker(std::string_view view_id, Presenter& p,
   ImGui::SameLine();
   ImGui::SetNextItemWidth(80.0F);
   ImGui::InputDouble("Spacing###grid_spacing", &p.grid_spacing, 0.0, 0.0, "%.0f");
+}
+
+void CanvasView::dispatch_pan(Presenter& p, const views::CanvasInput& in) {
+  // The Pan tool's left-button drag (editor.canvas.tool_dispatch, D-nav-4 / Constraint 5). Pan the
+  // transient viewport camera by this frame's pointer delta through the SAME `interact::pan` math
+  // the always-on Space-pan uses (canvas_view.cpp above), so the two paths are pixel-identical —
+  // the Pan tool is an ADDITIONAL left-button pan ON TOP of Space, never a replacement (Constraint
+  // 3). `in.down` is true only while a drag that PRESSED over this pane's `##canvas_nav` is held,
+  // so `io.MouseDelta` is exactly that drag's per-frame delta (the same guard the Space path uses
+  // via `IsItemActive()`); skip when `in.panning` so a Space-held drag is not panned twice. The
+  // result rides `p.camera` into the shared per-frame `request_camera` submit below — transient
+  // session state, no `transact`, no journal entry, no `apply_edit` (D15).
+  if (in.down && !in.panning) {
+    const ImVec2 delta = ImGui::GetIO().MouseDelta;
+    if (delta.x != 0.0F || delta.y != 0.0F) {
+      p.camera = interact::pan(p.camera, delta.x, delta.y);
+    }
+  }
+}
+
+void CanvasView::dispatch_brush(Presenter& p, const views::CanvasInput& in) {
+  // An INERT seam (editor.canvas.tool_dispatch, D-tool_dispatch-3): editor.paint.brush fills this
+  // arm with the raster-dab stroke math. A plain Brush drag does nothing beyond the always-on
+  // viewport gestures, and deliberately does NOT fall back to selection (D20: the tool decides the
+  // drag). No state is touched until the paint leaf lands.
+  (void)p;
+  (void)in;
+}
+
+void CanvasView::dispatch_eyedropper(Presenter& p, const views::CanvasInput& in) {
+  // An INERT seam (editor.canvas.tool_dispatch, D-tool_dispatch-3): editor.color.color fills this
+  // arm with the sRGB-through-the-active-camera sample. Inert twin of `dispatch_brush` — the tool,
+  // not a fallback, decides the drag (D20).
+  (void)p;
+  (void)in;
 }
 
 void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,

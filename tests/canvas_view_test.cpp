@@ -6,6 +6,8 @@
 // path composes byte-for-byte like the offline render_offline reference
 // (render_probe). The inline executor (WorkerPoolConfig{}) makes the frame
 // deterministic and byte-exact (D-canvas_view-2).
+#include <ace/app/tool_dispatch.hpp>
+#include <ace/dockmodel/tool_rail.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/canvas_renderer.hpp>
 #include <ace/render/render.hpp>
@@ -92,4 +94,25 @@ TEST_CASE("canvas_view: interactive golden matches the offline reference byte-fo
   //    framing. This is the guarantee A6's Backend seam rests on.
   const Srgb8Image offline = ace::render::render_document_srgb8(*probe.document, k_w, k_h);
   CHECK(interactive.pixels == offline.pixels);
+}
+
+// editor.canvas.tool_dispatch (D20 / A11 amendment): the closed-set canvas routing seam. The
+// per-tool BEHAVIOUR is e2e-tested against a live canvas (tests/tool_dispatch_e2e_test.cpp); this
+// pins the pure arm-SELECTION mapping headless, so the closed-set/exhaustiveness invariant — every
+// D20 tool maps to exactly one arm — is provable in the ImGui-free lane. One case per tool; a
+// fifth `dockmodel::ToolId` (which the exhaustive, `default`-free switch in `dispatch_arm` would
+// reject at compile time) would also leave a hole here.
+TEST_CASE("tool_dispatch: each modal tool maps to its canvas dispatch arm") {
+  using ace::app::dispatch_arm;
+  using ace::app::DispatchArm;
+  using ace::dockmodel::ToolId;
+
+  CHECK(dispatch_arm(ToolId::Select) == DispatchArm::ObjectInteraction);
+  CHECK(dispatch_arm(ToolId::Pan) == DispatchArm::ViewportPan);
+  CHECK(dispatch_arm(ToolId::Brush) == DispatchArm::Brush);
+  CHECK(dispatch_arm(ToolId::Eyedropper) == DispatchArm::Eyedropper);
+
+  // The catalog is exactly the closed set the switch covers (k_tool_count == 4) — the model-side
+  // witness that no tool is left unrouted (tool_rail_test.cpp round-trips the enumerators).
+  CHECK(ace::dockmodel::k_tool_count == 4);
 }

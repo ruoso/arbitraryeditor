@@ -268,6 +268,14 @@ target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render a
 # alone (the exact idiom ace_project uses above) — invisible to scripts/check_levels.py (a test
 # target is not a src/ component), no new src-level dependency, no levelization edge.
 target_link_libraries(ace_tests PRIVATE nlohmann_json::nlohmann_json)
+# editor.canvas.tool_dispatch: the closed-set arm-selection helper `app::dispatch_arm` is a pure,
+# ImGui-free inline in `src/app/ace/app/tool_dispatch.hpp` (it names only `dockmodel::ToolId`), so
+# the ImGui-free unit lane can pin the closed-set/exhaustiveness invariant headless. Add the `app`
+# component's include dir so `tests/canvas_view_test.cpp` reaches that ONE header — NO `ace::app`
+# link (that would pull ImGui/SDL into this lane), so the target stays ImGui-free and
+# scripts/check_levels.py (which inspects src/ components, not a test target's include path) is
+# unaffected.
+target_include_directories(ace_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/app")
 # The render_offline golden compares against raw sRGB8 bytes under tests/goldens
 # (D-render_probe-6); the byte-compare helper resolves them by absolute path.
 target_compile_definitions(ace_tests PRIVATE
@@ -296,6 +304,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/cells_insert_e2e_test.cpp
                               tests/resolution_e2e_test.cpp
                               tests/selection_e2e_test.cpp
+                              tests/tool_dispatch_e2e_test.cpp
                               tests/cells_remove_e2e_test.cpp
                               tests/frame_selection_e2e_test.cpp
                               tests/new_shot_from_view_e2e_test.cpp
