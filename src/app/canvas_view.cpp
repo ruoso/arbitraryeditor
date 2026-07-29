@@ -1,6 +1,7 @@
 #include <ace/app/accent.hpp>
 #include <ace/app/canvas_view.hpp>
 #include <ace/commands/app_state.hpp>
+#include <ace/commands/cells.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/gl/gl.hpp>
 #include <ace/interact/interact.hpp>
@@ -24,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -271,6 +273,11 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       // manipulation transform for the ONE selected cell. Runs BEFORE draw_selection so a handle
       // press claims the gesture (setting p.gizmo_cell) and selection leaves that press alone.
       draw_cell_gizmos(view_id, p, targets, in, pane_origin.x, pane_origin.y);
+      // The group transform gizmo (editor.cells.group_transform; D-group_transform-5): the
+      // multi-select counterpart of the cell gizmo above. draw_cell_gizmos returns early for a
+      // ≥2 selection and this returns early for a <2 selection, so at most one owns the press;
+      // like the cell gizmo it runs BEFORE draw_selection so a handle press claims the gesture.
+      draw_group_gizmo(view_id, p, targets, in, pane_origin.x, pane_origin.y);
       draw_selection(view_id, p, targets, in, pane_origin.x, pane_origin.y);
     }
 
@@ -463,8 +470,13 @@ void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,
   }
   // A left-press over a frame handle starts the grab — only when Space is up (Space is a nav
   // pan, Constraint 7). The interior is click-through (hit_frame -> None, D7), so an interior
-  // press never grabs.
-  if (in.pressed && hover_cam != nullptr && !ImGui::IsKeyDown(ImGuiKey_Space)) {
+  // press never grabs. BUT a camera that is part of a ≥2 selection defers to the group transform
+  // gizmo (editor.cells.group_transform; D-group_transform-4): pressing its border there moves the
+  // whole group, not just this one frame. A non-selected camera (or a single selection) still
+  // reframes as before.
+  const bool in_group = state_.selection().size() >= 2 && hover_cam != nullptr &&
+                        state_.selection().contains(hover_cam->id);
+  if (in.pressed && hover_cam != nullptr && !ImGui::IsKeyDown(ImGuiKey_Space) && !in_group) {
     p.gizmo_camera = hover_cam->id;
     p.gizmo_layer = hover_cam->layer;
     p.gizmo_handle = hover_handle;
@@ -677,6 +689,231 @@ void CanvasView::draw_cell_gizmos(std::string_view view_id, Presenter& p,
   }
 }
 
+void CanvasView::draw_group_gizmo(std::string_view view_id, Presenter& p,
+                                  const std::vector<interact::PickTarget>& targets,
+                                  const views::CanvasInput& in, float origin_x, float origin_y) {
+  (void)view_id;
+  commands::Selection& selection = state_.selection();
+  const std::optional<arbc::Affine> view_inv = p.camera.inverse();
+  if (!view_inv) {
+    return; // degenerate viewport camera: no gizmo this frame
+  }
+
+  // Shown iff ≥2 objects are selected AND their kind-agnostic placed-extent union is bounded
+  // (Constraint 6). A single selection is the cell/frame gizmo's domain (D-gizmo-6); a ≥2 selection
+  // whose members are all unbounded has no box to manipulate and no pivot to derive — refuse
+  // rather than guess (D23/D24).
+  std::optional<arbc::Rect> union_extent;
+  if (selection.size() >= 2) {
+    union_extent = interact::selected_extent(targets, selection.items());
+  }
+  if (!union_extent || union_extent->empty()) {
+    if (!in.down) { // drop any stale grab / pivot once the group is no longer manipulable
+      p.gizmo_group_active = false;
+      p.gizmo_group_handle = interact::CellHandle::None;
+      p.gizmo_group_start.clear();
+    }
+    p.gizmo_group_pivot.reset();
+    p.gizmo_group_pivot_for.reset();
+    return;
+  }
+  const arbc::Rect extent = *union_extent;
+
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  auto to_screen = [&](arbc::Vec2 comp) {
+    const arbc::Vec2 dev = p.camera.apply(comp);
+    return ImVec2(origin_x + static_cast<float>(dev.x), origin_y + static_cast<float>(dev.y));
+  };
+  const arbc::Vec2 pointer_comp = view_inv->apply(arbc::Vec2{in.focus_x, in.focus_y});
+  const double scale = p.camera.max_scale();
+  const double edge_tol = scale > 0.0 ? 6.0 / scale : 0.0;
+  const double corner_tol = scale > 0.0 ? 9.0 / scale : 0.0;
+  const bool space = ImGui::IsKeyDown(ImGuiKey_Space);
+  const bool cmd = in.ctrl || in.super; // Cmd/Ctrl bypasses snap (§6:258) / gates shear
+
+  // The persistent draggable pivot: seed / reset to the union-box center when the union changes
+  // (mirrors the single-object pivot keyed on the primary cell). The union box is the virtual cell
+  // placed by identity, so its pivot is the extent center.
+  if (!p.gizmo_group_pivot || p.gizmo_group_pivot_for != extent) {
+    p.gizmo_group_pivot = interact::cell_pivot(arbc::Affine::identity(), extent);
+    p.gizmo_group_pivot_for = extent;
+  }
+  arbc::Vec2 pivot = *p.gizmo_group_pivot;
+
+  const ImU32 col_handle = accent(255);
+  const ImU32 col_pivot = camera_frame(255);
+  const ImU32 col_guide = IM_COL32(255, 90, 200, 230);
+  const ImU32 col_member = accent(150);
+
+  // Stroke the union outline + 8 scale handles + pivot dot for the union box placed by `placement`.
+  auto draw_union = [&](const arbc::Affine& placement, arbc::Vec2 pv) {
+    const arbc::Vec2 tl = placement.apply({extent.x0, extent.y0});
+    const arbc::Vec2 tr = placement.apply({extent.x1, extent.y0});
+    const arbc::Vec2 br = placement.apply({extent.x1, extent.y1});
+    const arbc::Vec2 bl = placement.apply({extent.x0, extent.y1});
+    draw_list->AddQuad(to_screen(tl), to_screen(tr), to_screen(br), to_screen(bl), col_handle,
+                       2.0F);
+    const arbc::Vec2 handles[8] = {tl,
+                                   tr,
+                                   br,
+                                   bl,
+                                   {(tl.x + tr.x) * 0.5, (tl.y + tr.y) * 0.5},
+                                   {(tr.x + br.x) * 0.5, (tr.y + br.y) * 0.5},
+                                   {(br.x + bl.x) * 0.5, (br.y + bl.y) * 0.5},
+                                   {(bl.x + tl.x) * 0.5, (bl.y + tl.y) * 0.5}};
+    constexpr float hs = 3.0F;
+    for (const arbc::Vec2& q : handles) {
+      const ImVec2 s = to_screen(q);
+      draw_list->AddRectFilled(ImVec2(s.x - hs, s.y - hs), ImVec2(s.x + hs, s.y + hs), col_handle);
+    }
+    const ImVec2 sp = to_screen(pv);
+    draw_list->AddCircleFilled(sp, 4.0F, col_pivot);
+    draw_list->AddCircle(sp, 4.0F, IM_COL32(0, 0, 0, 180));
+  };
+  // A faint outline of one member placed by `place` over its own `ext` — drawn at the PREVIEWED
+  // transform so the user sees each member sliding to its target while draw_selection still strokes
+  // its origin.
+  auto draw_member = [&](const arbc::Affine& place, const arbc::Rect& ext) {
+    draw_list->AddQuad(to_screen(place.apply({ext.x0, ext.y0})),
+                       to_screen(place.apply({ext.x1, ext.y0})),
+                       to_screen(place.apply({ext.x1, ext.y1})),
+                       to_screen(place.apply({ext.x0, ext.y1})), col_member, 1.0F);
+  };
+
+  // --- an active grab: preview the group delta and commit ONE transform_cells_command on release
+  // (D-group_transform-5). Space held ⇒ the drag is a nav pan of the VIEW, inert on the group.
+  if (p.gizmo_group_active) {
+    const interact::CellHandle handle = p.gizmo_group_handle;
+    // new_union: the union box (placed by identity, extent = union) after the gesture verb about
+    // the shared pivot. old_union is identity, so the group delta D = new_union (below).
+    arbc::Affine new_union = arbc::Affine::identity();
+    std::vector<interact::SnapGuide> guides;
+    if (!space) {
+      if (handle == interact::CellHandle::Pivot) {
+        pivot = pointer_comp; // move the pivot only — UI session state, no document change
+        p.gizmo_group_pivot = pivot;
+      } else if (handle == interact::CellHandle::Body) {
+        const arbc::Affine moved = interact::move_cell(arbc::Affine::identity(),
+                                                       pointer_comp.x - p.gizmo_group_grab_comp.x,
+                                                       pointer_comp.y - p.gizmo_group_grab_comp.y);
+        // Snap the WHOLE union box against the NON-selected targets (Constraint 7): the union is
+        // the single moving box, every non-member a snap target, Cmd/Ctrl bypasses.
+        std::vector<interact::PickTarget> others;
+        for (const interact::PickTarget& t : targets) {
+          if (!selection.contains(t.id)) {
+            others.push_back(t);
+          }
+        }
+        const interact::SnapResult snap =
+            interact::snap_placement(moved, p.gizmo_group_extent, others, corner_tol, cmd);
+        new_union = snap.placement;
+        guides = snap.guides;
+      } else if (handle == interact::CellHandle::Rotate) {
+        const double angle = interact::drag_angle(pivot, p.gizmo_group_grab_comp, pointer_comp);
+        new_union = interact::rotate_cell(arbc::Affine::identity(), pivot, angle, in.shift);
+      } else if (interact::is_cell_edge(handle) && cmd) {
+        new_union = interact::shear_cell(arbc::Affine::identity(), p.gizmo_group_extent, handle,
+                                         pointer_comp, pivot);
+      } else if (interact::is_cell_scale_handle(handle)) {
+        new_union = interact::scale_cell(arbc::Affine::identity(), p.gizmo_group_extent, handle,
+                                         pointer_comp, pivot, in.shift, in.alt);
+      }
+    }
+    // Compose the one delta onto every captured member start (D-group_transform-3). old_union is
+    // identity, so `group_transform` returns compose(new_union, start) per member — matching the
+    // per-member preview outlines drawn below.
+    std::vector<arbc::Affine> starts;
+    starts.reserve(p.gizmo_group_start.size());
+    for (const std::pair<arbc::ObjectId, arbc::Affine>& m : p.gizmo_group_start) {
+      starts.push_back(m.second);
+    }
+    const std::vector<arbc::Affine> previews =
+        interact::group_transform(arbc::Affine::identity(), new_union, starts);
+
+    draw_union(new_union, pivot);
+    for (const interact::PickTarget& t : targets) {
+      if (selection.contains(t.id) && t.extent) {
+        draw_member(arbc::compose(new_union, t.placement), *t.extent);
+      }
+    }
+    for (const interact::SnapGuide& g : guides) {
+      draw_list->AddLine(to_screen(g.a), to_screen(g.b), col_guide, 1.0F);
+    }
+
+    if (in.released) {
+      // Click vs drag, keyed off ACTUAL pointer travel since the press (mirroring the cell gizmo):
+      // a press that never moved is a CLICK, not a group transform.
+      const double move_tol = scale > 0.0 ? 3.0 / scale : 0.0; // ~3 screen px of slop
+      const double dx = pointer_comp.x - p.gizmo_group_grab_comp.x;
+      const double dy = pointer_comp.y - p.gizmo_group_grab_comp.y;
+      const bool dragged = (dx * dx + dy * dy) > move_tol * move_tol;
+      if (!dragged) {
+        // A non-drag BODY press was a selection gesture all along (draw_selection skipped it
+        // because p.gizmo_group_active was set): hand it back to the pick policy so a plain click
+        // re-picks the topmost and a Cmd/Ctrl-click cycles select-behind (D7 — the gizmo must not
+        // swallow the click). A click on a handle/pivot is an inert no-op.
+        if (handle == interact::CellHandle::Body && !space) {
+          const interact::SelectionChange change = interact::click_selection(
+              targets, pointer_comp, edge_tol, corner_tol, interact::PickModifiers{in.shift, cmd},
+              selection.primary());
+          apply_selection_change(selection, change);
+        }
+      } else if (handle != interact::CellHandle::Pivot) {
+        // A real drag: build the batch of (layer, new placement) for every member whose placement
+        // actually changed and commit it as ONE transform_cells_command — one journal entry, one
+        // atomic publish (D-group_transform-1). An identity delta / Space-held drag leaves every
+        // preview == its start, so the batch is empty and nothing is dispatched (Constraint 5).
+        std::vector<commands::LayerTransform> batch;
+        batch.reserve(p.gizmo_group_start.size());
+        for (std::size_t i = 0; i < p.gizmo_group_start.size() && i < previews.size(); ++i) {
+          if (!(previews[i] == p.gizmo_group_start[i].second)) {
+            batch.push_back(commands::LayerTransform{p.gizmo_group_start[i].first, previews[i]});
+          }
+        }
+        if (!batch.empty()) {
+          apply_edit([this, batch = std::move(batch)]() mutable {
+            commands::dispatch(state_, commands::transform_cells_command(std::move(batch)));
+          });
+        }
+      }
+      p.gizmo_group_active = false;
+      p.gizmo_group_handle = interact::CellHandle::None;
+      p.gizmo_group_start.clear();
+    } else if (!in.down) { // lost activation without a release edge: drop the grab, no commit
+      p.gizmo_group_active = false;
+      p.gizmo_group_handle = interact::CellHandle::None;
+      p.gizmo_group_start.clear();
+    }
+    return;
+  }
+
+  // --- no active grab: draw the union gizmo (draw_selection strokes each member's own outline),
+  // and start a grab on a handle press over the union box.
+  draw_union(arbc::Affine::identity(), pivot);
+
+  interact::PickTarget virtual_cell;
+  virtual_cell.kind = interact::PickKind::Cell;
+  virtual_cell.placement = arbc::Affine::identity();
+  virtual_cell.extent = extent;
+  const interact::CellHandle hover =
+      interact::hit_cell(virtual_cell, pivot, pointer_comp, edge_tol, corner_tol);
+  // A left-press over any handle (or the body of the union box) starts the group grab when Space is
+  // up. Capture every selected member's (layer, start placement) so the delta always composes off
+  // the gesture start — cells AND cameras alike (D7/D-group_transform-4).
+  if (in.pressed && hover != interact::CellHandle::None && !space) {
+    p.gizmo_group_active = true;
+    p.gizmo_group_handle = hover;
+    p.gizmo_group_extent = extent;
+    p.gizmo_group_grab_comp = pointer_comp;
+    p.gizmo_group_start.clear();
+    for (const interact::PickTarget& t : targets) {
+      if (selection.contains(t.id)) {
+        p.gizmo_group_start.emplace_back(t.layer, t.placement);
+      }
+    }
+  }
+}
+
 void CanvasView::draw_selection(std::string_view view_id, Presenter& p,
                                 const std::vector<interact::PickTarget>& targets,
                                 const views::CanvasInput& in, float origin_x, float origin_y) {
@@ -713,12 +950,13 @@ void CanvasView::draw_selection(std::string_view view_id, Presenter& p,
   const bool space = ImGui::IsKeyDown(ImGuiKey_Space);
   const bool cmd = in.ctrl || in.super; // D7's "Cmd/Ctrl" needs both halves (D-selection-10)
 
-  // A press that started a cell handle-drag (draw_cell_gizmos ran first and set p.gizmo_cell) is a
-  // TRANSFORM gesture on the already-selected cell, not a selection gesture: leave it alone so it
-  // neither re-picks (which a Cmd/Ctrl-drag would misread as select-behind) nor arms a marquee. A
-  // body press that turns out to be a plain CLICK (no drag) is handed back to this policy by
-  // draw_cell_gizmos itself on the release edge, so select-behind over the selected cell survives.
-  if (in.pressed && !space && !p.gizmo_cell) {
+  // A press that started a cell handle-drag (draw_cell_gizmos ran first and set p.gizmo_cell) — or
+  // a GROUP handle-drag (draw_group_gizmo set p.gizmo_group_active) — is a TRANSFORM gesture, not a
+  // selection gesture: leave it alone so it neither re-picks (which a Cmd/Ctrl-drag would misread
+  // as select-behind) nor arms a marquee. A body press that turns out to be a plain CLICK (no drag)
+  // is handed back to this policy by the gizmo itself on the release edge, so select-behind over
+  // the selection survives.
+  if (in.pressed && !space && !p.gizmo_cell && !p.gizmo_group_active) {
     const interact::SelectionChange change =
         interact::click_selection(targets, pointer_comp, edge_tol, corner_tol,
                                   interact::PickModifiers{in.shift, cmd}, selection.primary());

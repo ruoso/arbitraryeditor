@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ace::commands {
@@ -226,6 +227,23 @@ private:
     // changes.
     std::optional<arbc::Vec2> gizmo_cell_pivot;
     std::optional<arbc::ObjectId> gizmo_cell_pivot_for;
+    // --- group transform gizmo (editor.cells.group_transform; D-group_transform-5) ----------
+    // The in-progress group handle-drag over a ≥2 selection, if any: the same transient-preview /
+    // commit-on-release shape as the cell gizmo, but the delta is composed onto EVERY selected
+    // member's placement and lands as ONE batch `transform_cells_command` (one journal entry, one
+    // atomic publish). `gizmo_group_active` is false when no grab is in flight. `gizmo_group_start`
+    // holds each member's `(layer, placement)` captured at grab, so the delta always composes off
+    // the gesture's start, never a mid-drag preview. `gizmo_group_extent` is the union box (the
+    // virtual cell the shipped verbs transform); the pivot is the union center, draggable, reset
+    // when the union geometry changes.
+    bool gizmo_group_active = false;
+    interact::CellHandle gizmo_group_handle = interact::CellHandle::None;
+    arbc::Rect gizmo_group_extent{};    // the union box at grab (the virtual-cell extent)
+    arbc::Vec2 gizmo_group_grab_comp{}; // pointer in composition at grab
+    std::vector<std::pair<arbc::ObjectId, arbc::Affine>>
+        gizmo_group_start; // (layer, start) per member
+    std::optional<arbc::Vec2> gizmo_group_pivot;
+    std::optional<arbc::Rect> gizmo_group_pivot_for; // the union box the pivot was seeded for
     // --- marquee gesture (editor.cells.selection; Constraint 1) -----------------
     // The ONLY selection-adjacent per-pane state this leaf adds — and it is a GESTURE, not a
     // selection: the one project-level `commands::Selection` lives on `AppState` (D19/A5/A7)
@@ -262,6 +280,22 @@ private:
   // `dockmodel::ToolSelection` (D-gizmo-2). `origin_x`/`origin_y` are the pane's top-left screen
   // px.
   void draw_cell_gizmos(std::string_view view_id, Presenter& p,
+                        const std::vector<interact::PickTarget>& targets,
+                        const views::CanvasInput& in, float origin_x, float origin_y);
+
+  // Draw the GROUP transform gizmo over the free-viewport pane and drive a direct-manipulation
+  // handle-drag for a ≥2 selection (editor.cells.group_transform; D-group_transform-5). Shown iff
+  // two-or-more objects are selected AND `interact::selected_extent` is non-null: it anchors the 8
+  // scale handles / rotate ring / draggable pivot / body on the selection's UNION box, previews the
+  // move / scale / rotate / shear as session state (the shipped verbs on the union box treated as
+  // one virtual cell), composes that ONE delta onto every selected member with
+  // `interact::group_transform`, and commits the whole batch as ONE `transform_cells_command`
+  // through apply_edit on release (one journal entry, one atomic publish). Kind-agnostic — cells
+  // AND cameras move together (D7/D-group_transform-4). Snapping reuses `snap_placement` on the
+  // union box; Cmd/Ctrl bypasses. Runs BEFORE draw_selection so a handle press claims the gesture
+  // (setting `p.gizmo_group_active`) and selection leaves that press alone; a non-drag body press
+  // is handed back to the pick policy on release. `origin_x`/`origin_y` are the pane's top-left px.
+  void draw_group_gizmo(std::string_view view_id, Presenter& p,
                         const std::vector<interact::PickTarget>& targets,
                         const views::CanvasInput& in, float origin_x, float origin_y);
 

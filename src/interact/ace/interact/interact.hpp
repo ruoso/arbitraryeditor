@@ -4,6 +4,8 @@
 #include <arbc/base/transform.hpp> // arbc::Affine
 
 #include <optional>
+#include <span>
+#include <vector>
 
 namespace ace::interact {
 
@@ -367,5 +369,27 @@ arbc::Affine rotate_cell(const arbc::Affine& placement, arbc::Vec2 pivot, double
 // extent/placement, or a non-finite input returns the placement unchanged.
 arbc::Affine shear_cell(const arbc::Affine& placement, const arbc::Rect& extent, CellHandle edge,
                         arbc::Vec2 pointer, arbc::Vec2 pivot);
+
+// --- Group transform (editor.cells.group_transform; D-group_transform-3) --------------------
+
+// Compose ONE affine delta across a multi-object selection: given the union box treated as one
+// virtual cell — its placement BEFORE the gesture (`old_union`) and AFTER (`new_union`, produced
+// by the shipped `move`/`scale`/`rotate`/`shear_cell` verbs on that box about the shared pivot) —
+// the group delta is `D = new_union ∘ old_union⁻¹`, and every member's new placement is
+// `D ∘ start`. Returns the recomposed placements in the SAME ORDER as `start_placements`.
+//
+// This is the ONLY new transform surface the group gizmo needs (D-group_transform-3): it reuses
+// the exact single-object math on the union box and only composes the resulting delta onto each
+// member, so it stays a pure `arbc::Affine` verb (no `scene`/UI include, headless-testable, A17).
+// Kind-agnostic — a member is just a start placement, so cells and cameras compose identically
+// (D-group_transform-4).
+//
+// A non-invertible `old_union` or a non-finite `new_union`/delta is an IDENTITY gesture: every
+// member is returned UNCHANGED (refuse-rather-than-guess, D23/D24). An empty span yields an empty
+// batch. Each member depends only on the shared delta and its own start, so the result is
+// order-independent.
+std::vector<arbc::Affine> group_transform(const arbc::Affine& old_union,
+                                          const arbc::Affine& new_union,
+                                          std::span<const arbc::Affine> start_placements);
 
 } // namespace ace::interact

@@ -244,6 +244,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/look_through_test.cpp
                          tests/camera_manip_test.cpp
                          tests/gizmo_test.cpp
+                         tests/group_transform_test.cpp
                          tests/cell_model_test.cpp
                          tests/resolution_test.cpp
                          tests/selection_test.cpp
@@ -289,6 +290,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/multi_canvas_e2e_test.cpp tests/canvas_nav_e2e_test.cpp
                               tests/look_through_e2e_test.cpp tests/camera_manip_e2e_test.cpp
                               tests/gizmo_e2e_test.cpp
+                              tests/group_transform_e2e_test.cpp
                               tests/cells_insert_e2e_test.cpp
                               tests/resolution_e2e_test.cpp
                               tests/selection_e2e_test.cpp

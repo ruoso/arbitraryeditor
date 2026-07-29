@@ -1,16 +1,13 @@
-// editor.cells.gizmo — the cell transform-gizmo UI e2e (docs §9, offscreen software-GL lane;
-// modeled on tests/camera_manip_e2e_test.cpp / tests/selection_e2e_test.cpp). Boots the shell over
-// a REAL commands::AppState, seeds two bounded raster cells + a shot, and drives the DIRECT-
-// manipulation cell gizmo in the Canvas body by raw mouse position. Asserts, over the ONE selected
-// cell (D-gizmo-2): (i) a corner drag scales the PLACEMENT through apply_edit — one journal entry,
-// placement changed, content_bounds UNCHANGED (D8) — and undo restores it; (ii) a body drag near a
-// second cell's edge SNAPS (asserted on the committed affine) and a Cmd/Ctrl-drag does NOT snap;
-// (iii) a rotate-zone drag with Shift commits a 15°-multiple rotation; (iv) an arrow-nudge is one
-// entry; (v) a Cmd/Ctrl + edge drag shears; (vi) with TWO cells selected the GROUP gizmo drives
-// one delta over both members as one entry (group_transform flips the old "two cells -> no gizmo")
-// and undo restores both; (vii) a selected camera still drives the shipped frame gizmo; and
-// (viii) Space during a body press pans the view, inert on the cell. Writer ops run on the MAIN
-// thread through apply_edit.
+// editor.cells.group_transform — the GROUP transform-gizmo UI e2e (docs §9, offscreen software-GL
+// lane; modeled on tests/gizmo_e2e_test.cpp). Boots the shell over a REAL commands::AppState, seeds
+// bounded raster cells + a snap neighbour + a shot, and drives the multi-select group gizmo in the
+// Canvas body by raw mouse position. Asserts, over a ≥2 selection (D-group_transform-*): (i) a
+// corner drag scales BOTH placements through apply_edit as ONE journal entry — the flip of the
+// single-object e2e's "two cells → no gizmo, body drag does nothing" — with content_bounds
+// UNCHANGED (D8) and one undo restoring both; (ii) a body drag SNAPS the whole union to a neighbour
+// and Cmd/Ctrl bypasses; (iii) a Shift rotate commits a 15°-multiple rotation on both; and (iv) a
+// group drag over a mixed camera+cell selection re-places the cell AND the camera frame together
+// (D7). Writer ops run on the MAIN thread through apply_edit.
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
@@ -67,16 +64,17 @@ using ace::dockmodel::ViewType;
 namespace {
 
 constexpr double k_pi = 3.14159265358979323846;
-constexpr double k_a_at = 40.0;    // cell A covers [40,100]^2
-constexpr double k_b_at = 200.0;   // cell B covers [200,260]^2
-constexpr double k_edge = 60.0;    // both cells are 60x60 rasters
-constexpr double k_cam_at = 180.0; // Hero frame covers [180,260]x[40,120]
-constexpr int k_cam_res = 80;
+constexpr double k_a_at = 40.0;  // cell A covers [40,100]^2
+constexpr double k_b_at = 160.0; // cell B covers [160,220]x[40,100]
+constexpr double k_c_at = 300.0; // cell C (snap neighbour, NOT selected) left edge at 300
+constexpr double k_edge = 60.0;  // every raster is 60x60
+constexpr double k_cam_at_y = 200.0;
+constexpr int k_cam_res = 60; // Hero frame covers [40,100]x[200,260]
 
 struct ScratchDir {
   std::filesystem::path root;
   explicit ScratchDir(const char* tag)
-      : root(std::filesystem::temp_directory_path() / (std::string("ace_gizmo_e2e_") + tag)) {
+      : root(std::filesystem::temp_directory_path() / (std::string("ace_group_e2e_") + tag)) {
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
@@ -95,25 +93,24 @@ struct Seeded {
 
 Seeded seed(AppState& state) {
   arbc::Document& doc = state.document();
-  doc.add_composition(320.0, 320.0);
+  doc.add_composition(400.0, 320.0);
   Seeded out;
-  // An OPAQUE backdrop, added FIRST so it sits at the bottom of the stack. A freshly-inserted
-  // raster cell is empty (all-transparent), and the canvas render gate withholds an
-  // all-transparent frame — so without opaque content the pane never issues its first frame and
-  // the `frames_issued >= 1` wait below times out (see tests/export_e2e_test.cpp). Being unbounded
-  // it has no extent: every body/handle pick still resolves to the raster cells (added on top of
-  // it) and it contributes no snap edge.
+  // An OPAQUE unbounded backdrop first (so the render gate issues frames — see gizmo_e2e_test.cpp).
   ace::scene::add_cell(doc, state.registry(), "org.arbc.solid", "0.15,0.2,0.25,1",
                        arbc::Affine::identity());
   const auto a = ace::scene::add_cell(doc, state.registry(), "org.arbc.raster", "60x60",
                                       arbc::Affine::translation(k_a_at, k_a_at));
   const auto b = ace::scene::add_cell(doc, state.registry(), "org.arbc.raster", "60x60",
-                                      arbc::Affine::translation(k_b_at, k_b_at));
+                                      arbc::Affine::translation(k_b_at, k_a_at));
+  // C — a NON-selected neighbour to the right of B, so a group body-move can snap the union's right
+  // edge onto C's left edge (Constraint 7).
+  ace::scene::add_cell(doc, state.registry(), "org.arbc.raster", "60x60",
+                       arbc::Affine::translation(k_c_at, k_a_at));
   out.cell_a = a.has_value() ? *a : arbc::ObjectId{};
   out.cell_b = b.has_value() ? *b : arbc::ObjectId{};
   out.camera = ace::scene::add_camera(doc, state.registry(), "Hero",
                                       ace::scene::Resolution{k_cam_res, k_cam_res},
-                                      arbc::Affine::translation(k_cam_at, k_a_at));
+                                      arbc::Affine::translation(k_a_at, k_cam_at_y));
   return out;
 }
 
@@ -155,7 +152,6 @@ struct E2EState {
   std::atomic<bool> undo_done{false};
 };
 
-// The live placement / content extent of a cell (the scene truth the gizmo edits).
 std::optional<arbc::Affine> cell_placement(AppState& state, arbc::ObjectId id) {
   for (const ace::scene::Cell& c : ace::scene::cells(state.document(), state.registry())) {
     if (c.id == id) {
@@ -183,10 +179,10 @@ arbc::Affine hero_frame(AppState& state, arbc::ObjectId id) {
 
 } // namespace
 
-TEST_CASE("gizmo e2e: cell transform gizmo — scale, snap, rotate, nudge, shear, gating") {
+TEST_CASE("group transform e2e: multi-select group gizmo — scale, snap, rotate, mixed camera") {
   ScratchDir scratch("main");
   ace::platform::NativeFileSystem fs;
-  ace::testing::WriterSession session(scratch.root / "gz");
+  ace::testing::WriterSession session(scratch.root / "gt");
   REQUIRE(session.ok());
   AppState& state = session.state();
   Seeded ids;
@@ -198,8 +194,8 @@ TEST_CASE("gizmo e2e: cell transform gizmo — scale, snap, rotate, nudge, shear
   Shell shell;
   ShellOptions opts;
   opts.headless = true;
-  opts.width = 900;
-  opts.height = 640;
+  opts.width = 1100;
+  opts.height = 700;
   REQUIRE(shell.init(opts));
 
   CanvasView canvas(state, session.writer());
@@ -230,7 +226,7 @@ TEST_CASE("gizmo e2e: cell transform gizmo — scale, snap, rotate, nudge, shear
 
   E2EState e2e{&canvas, &dockspace, &state};
   e2e.ids = ids;
-  ImGuiTest* test = IM_REGISTER_TEST(engine, "gizmo", "cell_transform_gizmo");
+  ImGuiTest* test = IM_REGISTER_TEST(engine, "group_transform", "group_gizmo");
   test->UserData = &e2e;
   test->TestFunc = [](ImGuiTestContext* ctx) {
     auto* e2e = static_cast<E2EState*>(ctx->Test->UserData);
@@ -274,147 +270,145 @@ TEST_CASE("gizmo e2e: cell transform gizmo — scale, snap, rotate, nudge, shear
       e2e->undo_done.store(false);
       ctx->Yield(2);
     };
+    // Select A then Shift-add B → a two-cell selection (the seed's opaque backdrop covers the whole
+    // plane, so an empty-canvas marquee can't arm; two clicks build the same ≥2 selection the group
+    // gizmo keys on).
+    const auto select_ab = [&]() {
+      click(at(k_a_at + 30.0, k_a_at + 30.0)); // cell A body
+      ctx->KeyDown(ImGuiMod_Shift);
+      click(at(k_b_at + 30.0, k_a_at + 30.0)); // shift-add cell B
+      ctx->KeyUp(ImGuiMod_Shift);
+      IM_CHECK(sel.size() == 2);
+    };
 
     ctx->MouseMove("canvas#1/##canvas_nav"); // establish the viewport for raw-position moves
+    select_ab();
 
-    // Select cell A (a body click; the gizmo appears next frame for the ONE selected cell).
-    click(at(55.0, 80.0));
-    IM_CHECK(sel.primary() == ids.cell_a);
-    IM_CHECK(sel.size() == 1);
-    const std::optional<arbc::Rect> bounds_seed = cell_bounds(state, ids.cell_a);
-    REQUIRE(bounds_seed.has_value());
+    // The union of A[40,100]^2 and B[160,220]x[40,100] is [40,220]x[40,100]; TL=(40,40),
+    // BR=(220,100), center pivot=(130,70).
 
-    // --- (i) corner scale: drag A's bottom-right handle out => placement scales, bounds hold. ----
+    // --- (i) corner scale over TWO cells: BOTH placements scale, ONE entry, bounds hold, undo.
+    // ---- This is the FLIP of the single-object gizmo e2e, where a two-cell body drag transformed
+    // nothing.
     {
+      const std::optional<arbc::Rect> a_bounds = cell_bounds(state, ids.cell_a);
+      const std::optional<arbc::Rect> b_bounds = cell_bounds(state, ids.cell_b);
+      REQUIRE(a_bounds.has_value());
       const std::size_t depth = journal.cursor();
-      const arbc::Affine before = *cell_placement(state, ids.cell_a);
-      drag(at(k_a_at + k_edge, k_a_at + k_edge),
-           at(k_a_at + k_edge + 40.0, k_a_at + k_edge + 40.0));
-      IM_CHECK(journal.cursor() == depth + 1); // ONE journal entry per gesture
-      const arbc::Affine after = *cell_placement(state, ids.cell_a);
-      IM_CHECK(!(after == before));                            // the placement scaled up
-      IM_CHECK(after.a > before.a);                            // ... larger
-      IM_CHECK(cell_bounds(state, ids.cell_a) == bounds_seed); // content_bounds UNCHANGED (D8)
-      undo_one();
-      IM_CHECK(*cell_placement(state, ids.cell_a) == before);
+      const arbc::Affine a0 = *cell_placement(state, ids.cell_a);
+      const arbc::Affine b0 = *cell_placement(state, ids.cell_b);
+      drag(at(220.0, 100.0), at(260.0, 140.0)); // union BR handle, dragged outward
+      IM_CHECK(journal.cursor() == depth + 1);  // the whole group is ONE journal entry
+      const arbc::Affine a1 = *cell_placement(state, ids.cell_a);
+      const arbc::Affine b1 = *cell_placement(state, ids.cell_b);
+      IM_CHECK(!(a1 == a0)); // BOTH members re-placed
+      IM_CHECK(!(b1 == b0));
+      IM_CHECK(a1.a > a0.a);                                // scaled up
+      IM_CHECK(cell_bounds(state, ids.cell_a) == a_bounds); // content_bounds UNCHANGED (D8)
+      IM_CHECK(cell_bounds(state, ids.cell_b) == b_bounds);
+      undo_one(); // ONE press restores EVERY member
+      IM_CHECK(*cell_placement(state, ids.cell_a) == a0);
+      IM_CHECK(*cell_placement(state, ids.cell_b) == b0);
     }
 
-    // --- (ii) body drag snaps A's right edge onto B's left edge; Cmd/Ctrl bypasses snap. ---------
+    // --- (ii) body drag snaps the union's right edge onto C's left edge; Cmd/Ctrl bypasses.
+    // -------
     {
       const std::size_t depth = journal.cursor();
-      drag(at(55.0, 80.0), at(55.0 + 95.0, 80.0)); // move A right toward B (right edge -> ~195)
+      const arbc::Affine a0 = *cell_placement(state, ids.cell_a);
+      // Drag the union body right by +72: union right (220) -> 292, within tol of C's left edge
+      // (300), so the whole group snaps +80 and A slides 40 -> 120.
+      drag(at(k_a_at + 30.0, k_a_at + 30.0), at(k_a_at + 30.0 + 72.0, k_a_at + 30.0));
       IM_CHECK(journal.cursor() == depth + 1);
-      const arbc::Affine snapped = *cell_placement(state, ids.cell_a);
-      IM_CHECK(snapped.tx == Catch::Approx(k_b_at - k_edge).margin(0.5)); // right edge flush on 200
+      IM_CHECK(cell_placement(state, ids.cell_a)->tx ==
+               Catch::Approx(120.0).margin(0.5)); // snapped
       undo_one();
+      IM_CHECK(*cell_placement(state, ids.cell_a) == a0);
 
       const std::size_t depth_c = journal.cursor();
       ctx->KeyDown(ImGuiMod_Ctrl); // Cmd/Ctrl bypasses snap (§6:258)
-      drag(at(55.0, 80.0), at(55.0 + 95.0, 80.0));
+      drag(at(k_a_at + 30.0, k_a_at + 30.0), at(k_a_at + 30.0 + 72.0, k_a_at + 30.0));
       ctx->KeyUp(ImGuiMod_Ctrl);
       IM_CHECK(journal.cursor() == depth_c + 1);
-      const arbc::Affine free = *cell_placement(state, ids.cell_a);
-      IM_CHECK(free.tx == Catch::Approx(k_a_at + 95.0).margin(2.0)); // NOT snapped to 140
-      IM_CHECK(!(free.tx == Catch::Approx(k_b_at - k_edge).margin(0.5)));
+      const double free_tx = cell_placement(state, ids.cell_a)->tx;
+      IM_CHECK(free_tx == Catch::Approx(112.0).margin(2.0)); // moved by the raw drag, NOT snapped
+      IM_CHECK(!(free_tx == Catch::Approx(120.0).margin(0.5)));
       undo_one();
     }
 
-    // --- (iii) a rotate-zone drag with Shift commits a 15°-multiple rotation. --------------------
-    {
-      const std::size_t depth = journal.cursor();
-      ctx->KeyDown(ImGuiMod_Shift);
-      drag(at(112.0, 112.0), at(40.0, 120.0)); // grab just outside the BR corner, sweep an angle
-      ctx->KeyUp(ImGuiMod_Shift);
-      IM_CHECK(journal.cursor() == depth + 1);
-      const arbc::Affine rot = *cell_placement(state, ids.cell_a);
-      IM_CHECK(rot.b != 0.0); // rotated (off-axis linear part)
-      const double angle = std::atan2(rot.b, rot.a);
-      IM_CHECK(std::abs(std::remainder(angle, k_pi / 12.0)) < 0.03); // a 15° multiple (Shift snap)
-      undo_one();
-    }
-
-    // --- (iv) arrow-nudge is one committed entry that translates the placement. ------------------
-    {
-      ctx->MouseMove("canvas#1/##canvas_nav"); // keep the pane hovered
-      const std::size_t depth = journal.cursor();
-      const arbc::Affine before = *cell_placement(state, ids.cell_a);
-      ctx->KeyPress(ImGuiKey_RightArrow);
-      ctx->Yield(3);
-      IM_CHECK(journal.cursor() == depth + 1);
-      const arbc::Affine after = *cell_placement(state, ids.cell_a);
-      IM_CHECK(after.tx == Catch::Approx(before.tx + ace::interact::k_cell_nudge));
-      undo_one();
-    }
-
-    // --- (v) a Cmd/Ctrl + edge drag shears (advanced modifier), about the pivot. -----------------
-    {
-      const std::size_t depth = journal.cursor();
-      ctx->KeyDown(ImGuiMod_Ctrl);
-      drag(at(70.0, k_a_at), at(100.0, k_a_at)); // the TOP edge handle, dragged horizontally
-      ctx->KeyUp(ImGuiMod_Ctrl);
-      IM_CHECK(journal.cursor() == depth + 1);
-      const arbc::Affine sheared = *cell_placement(state, ids.cell_a);
-      IM_CHECK(sheared.c != 0.0); // a real off-diagonal shear
-      undo_one();
-    }
-
-    // --- (vi) with TWO cells selected, the GROUP gizmo drives one delta over BOTH: a body drag
-    // moves every member as ONE journal entry (editor.cells.group_transform flips the old single-
-    // object "two cells -> no gizmo", D-group_transform-5), and undo restores both in one press.
+    // --- (iii) a rotate-zone drag with Shift rotates BOTH members by a 15° multiple, one entry.
     // ---
     {
+      const std::size_t depth = journal.cursor();
+      const arbc::Affine a0 = *cell_placement(state, ids.cell_a);
+      const arbc::Affine b0 = *cell_placement(state, ids.cell_b);
       ctx->KeyDown(ImGuiMod_Shift);
-      click(at(k_b_at + 30.0, k_b_at + 30.0)); // shift-add cell B
+      drag(at(232.0, 112.0), at(150.0, 180.0)); // just outside the union BR corner, sweep an angle
+      ctx->KeyUp(ImGuiMod_Shift);
+      IM_CHECK(journal.cursor() == depth + 1);
+      const arbc::Affine a1 = *cell_placement(state, ids.cell_a);
+      const arbc::Affine b1 = *cell_placement(state, ids.cell_b);
+      IM_CHECK(!(a1 == a0));
+      IM_CHECK(!(b1 == b0));
+      IM_CHECK(a1.b != 0.0); // rotated (off-axis linear part) about the shared pivot
+      const double angle = std::atan2(a1.b, a1.a);
+      IM_CHECK(std::abs(std::remainder(angle, k_pi / 12.0)) < 0.03); // a 15° multiple (Shift snap)
+      undo_one();
+      IM_CHECK(*cell_placement(state, ids.cell_a) == a0);
+      IM_CHECK(*cell_placement(state, ids.cell_b) == b0);
+    }
+
+    // --- (iv) a Cmd/Ctrl + edge drag shears BOTH members about the shared pivot, one entry.
+    // -------
+    {
+      const std::size_t depth = journal.cursor();
+      const arbc::Affine a0 = *cell_placement(state, ids.cell_a);
+      const arbc::Affine b0 = *cell_placement(state, ids.cell_b);
+      ctx->KeyDown(ImGuiMod_Ctrl);
+      drag(at(130.0, 40.0), at(160.0, 40.0)); // the union TOP edge handle, dragged horizontally
+      ctx->KeyUp(ImGuiMod_Ctrl);
+      IM_CHECK(journal.cursor() == depth + 1);
+      IM_CHECK(cell_placement(state, ids.cell_a)->c != 0.0); // a real off-diagonal shear on both
+      IM_CHECK(cell_placement(state, ids.cell_b)->c != 0.0);
+      undo_one();
+      IM_CHECK(*cell_placement(state, ids.cell_a) == a0);
+      IM_CHECK(*cell_placement(state, ids.cell_b) == b0);
+    }
+
+    // --- (v) dragging the group pivot dot is UI-only: it commits nothing (D-group_transform-5).
+    // ---
+    {
+      const arbc::Affine a0 = *cell_placement(state, ids.cell_a);
+      const std::size_t depth = journal.cursor();
+      drag(at(130.0, 70.0), at(150.0, 90.0));             // the pivot dot sits at the union center
+      IM_CHECK(journal.cursor() == depth);                // no journal entry
+      IM_CHECK(*cell_placement(state, ids.cell_a) == a0); // the placement did not change
+    }
+
+    // --- (vi) a group drag over a MIXED camera+cell selection re-places the cell AND the frame.
+    // ---
+    {
+      click(at(k_a_at + 30.0, k_a_at + 30.0)); // re-select just A (single selection)
+      IM_CHECK(sel.size() == 1);
+      ctx->KeyDown(ImGuiMod_Shift);
+      click(at(k_a_at, k_cam_at_y)); // shift-add the Hero frame by its top-left border corner
       ctx->KeyUp(ImGuiMod_Shift);
       IM_CHECK(sel.size() == 2);
-      const std::size_t depth = journal.cursor();
-      const arbc::Affine a_before = *cell_placement(state, ids.cell_a);
-      const arbc::Affine b_before = *cell_placement(state, ids.cell_b);
-      drag(at(55.0, 80.0), at(55.0 + 30.0, 80.0)); // a body drag now moves the group
-      IM_CHECK(journal.cursor() == depth + 1);     // ONE journal entry for the group
-      IM_CHECK(!(*cell_placement(state, ids.cell_a) == a_before)); // A moved
-      IM_CHECK(!(*cell_placement(state, ids.cell_b) == b_before)); // ... and B by the same delta
-      undo_one(); // one press restores BOTH members
-      IM_CHECK(*cell_placement(state, ids.cell_a) == a_before);
-      IM_CHECK(*cell_placement(state, ids.cell_b) == b_before);
-      click(at(55.0, 80.0)); // re-select just A for the following sections
-      IM_CHECK(sel.primary() == ids.cell_a);
-      IM_CHECK(sel.size() == 1);
-    }
+      IM_CHECK(sel.contains(ids.camera));
 
-    // --- (vii) a selected CAMERA still shows and drives the shipped frame gizmo unchanged. -------
-    {
-      const arbc::Affine frame_before = hero_frame(state, ids.camera);
+      // Union of A[40,100]^2 and Hero[40,100]x[200,260] is [40,100]x[40,260]; BR corner = (100,260)
+      // coincides with the Hero frame's BR — the group gizmo (not the frame gizmo) claims it
+      // because the camera is part of the ≥2 selection (D-group_transform-4).
       const std::size_t depth = journal.cursor();
-      drag(at(k_cam_at + k_cam_res, k_a_at + k_cam_res), // Hero's bottom-right frame corner
-           at(k_cam_at + k_cam_res + 30.0, k_a_at + k_cam_res + 30.0));
-      IM_CHECK(sel.primary() == ids.camera); // the camera got selected + reframed by one gesture
-      IM_CHECK(journal.cursor() == depth + 1);
-      IM_CHECK(!(hero_frame(state, ids.camera) == frame_before));
+      const arbc::Affine a0 = *cell_placement(state, ids.cell_a);
+      const arbc::Affine frame0 = hero_frame(state, ids.camera);
+      drag(at(100.0, 260.0), at(140.0, 300.0));              // union BR handle
+      IM_CHECK(journal.cursor() == depth + 1);               // one entry for the whole mixed group
+      IM_CHECK(!(*cell_placement(state, ids.cell_a) == a0)); // the cell moved
+      IM_CHECK(!(hero_frame(state, ids.camera) == frame0));  // the camera frame moved too (D7)
       undo_one();
-      click(at(55.0, 80.0)); // back to cell A
-      IM_CHECK(sel.primary() == ids.cell_a);
-    }
-
-    // --- (viii) dragging the pivot dot is UI-only: it commits nothing (D-gizmo-4). ---------------
-    {
-      const arbc::Affine before = *cell_placement(state, ids.cell_a);
-      const std::size_t depth = journal.cursor();
-      drag(at(70.0, 70.0), at(85.0, 85.0)); // the pivot dot sits at the placed-box center
-      IM_CHECK(journal.cursor() == depth);  // no journal entry
-      IM_CHECK(*cell_placement(state, ids.cell_a) == before); // the placement did not change
-    }
-
-    // --- (ix) Space during a body press pans the VIEW, inert on the cell (Constraint 10). --------
-    // Last, because the Space-drag pans canvas#1's viewport (a lasting session change).
-    {
-      const arbc::Affine before = *cell_placement(state, ids.cell_a);
-      const std::size_t depth = journal.cursor();
-      ctx->KeyDown(ImGuiKey_Space);
-      drag(at(55.0, 80.0), at(85.0, 110.0));
-      ctx->KeyUp(ImGuiKey_Space);
-      IM_CHECK(*cell_placement(state, ids.cell_a) == before); // the cell did NOT move
-      IM_CHECK(journal.cursor() == depth);                    // nothing journaled
+      IM_CHECK(*cell_placement(state, ids.cell_a) == a0);
+      IM_CHECK(hero_frame(state, ids.camera) == frame0);
     }
 
     IM_CHECK(layout_contains(dockspace, "canvas#1"));

@@ -9,6 +9,7 @@
 // to the offline reference + the committed golden. The final case drives the REAL shared
 // WorkerPool (worker threads) through the full add->render->edit->remove->teardown
 // lifecycle on a spawned render thread — the escalated ASan/TSan concurrency target.
+#include <ace/commands/cells.hpp>
 #include <ace/commands/export.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/interact/pick.hpp>
@@ -593,6 +594,87 @@ TEST_CASE("canvas_host: a stream of UI-thread cell TRANSFORM commits runs clean 
     }
   }
   CHECK(found);
+
+  host.stop();
+  handle->join();
+}
+
+TEST_CASE("canvas_host: a stream of UI-thread GROUP transform batches runs clean against the "
+          "render + gizmo read (cells.group_transform TSan anchor)") {
+  // Same writer-outlives-host contract as the cells.gizmo anchor above; the difference this leaf
+  // pins is that the group commit is ONE `transform_cells_command` transaction spanning N layers
+  // (D-group_transform-1), so the atomic multi-layer publish overlaps the render walk + the
+  // per-frame `pick_targets` read on the real interactive pool. No new lock, no new thread — the
+  // one batch transaction rides the same writer-identity + pin() seam.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  // Two placed rasters (plus the probe's own cell) give the group batch ≥2 layers to rewrite in one
+  // transaction. Seed on the writer; report success back to the main thread for the assertion.
+  std::vector<arbc::ObjectId> layers;
+  bool seeded = false;
+  writer.submit_sync([&] {
+    bool ok = true;
+    for (int i = 0; i < 2; ++i) {
+      const auto added = ace::scene::add_cell(*probe.document, registry, "org.arbc.raster", "16x16",
+                                              arbc::Affine::translation(8.0 + 20.0 * i, 8.0));
+      ok = ok && added.has_value();
+    }
+    for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry)) {
+      layers.push_back(cell.layer);
+    }
+    seeded = ok;
+  });
+  REQUIRE(seeded);
+  REQUIRE(layers.size() >= 2);
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // Stream the group batches: each round rewrites EVERY layer to a fresh (always-invertible)
+  // placement in one transaction, with a pick_targets read interleaved.
+  constexpr int k_gestures = 64;
+  std::vector<ace::commands::LayerTransform> last;
+  for (int i = 0; i < k_gestures; ++i) {
+    const double s = 1.0 + static_cast<double>(i % 8) * 0.25; // a varying, non-degenerate scale
+    std::vector<ace::commands::LayerTransform> batch;
+    for (std::size_t j = 0; j < layers.size(); ++j) {
+      batch.push_back(ace::commands::LayerTransform{
+          layers[j], arbc::Affine{s, 0.0, 0.0, s, static_cast<double>(i) + static_cast<double>(j),
+                                  static_cast<double>(-i)}});
+    }
+    last = batch;
+    apply_edit(writer, host,
+               [&] { ace::commands::transform_cells_command(batch).apply(*probe.document); });
+    const std::vector<ace::interact::PickTarget> targets =
+        ace::interact::pick_targets(*probe.document, registry);
+    (void)targets; // the gizmo's per-frame assembly read, overlapping the writer + render reads
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  // Every layer carries its last batched placement — the whole group swapped, none partial.
+  const std::vector<ace::interact::PickTarget> final_targets =
+      ace::interact::pick_targets(*probe.document, registry);
+  for (const ace::commands::LayerTransform& lt : last) {
+    bool found = false;
+    for (const ace::interact::PickTarget& tgt : final_targets) {
+      if (tgt.layer == lt.layer) {
+        found = true;
+        CHECK(tgt.placement == lt.placement);
+      }
+    }
+    CHECK(found);
+  }
 
   host.stop();
   handle->join();

@@ -77,6 +77,40 @@ Command remove_cells_command(std::vector<Removal> removals, std::size_t& removed
                  }};
 }
 
+Command transform_cells_command(std::vector<LayerTransform> placements) {
+  return Command{
+      "group_transform", [placements = std::move(placements)](arbc::Document& doc) {
+        if (placements.empty()) {
+          return; // nothing to place: open no transaction, add no entry (Constraint 5)
+        }
+        // Validate each member against the LIVE pin — a stale layer (undone/GC'd out
+        // from under the selection) is skipped, exactly as `scene::remove_cells`
+        // validates its removals (Constraint 5). This also makes the zero-live-layer
+        // batch a true no-op: with nothing to touch we open NO transaction, so an
+        // all-stale drag commits nothing rather than publishing an empty entry.
+        const arbc::DocStatePtr pin = doc.pin();
+        std::vector<const LayerTransform*> live;
+        live.reserve(placements.size());
+        for (const LayerTransform& placement : placements) {
+          if (pin && pin->find_layer(placement.layer) != nullptr) {
+            live.push_back(&placement);
+          }
+        }
+        if (live.empty()) {
+          return; // zero live layers: commit nothing (Constraint 5 / D-group_transform-1)
+        }
+        // ONE transaction for the whole batch: `commit()` assembles ONE journal entry
+        // however many layers it touched (`model.hpp`), so this is natively one entry,
+        // one revision bump, and one atomic publish (D-group_transform-1) — the same
+        // batch atomicity `remove_cells_command` gets from one `scene::remove_cells`.
+        auto txn = doc.transact("group_transform");
+        for (const LayerTransform* placement : live) {
+          txn.set_transform(placement->layer, placement->placement);
+        }
+        txn.commit();
+      }};
+}
+
 DeleteOutcome delete_selection(AppState& state) {
   DeleteOutcome outcome;
   // Resolved HERE, inside the edit, against the live document (D-cells_remove-3).

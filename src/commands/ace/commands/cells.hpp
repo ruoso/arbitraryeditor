@@ -78,6 +78,32 @@ std::vector<Removal> selected_removals(const arbc::Document& document,
 // must outlive the `dispatch` call.
 Command remove_cells_command(std::vector<Removal> removals, std::size_t& removed);
 
+// --- Group transform (editor.cells.group_transform) -------------------------------------
+
+// One member of a group transform: the placing layer to rewrite and the new placement it
+// should carry. Kind-agnostic — a cell's placement and a camera's frame are both a layer
+// transform, so the same pair covers both (D-group_transform-4). The new placements are
+// composed off the shared group delta by `interact::group_transform` up in L4 (`commands`
+// may not depend on `interact`, the §8 DAG); this verb only writes what it is handed.
+struct LayerTransform {
+  arbc::ObjectId layer;
+  arbc::Affine placement;
+};
+
+// The dispatchable "re-place N objects" verb (D-group_transform-2): ONE
+// `doc.transact("group_transform")` calling `set_transform` for every LIVE member and
+// committing ONCE, so the whole batch is exactly ONE journal entry, one revision bump, and
+// one ATOMIC publish — an observer sees the old or the new group, never a half-transformed
+// intermediate (`model.hpp` commit / D-group_transform-1). This is the batch home
+// D-gizmo-3 deferred; it sits beside `remove_cells_command` because both are batch
+// scene-edit `Command`s over the selection.
+//
+// `placements` is taken BY VALUE (moved into the command). Members are validated against the
+// live writer pin when the command RUNS (skipping a layer undone/GC'd out from under the
+// selection); an empty batch — or one that would touch ZERO live layers — opens no
+// transaction and adds no entry (Constraint 5), mirroring `remove_cells`' empty-span no-op.
+Command transform_cells_command(std::vector<LayerTransform> placements);
+
 // The observable result of one `delete_selection`. `removed` counts the objects that
 // actually left the composition (stale members of the selection are skipped, so it can be
 // smaller than the selection); `journal_entries_added` is the `dispatch` delta — exactly ONE

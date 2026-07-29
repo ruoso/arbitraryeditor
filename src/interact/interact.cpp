@@ -476,6 +476,10 @@ bool finite_rect(const arbc::Rect& r) {
   return std::isfinite(r.x0) && std::isfinite(r.y0) && std::isfinite(r.x1) && std::isfinite(r.y1);
 }
 bool finite_pt(arbc::Vec2 p) { return std::isfinite(p.x) && std::isfinite(p.y); }
+bool finite_affine(const arbc::Affine& m) {
+  return std::isfinite(m.a) && std::isfinite(m.b) && std::isfinite(m.c) && std::isfinite(m.d) &&
+         std::isfinite(m.tx) && std::isfinite(m.ty);
+}
 
 // The (U, V) coordinates of composition-space vector `w` in the placed box's own (possibly
 // non-orthogonal, sheared) edge basis B = [U V]; `det` is B's determinant (nonzero).
@@ -699,6 +703,36 @@ arbc::Affine shear_cell(const arbc::Affine& placement, const arbc::Rect& extent,
     return placement;
   }
   return compose(basis_delta(box.u, box.v, 1.0, 0.0, sh, 1.0, pivot), placement);
+}
+
+std::vector<arbc::Affine> group_transform(const arbc::Affine& old_union,
+                                          const arbc::Affine& new_union,
+                                          std::span<const arbc::Affine> start_placements) {
+  std::vector<arbc::Affine> out;
+  out.reserve(start_placements.size());
+  const std::optional<arbc::Affine> old_inv = old_union.inverse();
+  if (!old_inv || !finite_affine(new_union)) {
+    // A degenerate union carries no derivable delta: leave every member untouched (an identity
+    // gesture, refuse-rather-than-guess). The caller reads "nothing changed" and commits nothing.
+    for (const arbc::Affine& start : start_placements) {
+      out.push_back(start);
+    }
+    return out;
+  }
+  // D = new_union ∘ old_union⁻¹ — the composition-space change the gesture made to the union box.
+  const arbc::Affine delta = compose(new_union, *old_inv);
+  if (!finite_affine(delta)) {
+    for (const arbc::Affine& start : start_placements) {
+      out.push_back(start);
+    }
+    return out;
+  }
+  // Each member's new placement is D applied on top of its own start (D-group_transform-3): one
+  // shared delta, composed independently, so the result is order-independent.
+  for (const arbc::Affine& start : start_placements) {
+    out.push_back(compose(delta, start));
+  }
+  return out;
 }
 
 } // namespace ace::interact
