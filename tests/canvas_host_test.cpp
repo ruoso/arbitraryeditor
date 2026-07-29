@@ -1795,6 +1795,89 @@ TEST_CASE("canvas_host: UI-thread resolution-health reads run clean against the 
   CHECK(painted == k_inserts / 2);
 }
 
+TEST_CASE("canvas_host: UI-thread inspector reads + a set_cell_opacity edit run clean against the "
+          "live render walk") {
+  // editor.panels.inspector Acceptance (Threading): the inspector reads `scene::cells` +
+  // `interact::decompose_placement` + `interact::resolution_health` on the UI thread and
+  // dispatches a `set_cell_opacity` edit through `apply_edit` — concurrent with a render thread
+  // walking the SAME document over the lock-free `pin()` seam. The reads are const reads of
+  // construction-stable content state (Constraint 7 / A18); the edit rides the ONE writer funnel
+  // (D-inspector-2), one transaction. No new lock, no new thread, no new suppression — a
+  // TSan/ASan report here is a real contract violation. `writer` outlives `host` (the same
+  // declaration-order contract the sibling cases above assert).
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // A camera so the health read has a capturing frame.
+  apply_edit(writer, host, [&] {
+    REQUIRE(ace::scene::add_camera(*probe.document, registry, "Hero",
+                                   ace::scene::Resolution{64, 64}, arbc::Affine::scaling(0.5, 0.5))
+                .valid());
+  });
+  // The painted raster the opacity edit targets, keyed by its content id (the selection's key).
+  arbc::ObjectId target;
+  apply_edit(writer, host, [&] {
+    const auto added = ace::scene::add_cell(*probe.document, registry, "org.arbc.raster", "48x48",
+                                            arbc::Affine::translation(2.0, 2.0));
+    REQUIRE(added.has_value());
+    target = *added;
+  });
+
+  constexpr int k_iters = 24;
+  for (int i = 0; i < k_iters; ++i) {
+    // The UI-thread read path the panel runs EVERY frame: cells + transform decomposition + the
+    // resolution-health verdict, straight against the live render walk.
+    for (int r = 0; r < 3; ++r) {
+      const std::vector<ace::scene::Cell> cells = ace::scene::cells(*probe.document, registry);
+      const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*probe.document);
+      for (const ace::scene::Cell& cell : cells) {
+        const ace::interact::PlacementReadout t =
+            ace::interact::decompose_placement(cell.placement, cell.content_bounds);
+        (void)t;
+        if (!cell.detail.native_pixels.has_value()) {
+          continue;
+        }
+        for (const ace::scene::Camera& cam : cams) {
+          (void)ace::interact::resolution_health(
+              cell.detail.native_pixels->first, cell.detail.native_pixels->second, cell.placement,
+              cam.resolution.width, cam.resolution.height, cam.frame);
+        }
+      }
+    }
+    // The inspector's edit, through the one writer funnel, interleaved with the reads above.
+    const double op = (i % 2 == 0) ? 0.4 : 0.9;
+    apply_edit(writer, host, [&] {
+      REQUIRE(ace::scene::set_cell_opacity(*probe.document, registry, target, op));
+    });
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  host.stop();
+  handle->join();
+
+  // The final opacity is the last write (i == k_iters-1 == 23 => odd => 0.9).
+  double final_opacity = -1.0;
+  for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry)) {
+    if (cell.id == target) {
+      final_opacity = cell.opacity;
+    }
+  }
+  CHECK(final_opacity > 0.89);
+  CHECK(final_opacity < 0.91);
+}
+
 TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a camera WRITE in one "
           "apply_edit — runs clean against the live render walk") {
   // The document's ONE writer identity, bound the way the shipped bootstrap binds it

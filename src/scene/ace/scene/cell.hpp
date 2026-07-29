@@ -201,6 +201,13 @@ struct Cell {
   // The pixel provenance + native grid, from the same pinned snapshot (D-resolution-1/-2).
   // The inspector's native-resolution readout and D8 health/provenance line read this.
   CellDetail detail;
+  // The placing layer's composite opacity (straight-alpha, D10) and visibility
+  // (`k_layer_visible`), read off the SAME pinned snapshot. The inspector's Appearance block
+  // shows and edits these two — the only novel cell edits this panel introduces
+  // (editor.panels.inspector / D-inspector-2). Distinct from the paint-color alpha
+  // (editor.panels.color, D-inspector-3): this is how strongly the whole cell composites.
+  double opacity = 1.0;
+  bool visible = true;
 };
 
 // Every cell in the root composition, in layer (z) order, over the lock-free `pin()`
@@ -212,5 +219,35 @@ struct Cell {
 // reported with an EMPTY `kind_id` rather than dropped, so an unknown-passthrough
 // cell from a foreign `project.arbc` is still listable.
 std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& registry);
+
+// The (index, count) z-order position of the cell whose content id is `id` within `ordered`
+// (the back->front layer order `cells()` returns), for the inspector's "layer N of M" readout
+// (D6, a READOUT only — interactive reorder is `editor.panels.layers`'). `index` is -1 when
+// `id` is absent; `count` is always `ordered.size()`. PURE.
+struct ZOrderPosition {
+  int index = -1;
+  int count = 0;
+};
+ZOrderPosition z_order_position(const std::vector<Cell>& ordered, arbc::ObjectId id);
+
+// A one-line provenance description of a cell's pixel source (D11) — the referenced / owned /
+// painted classification the inspector's Source block shows. Keyed on the GENERIC `DetailSource`
+// (never a `kind_id` string, A16 / D-resolution-2). PURE.
+const char* describe_detail_source(DetailSource source);
+
+// Set the composite opacity of the CELL whose content id is `cell` (straight-alpha, D10),
+// clamped to [0,1]. Preserves the cell's `ObjectId`, placement, order and every other facet, so
+// the shared selection and `undo` hold on the SAME object across the edit. Returns false (a
+// no-op that mutates nothing) for an unresolvable id or a non-cell (a camera) — the exact
+// `scene::set_camera_resolution` no-op-returning-false mould (Constraint 3 / D-inspector-2).
+// WRITER-THREAD ONLY; ONE `document.transact` = one undoable journal entry.
+bool set_cell_opacity(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId cell,
+                      double opacity);
+
+// Set the visibility (`k_layer_visible`) of the CELL whose content id is `cell`, preserving its
+// `ObjectId` and every other facet (the shared selection / `undo` keep the same object). Returns
+// false (a no-op) for an unresolvable id or a non-cell. WRITER-THREAD ONLY; ONE transaction.
+bool set_cell_visible(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId cell,
+                      bool visible);
 
 } // namespace ace::scene

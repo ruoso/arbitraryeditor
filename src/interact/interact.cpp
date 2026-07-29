@@ -465,6 +465,38 @@ ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affin
   return health;
 }
 
+PlacementReadout decompose_placement(const arbc::Affine& placement,
+                                     const std::optional<arbc::Rect>& content_bounds) {
+  PlacementReadout out;
+  // Refuse a non-finite or degenerate (zero-`det`) placement: no defined rotation/shear, so the
+  // readout stays all-zero and invalid rather than emitting a NaN (Constraint 1).
+  const bool finite = std::isfinite(placement.a) && std::isfinite(placement.b) &&
+                      std::isfinite(placement.c) && std::isfinite(placement.d) &&
+                      std::isfinite(placement.tx) && std::isfinite(placement.ty);
+  const double sx = std::sqrt(placement.a * placement.a + placement.b * placement.b);
+  const double det = placement.det();
+  if (!finite || !(sx > 0.0) || det == 0.0) {
+    return out;
+  }
+  // QR-style decomposition of the linear part [[a, c], [b, d]] (its columns are the mapped x/y
+  // axes): rotation is the angle of the mapped x-axis; removing it leaves the y-axis as
+  // (shear_component, sy) in the rotated frame, with sy = det/sx (signed) and the shear
+  // component (a*c + b*d)/sx. A pure rotation+scale has shear_component == 0, so `shear_deg` is
+  // exactly 0 there (the property the unit test pins).
+  const double k_rad_to_deg = 180.0 / std::acos(-1.0);
+  out.position = arbc::Vec2{placement.tx, placement.ty};
+  out.scale_x = sx;
+  out.scale_y = det / sx;
+  const double shear_component = (placement.a * placement.c + placement.b * placement.d) / sx;
+  out.rotation_deg = std::atan2(placement.b, placement.a) * k_rad_to_deg;
+  out.shear_deg = std::atan2(shear_component, out.scale_y) * k_rad_to_deg;
+  if (content_bounds.has_value()) {
+    out.placed = placement.map_rect(*content_bounds);
+  }
+  out.valid = true;
+  return out;
+}
+
 // --- Cell transform gizmo (editor.cells.gizmo; D7/D8/§6) ----------------------
 
 namespace {

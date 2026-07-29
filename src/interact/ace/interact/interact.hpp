@@ -289,6 +289,34 @@ struct ResolutionHealth {
 ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affine& placement,
                                    int cam_w, int cam_h, const arbc::Affine& cam_frame);
 
+// --- Transform readout (editor.panels.inspector; D7/§6) -----------------------
+// The inspector's live decomposition of a cell's placing-layer `Affine` into the D7/§6 display
+// quantities. PURE — takes only the placement `Affine` + the cell's content extent
+// (`arbc::Rect`), names no `scene`/ImGui type (Constraint 8), so it sits beside the
+// resolution-health helper and is unit-tested headless. A READOUT, not a numeric editor:
+// placement editing is the gizmo's drag (D-inspector-1), this only displays.
+
+// A decomposed placement readout in composition units + degrees. Every field is a defined,
+// NaN-free zero when `valid` is false (a degenerate zero-`det` or non-finite placement) — the
+// panel then shows an "n/a" transform rather than garbage (the refuse-rather-than-guess rule).
+struct PlacementReadout {
+  arbc::Vec2 position;       // the placement translation (tx, ty), composition units
+  arbc::Rect placed;         // placement.map_rect(content_bounds); zero when unbounded
+  double rotation_deg = 0.0; // rotation of the mapped x-axis, degrees in (-180, 180]
+  double shear_deg = 0.0;    // shear of the mapped y-axis off orthogonal, degrees; 0 = square
+  double scale_x = 0.0;      // length of the mapped x-axis basis (composition units / content px)
+  double scale_y = 0.0;      // signed height of the mapped y-axis basis
+  bool valid = false;        // false for a degenerate (zero-det) / non-finite placement
+};
+
+// Decompose `placement` (content-px -> composition) into its position / placed-size / rotation /
+// shear readout. `content_bounds` (the cell's `Content::bounds()`) is mapped through `placement`
+// (an AABB `map_rect`, matching the shipped "placed size" readout) to fill `placed`; a `nullopt`
+// bounds leaves `placed` zero (an unbounded cell has no placed size). A degenerate (zero-`det`)
+// or non-finite `placement` yields `valid == false` and all-zero fields — never a NaN. PURE.
+PlacementReadout decompose_placement(const arbc::Affine& placement,
+                                     const std::optional<arbc::Rect>& content_bounds);
+
 // --- Cell transform gizmo (editor.cells.gizmo; D7/D8/§6) ----------------------
 // The cell's placement is its placing layer's `Affine` (content-px -> composition): it maps
 // the cell's CONTENT extent `arbc::Content::bounds()` into composition space. These verbs are

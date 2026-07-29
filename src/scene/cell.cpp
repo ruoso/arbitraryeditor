@@ -9,6 +9,7 @@
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -312,11 +313,103 @@ std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& re
       detail = classify_detail(*content, bounds);
     }
     // An unresolvable token surfaces with an empty kind_id rather than vanishing —
-    // an unknown-passthrough cell is still a cell (D-cells_model-8).
+    // an unknown-passthrough cell is still a cell (D-cells_model-8). Opacity/visibility ride
+    // out of the same LayerRecord so the inspector's Appearance block reads them off this walk.
     result.push_back(Cell{layer->content, layer_id, named ? std::string(id) : std::string(),
-                          layer->transform, bounds, detail});
+                          layer->transform, bounds, detail, layer->opacity, layer->visible()});
   });
   return result;
+}
+
+ZOrderPosition z_order_position(const std::vector<Cell>& ordered, arbc::ObjectId id) {
+  ZOrderPosition pos;
+  pos.count = static_cast<int>(ordered.size());
+  for (std::size_t i = 0; i < ordered.size(); ++i) {
+    if (ordered[i].id == id) {
+      pos.index = static_cast<int>(i);
+      break;
+    }
+  }
+  return pos;
+}
+
+const char* describe_detail_source(DetailSource source) {
+  switch (source) {
+  case DetailSource::PaintedRaster:
+    return "Painted raster - editable, owned";
+  case DetailSource::ReferencedImage:
+    return "Referenced image - source-limited";
+  case DetailSource::ResolutionIndependent:
+    break;
+  }
+  return "Resolution-independent - no native detail floor";
+}
+
+namespace {
+
+// The root-composition layer that places content `cell`, or an invalid id when none does — the
+// reverse of the `cells()` layer->content walk, over the same lock-free pinned reader seam. The
+// opacity/visibility verbs reach the `LayerRecord` (where those attributes live, not on the
+// content) from the cell's content identity, which is the shared selection's key.
+arbc::ObjectId placing_layer(const arbc::Document& document, arbc::ObjectId cell) {
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return {};
+  }
+  const arbc::ObjectId composition = root_composition(*state);
+  if (!composition.valid()) {
+    return {};
+  }
+  arbc::ObjectId found;
+  state->for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
+    if (found.valid()) {
+      return;
+    }
+    const arbc::LayerRecord* layer = state->find_layer(layer_id);
+    if (layer != nullptr && layer->content == cell) {
+      found = layer_id;
+    }
+  });
+  return found;
+}
+
+} // namespace
+
+bool set_cell_opacity(arbc::Document& document, const arbc::Registry& /*registry*/,
+                      arbc::ObjectId cell, double opacity) {
+  // Reject a camera's content up front — the `set_camera_resolution` no-op-returning-false
+  // mould (Constraint 3). `resolve` is null for an unknown id and the cast is null for a
+  // non-camera, so a genuine cell falls through to the placing-layer lookup.
+  if (dynamic_cast<CameraContent*>(document.resolve(cell)) != nullptr) {
+    return false;
+  }
+  const arbc::ObjectId layer = placing_layer(document, cell);
+  if (!layer.valid()) {
+    return false; // an unresolvable / unplaced content: a no-op that mutates nothing
+  }
+  // Straight-alpha, clamped to [0,1] (D10). ONE transaction: the cell keeps its `ObjectId`,
+  // placement and order — only its layer opacity changes — so the shared selection and `undo`
+  // hold on the same object. Never a direct `Document` mutation from L4 (D-inspector-2).
+  const double clamped = std::clamp(opacity, 0.0, 1.0);
+  auto txn = document.transact("set_cell_opacity");
+  txn.set_opacity(layer, clamped);
+  txn.commit();
+  return true;
+}
+
+bool set_cell_visible(arbc::Document& document, const arbc::Registry& /*registry*/,
+                      arbc::ObjectId cell, bool visible) {
+  if (dynamic_cast<CameraContent*>(document.resolve(cell)) != nullptr) {
+    return false;
+  }
+  const arbc::ObjectId layer = placing_layer(document, cell);
+  if (!layer.valid()) {
+    return false;
+  }
+  auto txn = document.transact("set_cell_visible");
+  txn.set_visible(layer, visible);
+  txn.commit();
+  return true;
 }
 
 } // namespace ace::scene

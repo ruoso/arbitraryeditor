@@ -589,8 +589,9 @@ task editor "Editor — host GUI over libarbc" {
     task inspector "Dense property sheet (transform / appearance / z-order / source)" {
       effort 2.5d
       allocate team
+      complete 100
       depends editor.cells.selection, editor.dock.view_registry
-      note "A dense property sheet for the project selection: transform (units), appearance & stacking (opacity/blend/z-order), source (referenced/owned info + health). Design: D7 (density) / D11. Refinement: tasks/refinements/inspector.md"
+      note "A dense property sheet for the project selection: transform (units), appearance & stacking (opacity/blend/z-order), source (referenced/owned info + health). Design: D7 (density) / D11. Refinement: tasks/refinements/panels/inspector.md"
     }
     task layers "Layers list (+ cameras); reorder; referenced-vs-painted; nested expand / enter" {
       effort 3d

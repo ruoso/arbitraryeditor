@@ -1,7 +1,7 @@
-#include <ace/app/camera_inspector.hpp>
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/export_wiring.hpp>
 #include <ace/app/folder_dialog.hpp>
+#include <ace/app/inspector_panel.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
@@ -353,14 +353,16 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::views::register_view_body(
         ace::dockmodel::ViewType::History,
         [&app_state](std::string_view view_id) { ace::views::draw_history(app_state, view_id); });
-    // The Inspector view body hosts the first-cut camera resolution editor (editor.cameras.manip,
-    // D-manip-6): W×H + aspect presets driving set_camera_resolution through the same apply_edit
-    // seam the History/undo edits ride. It captures the one AppState& and the CanvasView (for the
-    // edit runner) and is cleared on exit like the other bodies (the seam is process-global).
-    ace::app::CameraInspector camera_inspector(app_state, canvas);
+    // The Inspector view body is the dense per-object property sheet (editor.panels.inspector;
+    // D7/§6): three blocks for a selected cell (transform readout, appearance controls,
+    // source/health) and the shipped camera resolution block for a selected camera, all driving
+    // edits through the same apply_edit seam the History/undo edits ride. It captures the one
+    // AppState& and the CanvasView (for the edit runner) and is cleared on exit like the other
+    // bodies (the seam is process-global).
+    ace::app::InspectorPanel inspector(app_state, canvas);
     ace::views::register_view_body(
         ace::dockmodel::ViewType::Inspector,
-        [&camera_inspector](std::string_view view_id) { camera_inspector.draw(view_id); });
+        [&inspector](std::string_view view_id) { inspector.draw(view_id); });
     // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
     // it renders each open view by its instance id and syncs the tab ✕ back into
     // the authoritative DockLayout.
