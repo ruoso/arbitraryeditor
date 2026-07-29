@@ -9,11 +9,8 @@
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp>
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -24,103 +21,19 @@
 namespace ace::scene {
 namespace {
 
-// The three built-in config grammars the editor carries an adapter for
-// (`builtin_kinds.cpp:169-207`). These are ENHANCEMENT keys, never a gate: every id
-// not named here still gets a schema (the raw-config fallback) and is still
-// insertable, which is the whole point of A16. Kept as local literals rather than
-// including the concrete kind headers — `scene` names no arbc content type.
-constexpr std::string_view k_raster_kind = "org.arbc.raster";
-constexpr std::string_view k_solid_kind = "org.arbc.solid";
-constexpr std::string_view k_nested_kind = "org.arbc.nested";
-
-std::string_view trim(std::string_view text) {
-  while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
-    text.remove_prefix(1);
+// The library's per-field display type -> the editor's advisory display hint
+// (D-insert_schema-7). Purely presentational: the dock POD drops the type entirely and
+// the modal renders free text, so nothing branches on this to decide insertability.
+InsertFieldType map_field_type(arbc::KindInsertField::Type type) {
+  switch (type) {
+  case arbc::KindInsertField::Type::Integer:
+    return InsertFieldType::Integer;
+  case arbc::KindInsertField::Type::Number:
+    return InsertFieldType::Number;
+  case arbc::KindInsertField::Type::Text:
+    break;
   }
-  while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
-    text.remove_suffix(1);
-  }
-  return text;
-}
-
-// Full-consumption decimal parse (libarbc's own config parsers reject trailing
-// garbage, so accepting it here would only defer the failure into the factory).
-bool parse_positive_int(std::string_view text, long long& out) {
-  const std::string_view body = trim(text);
-  if (body.empty()) {
-    return false;
-  }
-  long long value = 0;
-  for (const char c : body) {
-    if (c < '0' || c > '9') {
-      return false;
-    }
-    if (value > (std::numeric_limits<int>::max() - (c - '0')) / 10) {
-      return false; // overflows the extent range every arbc kind accepts
-    }
-    value = value * 10 + (c - '0');
-  }
-  if (value <= 0) {
-    return false;
-  }
-  out = value;
-  return true;
-}
-
-bool parse_number(std::string_view text, double& out) {
-  const std::string_view body = trim(text);
-  if (body.empty()) {
-    return false;
-  }
-  const std::string owned(body);
-  char* end = nullptr;
-  out = std::strtod(owned.c_str(), &end);
-  return end == owned.c_str() + owned.size() && std::isfinite(out);
-}
-
-std::vector<std::string_view> split(std::string_view text, char separator) {
-  std::vector<std::string_view> parts;
-  std::size_t start = 0;
-  while (true) {
-    const std::size_t at = text.find(separator, start);
-    if (at == std::string_view::npos) {
-      parts.push_back(text.substr(start));
-      return parts;
-    }
-    parts.push_back(text.substr(start, at - start));
-    start = at + 1;
-  }
-}
-
-const std::string* find_value(const InsertValues& values, std::string_view field) {
-  for (const std::pair<std::string, std::string>& entry : values) {
-    if (entry.first == field) {
-      return &entry.second;
-    }
-  }
-  return nullptr;
-}
-
-// The `size` field's prefill: the root composition's own extent clamped to >= 1, or
-// `1024x1024` when the composition is absent or degenerate (Constraint 8).
-std::string size_initial(const std::optional<project::CompositionSize>& composition) {
-  int width = k_fallback_resolution;
-  int height = k_fallback_resolution;
-  if (composition.has_value() && std::isfinite(composition->width) &&
-      std::isfinite(composition->height)) {
-    const auto clamp = [](double value) {
-      if (!(value >= 1.0)) {
-        return 1;
-      }
-      if (value >= static_cast<double>(std::numeric_limits<int>::max())) {
-        return std::numeric_limits<int>::max();
-      }
-      return static_cast<int>(value);
-    };
-    width = clamp(composition->width);
-    height = clamp(composition->height);
-  }
-  return std::to_string(width) + "x" + std::to_string(height);
+  return InsertFieldType::Text;
 }
 
 // The `ContentRecord.kind` token for `kind_id`, computed from a bridge seeded
@@ -165,16 +78,16 @@ make_content(const arbc::Registry& registry, std::string_view kind_id, std::stri
 
 } // namespace
 
-std::vector<KindInsertSchema> insert_schemas(const arbc::Registry& registry,
-                                             std::optional<project::CompositionSize> composition) {
+std::vector<KindInsertSchema> insert_schemas(const arbc::Registry& registry) {
   std::vector<KindInsertSchema> schemas;
   const std::vector<std::string_view> ids = registry.ids();
   schemas.reserve(ids.size());
-  // ONE entry per advertised id, unconditionally and in registration order. There is
-  // deliberately no `continue` in this loop — a filter here is exactly the
-  // hard-coded kind set `docs/00-design.md:505-511` forbids, and the unit suite
-  // asserts `schemas.size() == ids.size()` for a registry carrying a kind the editor
-  // has never seen.
+  // ONE entry per advertised id, unconditionally and in registration order (Constraint
+  // 2). There is deliberately no filter on this path — a gate here is exactly the
+  // hard-coded kind set `docs/00-design.md:505-511` forbids, and the unit suite asserts
+  // `schemas.size() == ids.size()` for a registry carrying a kind the editor has never
+  // seen. Each id's fields come from the kind's OWN `insert_schema(id)`; the editor holds
+  // no per-kind grammar (D-insert_schema-1).
   for (const std::string_view id : ids) {
     KindInsertSchema schema;
     schema.kind_id = std::string(id);
@@ -182,20 +95,23 @@ std::vector<KindInsertSchema> insert_schemas(const arbc::Registry& registry,
     schema.human_name = (metadata != nullptr && !metadata->human_name.empty())
                             ? metadata->human_name
                             : schema.kind_id;
-    if (id == k_raster_kind) {
-      // Constraint 8: always rendered, always editable, prefilled from the
-      // composition — the user specifies the resolution at insert.
-      schema.fields.push_back(InsertField{"size", "Resolution (WxH)", InsertFieldType::Size,
-                                          size_initial(composition)});
-    } else if (id == k_solid_kind) {
-      schema.fields.push_back(
-          InsertField{"color", "Color (r,g,b,a)", InsertFieldType::Color, "0,0,0,1"});
-    } else if (id == k_nested_kind) {
-      schema.fields.push_back(
-          InsertField{"child", "Child composition (ObjectId)", InsertFieldType::ObjectRef, ""});
+    const arbc::KindInsertSchema* advertised = registry.insert_schema(id);
+    if (advertised != nullptr) {
+      // Mirror the kind's advertised fields and carry its own assembler (Constraint 5):
+      // id = the field name; label = name plus " (unit)" when a unit is given; initial =
+      // the kind's default; type = the library display hint. `min`/`max` are not
+      // surfaced — the factory validates (Constraint 4).
+      schema.assemble = advertised->assemble;
+      schema.fields.reserve(advertised->fields.size());
+      for (const arbc::KindInsertField& field : advertised->fields) {
+        schema.fields.push_back(InsertField{
+            field.name, field.unit.empty() ? field.name : field.name + " (" + field.unit + ")",
+            map_field_type(field.type), field.default_value});
+      }
     } else {
-      // The fallback is a FIRST-CLASS path, not an error: the kind's own
-      // `ContentConfig` grammar travels verbatim and its factory is the validator.
+      // The null path is a FIRST-CLASS fallback, not an error (Constraint 2): a kind that
+      // advertises no schema (nested, fade, crossfade, or any editor-unknown kind) travels
+      // its opaque `ContentConfig` verbatim and its factory is the validator.
       schema.raw_config = true;
       schema.fields.push_back(
           InsertField{std::string(k_raw_config_field), "Config", InsertFieldType::Text, ""});
@@ -207,69 +123,30 @@ std::vector<KindInsertSchema> insert_schemas(const arbc::Registry& registry,
 
 arbc::expected<std::string, std::string> build_config(const KindInsertSchema& schema,
                                                       const InsertValues& values) {
-  const auto missing = [&schema](std::string_view field) {
-    return arbc::unexpected<std::string>(schema.kind_id + ": missing value for \"" +
-                                         std::string(field) + "\"");
-  };
+  // Values arrive positionally — one per advertised field, in `fields` order — because
+  // the modal collects them that way and `assemble` consumes a `std::span` in the same
+  // order (D-insert_schema-3, robust to duplicate field names). A short vector means the
+  // caller never collected a field: an error value, not a silent default.
+  if (values.size() < schema.fields.size()) {
+    return arbc::unexpected<std::string>(schema.kind_id + ": missing insert field value");
+  }
   if (schema.raw_config) {
-    const std::string* raw = find_value(values, k_raw_config_field);
-    if (raw == nullptr) {
-      return missing(k_raw_config_field);
-    }
-    return *raw; // verbatim — the kind defines this grammar, not the editor
+    // The single field travels to the kind's factory verbatim — the editor knows no
+    // grammar for it (Constraint 2/3).
+    return values.front().second;
   }
-  if (schema.kind_id == k_raster_kind) {
-    const std::string* size = find_value(values, "size");
-    if (size == nullptr) {
-      return missing("size");
-    }
-    const std::vector<std::string_view> parts = split(*size, 'x');
-    long long width = 0;
-    long long height = 0;
-    if (parts.size() != 2 || !parse_positive_int(parts[0], width) ||
-        !parse_positive_int(parts[1], height)) {
-      return arbc::unexpected<std::string>(
-          schema.kind_id + ": resolution must be <width>x<height> with positive integers");
-    }
-    return std::to_string(width) + "x" + std::to_string(height);
+  // A library-backed schema: hand the collected strings to the kind's OWN assembler, and
+  // return its `expected` verbatim (D-insert_schema-2). The editor never re-implements the
+  // grammar, so it cannot drift from the kind's factory.
+  if (!schema.assemble) {
+    return arbc::unexpected<std::string>(schema.kind_id + ": kind advertises no config assembler");
   }
-  if (schema.kind_id == k_solid_kind) {
-    const std::string* color = find_value(values, "color");
-    if (color == nullptr) {
-      return missing("color");
-    }
-    const std::vector<std::string_view> parts = split(*color, ',');
-    if (parts.size() != 4) {
-      return arbc::unexpected<std::string>(schema.kind_id + ": color must be \"r,g,b,a\"");
-    }
-    std::string config;
-    for (std::size_t i = 0; i < parts.size(); ++i) {
-      double channel = 0.0;
-      if (!parse_number(parts[i], channel)) {
-        return arbc::unexpected<std::string>(schema.kind_id + ": color channel is not a number");
-      }
-      if (i != 0) {
-        config += ',';
-      }
-      config += std::string(trim(parts[i]));
-    }
-    return config;
+  std::vector<std::string> collected;
+  collected.reserve(schema.fields.size());
+  for (std::size_t i = 0; i < schema.fields.size(); ++i) {
+    collected.push_back(values[i].second);
   }
-  if (schema.kind_id == k_nested_kind) {
-    const std::string* child = find_value(values, "child");
-    if (child == nullptr) {
-      return missing("child");
-    }
-    long long id = 0;
-    if (!parse_positive_int(*child, id)) {
-      return arbc::unexpected<std::string>(schema.kind_id +
-                                           ": child must be a positive decimal ObjectId");
-    }
-    return std::to_string(id);
-  }
-  // A named-field schema with no adapter branch cannot arise from `insert_schemas`,
-  // but a hand-built schema could; fail loudly rather than guessing a grammar.
-  return arbc::unexpected<std::string>(schema.kind_id + ": no config grammar for this kind");
+  return schema.assemble(collected);
 }
 
 arbc::expected<std::optional<arbc::Rect>, std::string>

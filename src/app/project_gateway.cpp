@@ -291,8 +291,8 @@ std::vector<ace::dock::InsertKindSpec> AppProjectGateway::insert_kinds() const {
   // uses for `GcSummary`: `dock` may include neither `ace/scene` nor `ace/commands`,
   // and L4 is the level that sees both. The list is passed through ENTIRELY — this
   // is a `for` over what `scene::insert_schemas` returned, never a filter.
-  const std::vector<ace::scene::KindInsertSchema> schemas = ace::scene::insert_schemas(
-      app_state_.registry(), ace::project::root_composition_size(app_state_.document()));
+  const std::vector<ace::scene::KindInsertSchema> schemas =
+      ace::scene::insert_schemas(app_state_.registry());
   std::vector<ace::dock::InsertKindSpec> specs;
   specs.reserve(schemas.size());
   for (const ace::scene::KindInsertSchema& schema : schemas) {
@@ -310,8 +310,8 @@ std::vector<ace::dock::InsertKindSpec> AppProjectGateway::insert_kinds() const {
 
 std::string AppProjectGateway::insert_cell(const std::string& kind_id,
                                            const ace::dock::InsertValues& values) {
-  const std::vector<ace::scene::KindInsertSchema> schemas = ace::scene::insert_schemas(
-      app_state_.registry(), ace::project::root_composition_size(app_state_.document()));
+  const std::vector<ace::scene::KindInsertSchema> schemas =
+      ace::scene::insert_schemas(app_state_.registry());
   const ace::scene::KindInsertSchema* schema = nullptr;
   for (const ace::scene::KindInsertSchema& candidate : schemas) {
     if (candidate.kind_id == kind_id) {

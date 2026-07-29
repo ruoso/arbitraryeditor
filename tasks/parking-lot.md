@@ -160,6 +160,26 @@ arbc#19's identity capture snapshots construction identity **at `add_content`** 
 
 ---
 
+## org.arbc.camera insertability via the cell-insert dialog
+
+**Source:** `tasks/refinements/editor.cells/insert_schema.md` (cells.insert_schema, 2026-07-28) — Open question 1.
+
+**Trigger:** a dialog-inserted camera observed in real use causing initialisation problems (missing `scene::add_camera` state setup).
+
+The no-allowlist enumeration lists `org.arbc.camera` in the insert dialog (it did before this leaf too), and `editor.cells.insert_schema` makes its entry honest (zero fields → a default placeholder camera). But a camera minted via `add_cell` skips the identity/state setup `scene::add_camera` performs (D7 / A14 make cells and cameras one shape), so a dialog-inserted camera may be a subtly under-initialised camera. This is a pre-existing property of the no-allowlist model and a genuine design judgment about the cells-vs-cameras seam — not a mechanical fix. If an allowlist exclusion for `org.arbc.camera` is wanted, it is a D7/A14 amendment, not agent-implementable work.
+
+---
+
+## org.arbc.nested insert schema (cross-repo)
+
+**Source:** `tasks/refinements/editor.cells/insert_schema.md` (cells.insert_schema, 2026-07-28) — Open question 2.
+
+**Trigger:** a new libarbc release that adds a `KindInsertSchema` for `org.arbc.nested` (with a labelled `ObjectId` field).
+
+libarbc v0.4.0 registers `org.arbc.nested` with **no** schema, so nested inserts fall to the editor's raw-config box (a decimal `ObjectId` text box), losing `editor.cells.model`'s labelled "Child composition (ObjectId)" field. The correct fix is a cross-repo change to `arbitrarycomposer` to advertise a named field for the nested ObjectId. Once that ships in a future pin, no editor code is needed — the field appears automatically through the no-allowlist enumeration. File upstream and resolve when the pin lands.
+
+---
+
 ## add(X)→remove(X)→add(X) collapsing in one drive iteration
 
 **Source:** `tasks/refinements/canvas/pending_removes_order.md` (canvas.pending_removes_order, 2026-07-28) — Open questions / D-pending_removes_order-1 accepted consequence.

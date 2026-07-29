@@ -290,7 +290,7 @@ TEST_CASE("cells remove e2e: the rail action, the Delete/Backspace chords, undo,
     IM_CHECK(dockspace.insert_modal_open());
     ctx->ItemClick(kind_row(dockspace, "org.arbc.raster").c_str());
     ctx->Yield(2);
-    IM_CHECK(dockspace.insert_field_value(0) == "64x64");
+    IM_CHECK(dockspace.insert_field_value(0) == "1024"); // the raster's advertised width default
     ctx->ItemClick("Insert Cell/###insert_field0");
     ctx->Yield(2);
     ctx->KeyPress(ImGuiKey_End);
@@ -298,8 +298,8 @@ TEST_CASE("cells remove e2e: the rail action, the Delete/Backspace chords, undo,
     ctx->KeyPress(ImGuiKey_Home);
     ctx->KeyPress(ImGuiKey_Delete);
     ctx->Yield(2);
-    // The keys edited the FIELD ("64x64" -> "64x6" -> "4x6") and deleted nothing.
-    IM_CHECK_STR_EQ(dockspace.insert_field_value(0).c_str(), "4x6");
+    // The keys edited the FIELD ("1024" -> "102" -> "02") and deleted nothing.
+    IM_CHECK_STR_EQ(dockspace.insert_field_value(0).c_str(), "02");
     IM_CHECK(cell_ids().size() == cells_before_typing);
     IM_CHECK_NO_RET(!state.selection().empty());
     ctx->ItemClick("Insert Cell/###insert_cancel");

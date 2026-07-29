@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ace/project/project.hpp> // project::CompositionSize
+#include <ace/project/project.hpp> // scene -> project edge (used across this component)
 
 #include <arbc/base/expected.hpp>
 #include <arbc/base/geometry.hpp>  // arbc::Rect
@@ -8,6 +8,7 @@
 #include <arbc/base/transform.hpp> // arbc::Affine
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -30,31 +31,31 @@ namespace ace::scene {
 //
 // The load-bearing rule here is A16 / `docs/00-design.md:505-511`: **the editor holds
 // no kind allowlist.** `insert_schemas` emits one entry per `arbc::Registry::ids()`
-// entry, unconditionally and in registration order; the per-kind grammar adapters in
-// `build_config` are an ENHANCEMENT layered on that universal enumeration, never a
-// gate on it. A kind the editor has never seen gets the raw-config fallback schema
-// and is still insertable end-to-end, so a future plugin host that registers on the
-// `Registry` surfaces in this affordance automatically.
+// entry, unconditionally and in registration order. The fields, their types, defaults
+// and units come from the kind's OWN advertised `arbc::KindInsertSchema` (read back
+// through `arbc::Registry::insert_schema(id)`, issue #21); the editor renders fields
+// and hands strings back and never learns a kind's separator. A kind that advertises
+// no schema upstream gets the raw-config fallback and is still insertable end-to-end,
+// so a future plugin host that registers on the `Registry` surfaces here automatically.
 
-// How the modal SHOULD render one input for a kind's opaque `arbc::ContentConfig`
-// (D-cells_model-2). Purely advisory: the L3 modal is free to render every field as
-// free text, and no code anywhere branches on this to decide WHETHER a kind is
-// insertable.
+// A display hint for the modal, mirrored from `arbc::KindInsertField::Type`
+// (D-insert_schema-7). Purely advisory: the L3 modal renders every field as free text,
+// and no code anywhere branches on this to decide WHETHER a kind is insertable — the
+// dock POD deliberately drops the type entirely.
 enum class InsertFieldType {
-  Text,      // free text — the raw-config fallback, and any string grammar
-  Size,      // "<width>x<height>", two positive integers
-  Color,     // "r,g,b,a", four numbers (premultiplied working floats)
-  ObjectRef, // a positive decimal `arbc::ObjectId`
+  Integer, // a whole number (a raster's width/height)
+  Number,  // a real number (a solid's channels and extent)
+  Text,    // free text — the raw-config fallback, and any string field
 };
 
 // One input the caller must collect before a kind's factory can be called.
 struct InsertField {
-  std::string id;    // stable field id the caller keys its values by
-  std::string label; // human label
+  std::string id;    // stable field id the caller keys its values by (the arbc field name)
+  std::string label; // human label — the field name plus its unit, when the kind gives one
   InsertFieldType type = InsertFieldType::Text;
-  // The prefilled value. For a raster's `size` this is the root composition's own
-  // extent (Constraint 8: resolution is a first-class insert input — visible,
-  // editable, and never silently applied), NOT a hidden default.
+  // The prefilled value, verbatim from the kind's advertised `default_value` (or empty
+  // for the raw-config fallback). The kind owns its defaults now — the editor no longer
+  // composition-matches a raster's resolution (D-insert_schema-6).
   std::string initial;
 };
 
@@ -63,35 +64,37 @@ struct KindInsertSchema {
   std::string kind_id;    // the registry id, verbatim
   std::string human_name; // `KindMetadata::human_name`, or `kind_id` when absent
   std::vector<InsertField> fields;
-  // True when the editor has no grammar adapter for this kind: the single `config`
-  // field is passed to the kind's factory VERBATIM. A first-class path, not an
-  // error — it is what makes the no-allowlist property testable.
+  // True when the kind advertised NO upstream schema: the single `config` field is
+  // passed to the kind's factory VERBATIM. A first-class path, not an error — it is
+  // what makes the no-allowlist property testable (Constraint 2).
   bool raw_config = false;
+  // The kind's OWN config assembler, copied from `arbc::KindInsertSchema::assemble`
+  // (issue #21): it joins the collected values, in `fields` order, into the opaque
+  // `ContentConfig` string, so the GRAMMAR stays the kind's secret (D-insert_schema-2).
+  // Empty for a raw-config schema (the single field travels verbatim).
+  std::function<arbc::expected<std::string, std::string>(std::span<const std::string>)> assemble;
 };
 
 // The field id every raw-config fallback schema carries.
 inline constexpr std::string_view k_raw_config_field = "config";
 
-// The resolution prefill used when the document has no usable root composition
-// (Constraint 8's "falling back to 1024x1024").
-inline constexpr int k_fallback_resolution = 1024;
-
 // One schema per advertised kind, in registration order — unconditionally. There is
 // no filter by id, by metadata, or by "is it visual" on this path (Constraint 2);
-// `insert_schemas(r, …).size() == r.ids().size()` always holds. `composition` seeds
-// the resolution prefill (pass `project::root_composition_size(document)`).
-std::vector<KindInsertSchema>
-insert_schemas(const arbc::Registry& registry,
-               std::optional<project::CompositionSize> composition = std::nullopt);
+// `insert_schemas(r).size() == r.ids().size()` always holds. Each entry's fields are
+// mirrored from the kind's own `arbc::Registry::insert_schema(id)`; a kind that
+// advertises none gets the raw-config fallback.
+std::vector<KindInsertSchema> insert_schemas(const arbc::Registry& registry);
 
 // The user's answers, keyed by `InsertField::id`.
 using InsertValues = std::vector<std::pair<std::string, std::string>>;
 
-// Assemble the kind's opaque `arbc::ContentConfig` string from `values`. The known
-// grammars are normalised (`" 1024 x 768 "` -> `"1024x768"`, since libarbc's config
-// split does not trim); a raw-config schema passes its one field through verbatim
-// and lets the kind's own factory be the validator. A missing or malformed value is
-// an ERROR VALUE, never a silent default (Constraint 8).
+// Assemble the kind's opaque `arbc::ContentConfig` string from `values`. The values are
+// consumed POSITIONALLY — one per advertised field, in `fields` order (D-insert_schema-3,
+// matching `assemble`'s `std::span` contract and robust to duplicate field names) — and
+// handed to the kind's OWN `assemble` thunk (library kinds). A raw-config schema passes
+// its one field through verbatim and lets the kind's factory be the validator. The editor
+// no longer parses or rejects a value: validation is the factory's, at `add_cell`
+// (D-insert_schema-2 / Constraint 4).
 arbc::expected<std::string, std::string> build_config(const KindInsertSchema& schema,
                                                       const InsertValues& values);
 

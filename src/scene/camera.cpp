@@ -12,6 +12,8 @@
 #include <cctype>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -436,10 +438,23 @@ void register_camera_kind(arbc::Registry& registry) {
     return std::unique_ptr<arbc::Content>(std::make_unique<CameraContent>("", Resolution{}));
   };
 
+  // The editor is a plugin author under its OWN no-allowlist rule (D-insert_schema-4): its
+  // camera kind must advertise an honest insert schema rather than fall to the raw-config
+  // text box a null pointer would produce. The factory is a benign default-construct that
+  // ignores its config, so the honest schema has ZERO fields and an `assemble` returning the
+  // empty string — `insert_schemas` then emits a zero-field, non-`raw_config` entry for it.
+  arbc::KindInsertSchema insert_schema;
+  insert_schema.assemble =
+      [](std::span<const std::string>) -> arbc::expected<std::string, std::string> {
+    return std::string{};
+  };
+
   // First-wins (like `register_builtin_kinds`): a duplicate id is designed idempotency,
   // not an error — a session that registers the kind twice keeps the first.
   (void)registry.add(CameraContent::kind_id, std::move(factory),
-                     arbc::KindMetadata{"Camera", CameraContent::kind_version}, std::move(codec));
+                     arbc::KindMetadata{"Camera", CameraContent::kind_version}, std::move(codec),
+                     /*binder=*/std::nullopt, /*state_walker=*/std::nullopt,
+                     std::move(insert_schema));
 }
 
 namespace {

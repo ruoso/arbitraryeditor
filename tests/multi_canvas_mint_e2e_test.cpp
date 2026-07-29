@@ -357,7 +357,8 @@ TEST_CASE("mint_from_focused_canvas e2e: the framing verbs follow the focused ca
     IM_CHECK(dockspace.insert_modal_open());
     ctx->ItemClick(kind_row(dockspace, "org.arbc.raster").c_str());
     ctx->Yield(2);
-    ctx->ItemInputValue("Insert Cell/###insert_field0", "48x24");
+    ctx->ItemInputValue("Insert Cell/###insert_field0", "48"); // width
+    ctx->ItemInputValue("Insert Cell/###insert_field1", "24"); // height
     ctx->Yield(2);
     ctx->ItemClick("Insert Cell/###insert_confirm");
     IM_CHECK(pump_until(ctx, [&] { return !dockspace.insert_modal_open(); }));

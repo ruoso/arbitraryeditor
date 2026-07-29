@@ -2,12 +2,15 @@
 // registered kind through the `arbc::Registry` seam (A16, D-cells_model-1..9). The
 // load-bearing property is the ABSENCE of a kind allowlist: `scene::insert_schemas`
 // emits one entry per `registry.ids()` entry unconditionally, and a kind the editor
-// has never seen inserts end-to-end through the raw-config fallback. Also covers the
-// grammar adapters, the resolution prefill, `scene::add_cell`'s failure-mutates-
-// nothing contract, the cells/cameras split, the two-entry journal create, and the
-// `project.arbc` roundtrip that needs no new kind registration. Plus the one
-// `render_offline` golden (a nested cell at a computed placement) and its two
-// degenerate byte-equality companions.
+// has never seen inserts end-to-end through the raw-config fallback. The fields, types,
+// defaults and units come from each kind's OWN advertised `arbc::KindInsertSchema`
+// (issue #21) — the editor holds no per-kind grammar — and `build_config` delegates to
+// the kind's `assemble` thunk, so validation is the factory's (surfaced at `add_cell`).
+// Also covers the bounded default solid (issue #22), the editor's own camera schema,
+// `scene::add_cell`'s failure-mutates-nothing contract, the cells/cameras split, the
+// one-entry journal create, and the `project.arbc` roundtrip that needs no new kind
+// registration. Plus the one `render_offline` golden (a nested cell at a computed
+// placement) and its byte-equality companions.
 //
 // No ImGui/GL/SDL (Constraint 1); runs under the ASan/TSan legs (A4/§9).
 
@@ -40,6 +43,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -88,6 +92,38 @@ void register_probe_kind(arbc::Registry& registry) {
   (void)registry.add(k_probe_kind, std::move(factory), arbc::KindMetadata{"Probe", "1"});
 }
 
+// A foreign kind that DOES advertise a library `KindInsertSchema` (issue #21) — the
+// counterpart to `register_probe_kind`'s no-schema kind. Its schema carries a `Text`
+// field and a `Number` field so the editor mirrors named fields (and their display
+// types) for a kind it has never heard of, purely from the library seam.
+constexpr const char* k_schema_probe_kind = "org.example.schema_probe";
+
+void register_schema_probe_kind(arbc::Registry& registry) {
+  arbc::ContentFactory factory =
+      [](arbc::ContentConfig) -> arbc::expected<std::unique_ptr<arbc::Content>, std::string> {
+    return std::unique_ptr<arbc::Content>(
+        std::make_unique<arbc::SolidContent>(arbc::Rgba{0.0F, 0.5F, 0.0F, 1.0F}));
+  };
+  arbc::KindInsertSchema schema;
+  schema.fields = {
+      arbc::KindInsertField{"label", arbc::KindInsertField::Type::Text, "hi", {}, {}, {}},
+      arbc::KindInsertField{"gain", arbc::KindInsertField::Type::Number, "2", {}, {}, "dB"}};
+  schema.assemble =
+      [](std::span<const std::string> values) -> arbc::expected<std::string, std::string> {
+    std::string out;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      if (i != 0) {
+        out.push_back('|');
+      }
+      out.append(values[i]);
+    }
+    return out;
+  };
+  (void)registry.add(k_schema_probe_kind, std::move(factory),
+                     arbc::KindMetadata{"Schema Probe", "1"}, /*codec=*/std::nullopt,
+                     /*binder=*/std::nullopt, /*state_walker=*/std::nullopt, std::move(schema));
+}
+
 // The editor's own registry seeding (mirrors `commands::register_editor_kinds`).
 arbc::Registry cell_registry() {
   arbc::Registry registry;
@@ -98,7 +134,8 @@ arbc::Registry cell_registry() {
 
 arbc::Registry cell_registry_with_probe() {
   arbc::Registry registry = cell_registry();
-  register_probe_kind(registry);
+  register_probe_kind(registry);        // a foreign kind WITHOUT a schema (raw-config)
+  register_schema_probe_kind(registry); // a foreign kind WITH a library schema
   return registry;
 }
 
@@ -158,19 +195,36 @@ TEST_CASE("insert_schemas emits one entry per registered kind, in registration o
   CHECK(schema_for(schemas, k_probe_kind).human_name == "Probe");
 
   // The editor-unknown kind gets the raw-config fallback: a single free-text field
-  // whose value travels to the kind's factory verbatim.
+  // whose value travels to the kind's factory verbatim (the probe advertises no schema).
   const KindInsertSchema& probe = schema_for(schemas, k_probe_kind);
   CHECK(probe.raw_config);
   REQUIRE(probe.fields.size() == 1);
   CHECK(probe.fields[0].id == std::string(ace::scene::k_raw_config_field));
   CHECK(probe.fields[0].type == ace::scene::InsertFieldType::Text);
 
-  // The adapters are an ENHANCEMENT over that universal enumeration, not a gate.
+  // A schema-bearing kind emits its OWN advertised named fields, read back through
+  // `Registry::insert_schema(id)` — never an editor adapter (D-insert_schema-1).
   const KindInsertSchema& raster = schema_for(schemas, "org.arbc.raster");
   CHECK_FALSE(raster.raw_config);
-  REQUIRE(raster.fields.size() == 1);
-  CHECK(raster.fields[0].id == "size");
-  CHECK(raster.fields[0].type == ace::scene::InsertFieldType::Size);
+  REQUIRE(raster.fields.size() == 2);
+  CHECK(raster.fields[0].id == "width");
+  CHECK(raster.fields[1].id == "height");
+  CHECK(raster.fields[0].type == ace::scene::InsertFieldType::Integer);
+
+  // A FOREIGN kind the editor has never seen, but which DOES advertise a library schema,
+  // gets its named fields and display types mirrored automatically — the plugin seam
+  // working as designed (Acceptance 1). Both the `Text` and `Number` display hints map.
+  const KindInsertSchema& schema_probe = schema_for(schemas, k_schema_probe_kind);
+  CHECK_FALSE(schema_probe.raw_config);
+  REQUIRE(schema_probe.fields.size() == 2);
+  CHECK(schema_probe.fields[0].id == "label");
+  CHECK(schema_probe.fields[0].type == ace::scene::InsertFieldType::Text);
+  CHECK(schema_probe.fields[1].id == "gain");
+  CHECK(schema_probe.fields[1].label == "gain (dB)"); // unit composed into the label
+  CHECK(schema_probe.fields[1].type == ace::scene::InsertFieldType::Number);
+  // Its own assembler builds the config — the editor never learns the '|' separator.
+  CHECK(config_for(schemas, k_schema_probe_kind, InsertValues{{"label", "hi"}, {"gain", "3"}}) ==
+        "hi|3");
 }
 
 TEST_CASE("a kind the editor has never seen inserts end-to-end through the fallback") {
@@ -200,70 +254,102 @@ TEST_CASE("a kind the editor has never seen inserts end-to-end through the fallb
   CHECK(refused.error() == "org.example.probe: config must not be empty");
 }
 
-// --- The grammar adapters (D-cells_model-2) ----------------------------------
+// --- build_config delegates to the kind's own assemble (D-insert_schema-2/3) --
 
-TEST_CASE("build_config assembles the known grammars and rejects malformed values") {
+TEST_CASE("build_config delegates to the kind's own assemble — the editor owns no grammar") {
   const arbc::Registry registry = cell_registry_with_probe();
   const std::vector<KindInsertSchema> schemas = ace::scene::insert_schemas(registry);
 
-  // Raster: "<w>x<h>". Normalised, because libarbc's config split does not trim.
-  CHECK(config_for(schemas, "org.arbc.raster", InsertValues{{"size", "1024x768"}}) == "1024x768");
-  CHECK(config_for(schemas, "org.arbc.raster", InsertValues{{"size", " 1024 x 768 "}}) ==
-        "1024x768");
-  // Solid: "r,g,b,a" premultiplied working floats.
-  CHECK(config_for(schemas, "org.arbc.solid", InsertValues{{"color", "0.5,0,0,1"}}) == "0.5,0,0,1");
-  CHECK(config_for(schemas, "org.arbc.solid", InsertValues{{"color", "0.5, 0, 0, 1"}}) ==
-        "0.5,0,0,1");
-  // Nested: the child composition's decimal ObjectId.
-  CHECK(config_for(schemas, "org.arbc.nested", InsertValues{{"child", " 7 "}}) == "7");
-  // The fallback passes its one field through untouched, junk included.
+  // Solid's 8 fields are comma-joined BY THE KIND (issue #21); the editor never learns
+  // the separator and hands the values back in field order (D-insert_schema-2/3).
+  CHECK(config_for(schemas, "org.arbc.solid",
+                   InsertValues{{"red", "0.5"},
+                                {"green", "0"},
+                                {"blue", "0"},
+                                {"alpha", "1"},
+                                {"x", "0"},
+                                {"y", "0"},
+                                {"width", "256"},
+                                {"height", "256"}}) == "0.5,0,0,1,0,0,256,256");
+  // Raster's two fields are x-joined by the kind.
+  CHECK(config_for(schemas, "org.arbc.raster",
+                   InsertValues{{"width", "1024"}, {"height", "768"}}) == "1024x768");
+  // `assemble` only JOINS — it never trims, because normalisation was editor grammar
+  // knowledge and that is exactly what this leaf retired. Whitespace travels verbatim to
+  // the kind's factory, the single validator.
+  CHECK(config_for(schemas, "org.arbc.raster",
+                   InsertValues{{"width", " 1024 "}, {"height", " 768 "}}) == " 1024 x 768 ");
+  // Nested advertises NO upstream schema (v0.4.0), so it now travels through the
+  // raw-config fallback: its one field, verbatim.
+  CHECK(schema_for(schemas, "org.arbc.nested").raw_config);
+  CHECK(config_for(schemas, "org.arbc.nested", InsertValues{{"config", "7"}}) == "7");
+  // The editor-unknown probe's fallback passes its one field through untouched.
   CHECK(config_for(schemas, k_probe_kind, InsertValues{{"config", "  raw , stuff "}}) ==
         "  raw , stuff ");
+  // THE headline property: a kind the editor NEVER wrote an adapter for (tone) still gets
+  // its named fields and a working assemble, with zero editor code per kind.
+  CHECK(config_for(schemas, "org.arbc.tone",
+                   InsertValues{{"frequency", "440"}, {"amplitude", "0.5"}}) == "440,0.5");
 
-  // Malformed values are ERROR VALUES, never a silent default (Constraint 8).
-  const auto rejects = [&schemas](std::string_view kind_id, const InsertValues& values) {
-    const arbc::expected<std::string, std::string> config =
-        ace::scene::build_config(schema_for(schemas, kind_id), values);
-    CHECK_FALSE(config.has_value());
-  };
-  rejects("org.arbc.raster", InsertValues{{"size", ""}});
-  rejects("org.arbc.raster", InsertValues{{"size", "0x768"}});
-  rejects("org.arbc.raster", InsertValues{{"size", "-4x8"}});
-  rejects("org.arbc.raster", InsertValues{{"size", "big"}});
-  rejects("org.arbc.raster", InsertValues{{"size", "1024"}});
-  rejects("org.arbc.raster", InsertValues{}); // the field was never collected
-  rejects("org.arbc.solid", InsertValues{{"color", "1,2,3"}});
-  rejects("org.arbc.solid", InsertValues{{"color", "a,b,c,d"}});
-  rejects("org.arbc.nested", InsertValues{{"child", "0"}});
-  rejects("org.arbc.nested", InsertValues{{"child", "-1"}});
-  rejects(k_probe_kind, InsertValues{{"wrong_field", "x"}});
+  // `build_config` no longer parses or rejects a VALUE (D-insert_schema-2): a malformed
+  // value is not caught here — it is the factory's job now, asserted at `add_cell` below.
+  // The one editor-side error is a value the caller never collected (a short vector).
+  const arbc::expected<std::string, std::string> missing = ace::scene::build_config(
+      schema_for(schemas, "org.arbc.raster"), InsertValues{{"width", "8"}});
+  CHECK_FALSE(missing.has_value());
 }
 
-TEST_CASE("the raster resolution field is prefilled from the composition, never auto-applied") {
+TEST_CASE("library-backed field mapping mirrors each kind's advertised schema") {
   const arbc::Registry registry = cell_registry();
+  const std::vector<KindInsertSchema> schemas = ace::scene::insert_schemas(registry);
 
-  // Prefilled from the root composition's own extent (a probe document is 64x64).
-  const ace::project::ProbeDocument probe = ace::project::build_probe_document();
-  const std::vector<KindInsertSchema> seeded =
-      ace::scene::insert_schemas(registry, ace::project::root_composition_size(*probe.document));
-  CHECK(schema_for(seeded, "org.arbc.raster").fields[0].initial == "64x64");
+  // Solid: 8 fields, defaults 1,1,1,1,0,0,256,256, `px` units on the extent fields
+  // (issue #22's placeable-by-default solid). Names and order are the kind's own.
+  const KindInsertSchema& solid = schema_for(schemas, "org.arbc.solid");
+  CHECK_FALSE(solid.raw_config);
+  REQUIRE(solid.fields.size() == 8);
+  const char* const names[] = {"red", "green", "blue", "alpha", "x", "y", "width", "height"};
+  const char* const defaults[] = {"1", "1", "1", "1", "0", "0", "256", "256"};
+  for (std::size_t i = 0; i < 8; ++i) {
+    CHECK(solid.fields[i].id == names[i]);
+    CHECK(solid.fields[i].initial == defaults[i]);
+  }
+  // A unit is composed into the LABEL; the id stays the bare field name (Constraint 5).
+  CHECK(solid.fields[0].label == "red"); // no unit -> bare name
+  CHECK(solid.fields[4].label == "x (px)");
+  CHECK(solid.fields[6].label == "width (px)");
+  CHECK(solid.fields[0].type == ace::scene::InsertFieldType::Number);
 
-  // No composition (or a degenerate authored size) falls back to 1024x1024.
-  const arbc::Document empty;
-  const std::vector<KindInsertSchema> bare =
-      ace::scene::insert_schemas(registry, ace::project::root_composition_size(empty));
-  CHECK(schema_for(bare, "org.arbc.raster").fields[0].initial == "1024x1024");
-  CHECK(schema_for(bare, "org.arbc.raster").fields[0].initial ==
-        std::to_string(ace::scene::k_fallback_resolution) + "x" +
-            std::to_string(ace::scene::k_fallback_resolution));
+  // Raster: width,height Integer, default 1024 — the kind's OWN default, not a
+  // composition-matched prefill (D-insert_schema-6).
+  const KindInsertSchema& raster = schema_for(schemas, "org.arbc.raster");
+  REQUIRE(raster.fields.size() == 2);
+  CHECK(raster.fields[0].id == "width");
+  CHECK(raster.fields[1].id == "height");
+  CHECK(raster.fields[0].initial == "1024");
+  CHECK(raster.fields[1].initial == "1024");
+  CHECK(raster.fields[0].type == ace::scene::InsertFieldType::Integer);
 
-  // The field is ALWAYS present — the user specifies the resolution at insert
-  // (docs/00-design.md:116-119); an empty value blocks the insert rather than
-  // silently applying a default.
-  REQUIRE(schema_for(seeded, "org.arbc.raster").fields.size() == 1);
-  const arbc::expected<std::string, std::string> blank =
-      ace::scene::build_config(schema_for(seeded, "org.arbc.raster"), InsertValues{{"size", ""}});
-  CHECK_FALSE(blank.has_value());
+  // Tone: a kind the editor NEVER wrote an adapter for now gets named fields
+  // automatically — the whole point of reading the kind's own schema.
+  const KindInsertSchema& tone = schema_for(schemas, "org.arbc.tone");
+  CHECK_FALSE(tone.raw_config);
+  REQUIRE(tone.fields.size() == 2);
+  CHECK(tone.fields[0].id == "frequency");
+  CHECK(tone.fields[1].id == "amplitude");
+  CHECK(tone.fields[0].label == "frequency (Hz)");
+
+  // Camera: the editor's OWN kind advertises a ZERO-field, non-raw_config schema
+  // (D-insert_schema-4) — the editor practises the no-allowlist rule it enforces on
+  // everyone else, rather than showing a config box for a config-ignoring kind.
+  CHECK(registry.insert_schema(ace::scene::CameraContent::kind_id) != nullptr);
+  const KindInsertSchema& camera = schema_for(schemas, ace::scene::CameraContent::kind_id);
+  CHECK_FALSE(camera.raw_config);
+  CHECK(camera.fields.empty());
+  const arbc::expected<std::string, std::string> empty =
+      ace::scene::build_config(camera, InsertValues{});
+  REQUIRE(empty.has_value());
+  CHECK(empty->empty());
 }
 
 // --- add_cell / cells() (Constraint 3/9) -------------------------------------
@@ -285,17 +371,26 @@ TEST_CASE("add_cell mints solid, raster and nested cells that cells() reads back
   const arbc::Affine raster_at = arbc::Affine::translation(5.0, 7.0);
   const arbc::Affine nested_at{2.0, 0.0, 0.0, 2.0, 1.0, 3.0};
 
-  REQUIRE(ace::scene::add_cell(
-              state.document(), state.registry(), "org.arbc.solid",
-              config_for(schemas, "org.arbc.solid", InsertValues{{"color", "0.5,0,0,1"}}), solid_at)
+  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid",
+                               config_for(schemas, "org.arbc.solid",
+                                          InsertValues{{"red", "0.5"},
+                                                       {"green", "0"},
+                                                       {"blue", "0"},
+                                                       {"alpha", "1"},
+                                                       {"x", "0"},
+                                                       {"y", "0"},
+                                                       {"width", "256"},
+                                                       {"height", "256"}}),
+                               solid_at)
               .has_value());
-  REQUIRE(ace::scene::add_cell(
-              state.document(), state.registry(), "org.arbc.raster",
-              config_for(schemas, "org.arbc.raster", InsertValues{{"size", "16x24"}}), raster_at)
+  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster",
+                               config_for(schemas, "org.arbc.raster",
+                                          InsertValues{{"width", "16"}, {"height", "24"}}),
+                               raster_at)
               .has_value());
   REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.nested",
                                config_for(schemas, "org.arbc.nested",
-                                          InsertValues{{"child", std::to_string(child.value)}}),
+                                          InsertValues{{"config", std::to_string(child.value)}}),
                                nested_at)
               .has_value());
 
@@ -339,9 +434,13 @@ TEST_CASE("a failing factory mutates nothing — no content, no transaction, no 
   refuses("org.arbc.crossfade", "", "org.arbc.crossfade");
   // A kind that is not registered at all.
   refuses("org.example.nope", "whatever", "not a registered kind");
-  // A well-known kind with a malformed config: the kind's parser is the validator.
+  // A well-known kind with a malformed config: the kind's parser is the validator, and
+  // (D-insert_schema-2) that is now the ONLY validator — `build_config` no longer rejects.
   refuses("org.arbc.raster", "0x0", "org.arbc.raster");
   refuses("org.arbc.solid", "not,a,colour,x", "org.arbc.solid");
+  // issue #22's non-positive extent is an error VALUE at the factory: the assembled config
+  // is well-formed (`build_config` joined it), but the solid factory refuses it.
+  refuses("org.arbc.solid", "1,1,1,1,0,0,-4,10", "positive");
 }
 
 TEST_CASE("add_cell with no root composition is a no-op") {
@@ -606,14 +705,14 @@ TEST_CASE("a freshly inserted raster is transparent: the rendered bytes are unch
   CHECK(after.pixels == before.pixels);
 }
 
-TEST_CASE("an inserted opaque solid is unbounded: it fills the frame uniformly") {
+TEST_CASE("an explicit 4-field solid is unbounded: it fills the frame uniformly") {
   const ace::project::ProbeDocument probe = ace::project::build_probe_document();
   arbc::Registry registry;
   arbc::register_builtin_kinds(registry);
 
-  // A Registry-constructed solid has NO bounds — its config grammar admits none
-  // (D-cells_model-3) — so it paints everywhere and its placement is a no-op. That
-  // consequence is accepted and pinned here rather than special-cased away.
+  // The 4-field `r,g,b,a` grammar still yields an UNBOUNDED solid (issue #22 kept it as
+  // the honest "background fill"): no bounds, so it paints everywhere and its placement is
+  // a no-op. That consequence is pinned here rather than special-cased away.
   const arbc::expected<std::optional<arbc::Rect>, std::string> bounds =
       ace::scene::probe_bounds(registry, "org.arbc.solid", "0,0,0.75,1");
   REQUIRE(bounds.has_value());
@@ -636,4 +735,49 @@ TEST_CASE("an inserted opaque solid is unbounded: it fills the frame uniformly")
     REQUIRE(image.pixels[at + 2] == first[2]);
     REQUIRE(image.pixels[at + 3] == first[3]);
   }
+}
+
+TEST_CASE("a default 8-field solid is bounded and places as a non-full-frame rectangle") {
+  const ace::project::ProbeDocument probe = ace::project::build_probe_document();
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+
+  // issue #22 / D-insert_schema-5: the dialog-default solid carries an extent, so
+  // `probe_bounds` returns a real Rect and `place_in_view` centres+scales it — a
+  // non-identity placement, retiring D-cells_model-3's unbounded-solid consequence.
+  const std::string config = "1,1,1,1,0,0,256,256"; // the schema defaults, comma-joined
+  const arbc::expected<std::optional<arbc::Rect>, std::string> bounds =
+      ace::scene::probe_bounds(registry, "org.arbc.solid", config);
+  REQUIRE(bounds.has_value());
+  REQUIRE(bounds->has_value());
+  const arbc::Affine placement = ace::interact::place_in_view(
+      arbc::Affine::identity(), ace::project::k_probe_width, ace::project::k_probe_height, *bounds);
+  CHECK_FALSE(placement == arbc::Affine::identity()); // placed, not the unbounded no-op
+
+  REQUIRE(ace::scene::add_cell(*probe.document, registry, "org.arbc.solid", config, placement)
+              .has_value());
+  const std::vector<Cell> listed = ace::scene::cells(*probe.document, registry);
+  REQUIRE(listed.size() == 2); // the probe's own untokened solid + this one
+  CHECK(listed.back().kind_id == "org.arbc.solid");
+  CHECK(listed.back().content_bounds.has_value()); // bounded, unlike the 4-field fill
+
+  // The rendered frame is NOT a uniform fill: the 256-unit solid, scaled into the 64x64
+  // view, leaves the green probe visible at the corners — the byte companion that pins the
+  // 8-field grammar as a placed rectangle beside the 4-field uniform fill above.
+  const ace::render::Srgb8Image image = ace::render::render_document_srgb8(
+      *probe.document, ace::project::k_probe_width, ace::project::k_probe_height);
+  const auto pixel_at = [&image](int x, int y) {
+    const std::size_t at = (static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width) +
+                            static_cast<std::size_t>(x)) *
+                           4;
+    return std::vector<std::uint8_t>{image.pixels[at], image.pixels[at + 1], image.pixels[at + 2],
+                                     image.pixels[at + 3]};
+  };
+  const std::vector<std::uint8_t> corner = pixel_at(2, 2);
+  const std::vector<std::uint8_t> centre = pixel_at(32, 32);
+  CHECK(corner[1] > corner[0]); // green probe still visible at the corner (not covered)
+  CHECK(corner[1] > corner[2]);
+  CHECK(centre[0] > 200); // the white solid at the centre
+  CHECK(centre[1] > 200);
+  CHECK(centre[2] > 200);
 }

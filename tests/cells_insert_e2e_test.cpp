@@ -187,17 +187,21 @@ TEST_CASE("cells insert e2e: registry-length kind list, prefilled resolution, in
     // A kind whose factory ALWAYS refuses is still offered (Constraint 3).
     IM_CHECK(ctx->ItemExists(kind_row(dockspace, "org.arbc.fade").c_str()));
 
-    // --- (ii) Raster: a prefilled, editable resolution inserts a cell --------
+    // --- (ii) Raster: prefilled, editable width/height inserts a cell --------
     ctx->ItemClick(kind_row(dockspace, "org.arbc.raster").c_str());
     ctx->Yield(2);
-    // The resolution field is present and PREFILLED from the root composition
-    // (Constraint 8) — never blank, never silently applied.
+    // The raster advertises TWO fields (width, height), prefilled from the KIND's own
+    // 1024 default — no editor composition-matched prefill (D-insert_schema-6).
     IM_CHECK(ctx->ItemExists("Insert Cell/###insert_field0"));
-    IM_CHECK(dockspace.insert_field_value(0) == "64x64");
+    IM_CHECK(ctx->ItemExists("Insert Cell/###insert_field1"));
+    IM_CHECK(dockspace.insert_field_value(0) == "1024");
+    IM_CHECK(dockspace.insert_field_value(1) == "1024");
 
-    ctx->ItemInputValue("Insert Cell/###insert_field0", "48x24");
+    ctx->ItemInputValue("Insert Cell/###insert_field0", "48");
+    ctx->ItemInputValue("Insert Cell/###insert_field1", "24");
     ctx->Yield(2);
-    IM_CHECK(dockspace.insert_field_value(0) == "48x24");
+    IM_CHECK(dockspace.insert_field_value(0) == "48");
+    IM_CHECK(dockspace.insert_field_value(1) == "24");
     ctx->ItemClick("Insert Cell/###insert_confirm");
     IM_CHECK(pump_until(ctx, [&] { return !dockspace.insert_modal_open(); }));
     ctx->Yield(2);
@@ -224,9 +228,15 @@ TEST_CASE("cells insert e2e: registry-length kind list, prefilled resolution, in
     IM_CHECK(dockspace.insert_error().find("org.arbc.fade") != std::string::npos);
     IM_CHECK(ace::scene::cells(state.document(), state.registry()).size() == 1);
 
-    // --- (iv) Cancel mutates nothing -----------------------------------------
+    // --- (iv) Solid renders its 8 advertised fields; Cancel mutates nothing ---
     ctx->ItemClick(kind_row(dockspace, "org.arbc.solid").c_str());
     ctx->Yield(2);
+    // Solid now renders its EIGHT advertised fields, prefilled from the kind's own
+    // defaults (issue #22's placeable-by-default 256x256 extent) — no editor adapter.
+    IM_CHECK(ctx->ItemExists("Insert Cell/###insert_field7"));
+    IM_CHECK(dockspace.insert_field_value(0) == "1");   // red
+    IM_CHECK(dockspace.insert_field_value(6) == "256"); // width
+    IM_CHECK(dockspace.insert_field_value(7) == "256"); // height
     ctx->ItemClick("Insert Cell/###insert_cancel");
     IM_CHECK(pump_until(ctx, [&] { return !dockspace.insert_modal_open(); }));
     ctx->Yield(2);
@@ -300,13 +310,14 @@ TEST_CASE("cells insert gateway: registry-driven kinds, composition-framed fallb
     }
   }
   REQUIRE(raster != nullptr);
-  REQUIRE(raster->fields.size() == 1);
-  CHECK(raster->fields[0].id == "size");
-  CHECK(raster->fields[0].initial == "64x64"); // prefilled from the composition
+  REQUIRE(raster->fields.size() == 2);
+  CHECK(raster->fields[0].id == "width");
+  CHECK(raster->fields[1].id == "height");
+  CHECK(raster->fields[0].initial == "1024"); // the KIND's own default, not the composition
 
   // A good insert: the placement is computed from the composition's own extent, so a
   // 32x16 raster is centred and scaled rather than dumped at the origin.
-  CHECK(gateway.insert_cell("org.arbc.raster", {{"size", "32x16"}}).empty());
+  CHECK(gateway.insert_cell("org.arbc.raster", {{"width", "32"}, {"height", "16"}}).empty());
   const std::vector<ace::scene::Cell> cells = ace::scene::cells(state.document(), state.registry());
   REQUIRE(cells.size() == 1);
   CHECK(cells[0].kind_id == "org.arbc.raster");
@@ -317,8 +328,11 @@ TEST_CASE("cells insert gateway: registry-driven kinds, composition-framed fallb
   // Every refusal is a value, and none of them mutates the document.
   CHECK(gateway.insert_cell("org.example.nope", {}).find("not a registered kind") !=
         std::string::npos);
-  CHECK(gateway.insert_cell("org.arbc.raster", {{"size", "bad"}}).find("org.arbc.raster") !=
-        std::string::npos);
+  // A malformed value is refused by the FACTORY now (Constraint 4): `build_config` joins
+  // "bad" and "8" into "badx8", the raster factory rejects it with its own message.
+  CHECK(gateway.insert_cell("org.arbc.raster", {{"width", "bad"}, {"height", "8"}})
+            .find("org.arbc.raster") != std::string::npos);
+  // fade advertises no schema -> the raw-config fallback; its factory always refuses.
   CHECK(gateway.insert_cell("org.arbc.fade", {{"config", ""}}).find("org.arbc.fade") !=
         std::string::npos);
   CHECK(ace::scene::cells(state.document(), state.registry()).size() == 1);

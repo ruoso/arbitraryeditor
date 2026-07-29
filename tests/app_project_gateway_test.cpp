@@ -1213,7 +1213,8 @@ TEST_CASE("AppProjectGateway::new_shot_from_view refuses when no canvas pane is 
   // …but `insert_cell`'s provisional placement still HAS that fallback in the very same state,
   // which is what the `view_framing()` split preserves: the refactor must not regress the one
   // consumer the fallback exists for.
-  const std::string error = gateway.insert_cell("org.arbc.raster", {{"size", "16x16"}});
+  const std::string error =
+      gateway.insert_cell("org.arbc.raster", {{"width", "16"}, {"height", "16"}});
   CHECK(error.empty());
   CHECK(session.document().journal().depth() > depth_before);
 }
