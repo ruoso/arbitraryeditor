@@ -89,6 +89,12 @@ make_content(const arbc::Registry& registry, std::string_view kind_id, std::stri
 // TSan anchor covers it). `bounds` is the same value the caller already read off this pin.
 CellDetail classify_detail(arbc::Content& content, const std::optional<arbc::Rect>& bounds) {
   CellDetail detail;
+  // D11's "bytes where?" axis, orthogonal to the editable? classification below and read from the
+  // SAME generic facet `ReferencedImage` keys on (A16 / D-layers-4): a non-empty external asset ref
+  // means the bytes live in a borrowed external file; empty means owned. A painted grid and a
+  // resolution-independent cell are owned; a pasted owned image is owned; a referenced photo
+  // borrows.
+  detail.borrowed = !content.external_asset_ref().empty();
   if (content.editable() != nullptr) {
     detail.source = DetailSource::PaintedRaster;
   } else if (!content.external_asset_ref().empty()) {
@@ -104,6 +110,44 @@ CellDetail classify_detail(arbc::Content& content, const std::optional<arbc::Rec
                                                static_cast<int>(std::lround(bounds->height()))};
   }
   return detail;
+}
+
+// The shared cell walk `cells()` and its composition-parameterised overload both drive: over an
+// already-taken pin `state` and a `bridge` seeded from the same registry, collect every non-camera
+// member of `composition` in bottom→top membership order. Empty for an invalid id or a composition
+// the document does not hold. Factored out so the root and the nested (expand/enter) reads stay one
+// walk with one kind-resolution / camera-exclusion / unknown-passthrough rule (D-layers-5).
+std::vector<Cell> walk_cells(const arbc::Document& document, const arbc::KindBridge& bridge,
+                             const arbc::DocRoot& state, arbc::ObjectId composition) {
+  std::vector<Cell> result;
+  if (!composition.valid() || state.find_composition(composition) == nullptr) {
+    return result;
+  }
+  state.for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
+    const arbc::LayerRecord* layer = state.find_layer(layer_id);
+    if (layer == nullptr || !layer->content.valid()) {
+      return;
+    }
+    const arbc::ContentRecord* record = state.find_content(layer->content);
+    if (record == nullptr) {
+      return;
+    }
+    std::string_view id;
+    std::string_view version;
+    const bool named = bridge.lookup(record->kind, id, version);
+    if (named && id == CameraContent::kind_id) {
+      return; // a camera is a scene object, but it is not a cell (A14)
+    }
+    std::optional<arbc::Rect> bounds;
+    CellDetail detail;
+    if (arbc::Content* content = document.resolve(layer->content); content != nullptr) {
+      bounds = content->bounds();
+      detail = classify_detail(*content, bounds);
+    }
+    result.push_back(Cell{layer->content, layer_id, named ? std::string(id) : std::string(),
+                          layer->transform, bounds, detail, layer->opacity, layer->visible()});
+  });
+  return result;
 }
 
 } // namespace
@@ -272,7 +316,6 @@ std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> 
 }
 
 std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& registry) {
-  std::vector<Cell> result;
   // The reverse map: seeded from the same registry the insert side interned through,
   // so a token minted by `add_cell` (or by `save`/`open`) names the same kind here.
   arbc::KindBridge bridge;
@@ -280,45 +323,59 @@ std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& re
 
   const arbc::DocStatePtr state = document.pin();
   if (!state) {
-    return result;
+    return {};
   }
-  arbc::ObjectId root_id;
-  const arbc::CompositionRecord* root_rec = nullptr;
-  if (!state->find_first_composition(root_id, root_rec) || root_rec == nullptr) {
-    return result; // no composition — no cells
+  // The root (lowest-id) composition; empty when the document has none. The whole walk — kind
+  // resolution off `bridge`, the camera exclusion, the unknown-passthrough empty `kind_id`, the
+  // opacity/visibility off the `LayerRecord`, the `content_bounds`/`detail` off the SAME pinned
+  // generation as the placement (D-selection-11) — lives in `walk_cells`, shared with the
+  // composition-parameterised overload below.
+  return walk_cells(document, bridge, *state, root_composition(*state));
+}
+
+std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& registry,
+                        arbc::ObjectId composition) {
+  arbc::KindBridge bridge;
+  project::seed_kind_bridge(bridge, registry);
+
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return {};
   }
-  state->for_each_layer_in(root_id, [&](arbc::ObjectId layer_id) {
-    const arbc::LayerRecord* layer = state->find_layer(layer_id);
-    if (layer == nullptr || !layer->content.valid()) {
-      return;
-    }
-    const arbc::ContentRecord* record = state->find_content(layer->content);
-    if (record == nullptr) {
-      return;
-    }
-    std::string_view id;
-    std::string_view version;
-    const bool named = bridge.lookup(record->kind, id, version);
-    if (named && id == CameraContent::kind_id) {
-      return; // a camera is a scene object, but it is not a cell (A14)
-    }
-    // The live extent, off the SAME pinned generation as the placement (D-selection-11).
-    // `Document::resolve` is a lock-free pinned read of the copy-on-write binding table, so
-    // this adds no lock and no second walk; an unbound id (or an unbounded kind) is `nullopt`,
-    // which is the honest "covers the whole plane" answer, not an error.
-    std::optional<arbc::Rect> bounds;
-    CellDetail detail;
-    if (arbc::Content* content = document.resolve(layer->content); content != nullptr) {
-      bounds = content->bounds();
-      detail = classify_detail(*content, bounds);
-    }
-    // An unresolvable token surfaces with an empty kind_id rather than vanishing —
-    // an unknown-passthrough cell is still a cell (D-cells_model-8). Opacity/visibility ride
-    // out of the same LayerRecord so the inspector's Appearance block reads them off this walk.
-    result.push_back(Cell{layer->content, layer_id, named ? std::string(id) : std::string(),
-                          layer->transform, bounds, detail, layer->opacity, layer->visible()});
-  });
-  return result;
+  return walk_cells(document, bridge, *state, composition);
+}
+
+std::optional<arbc::ObjectId> nested_composition_of(const arbc::Document& document,
+                                                    arbc::ObjectId cell) {
+  if (!cell.valid()) {
+    return std::nullopt;
+  }
+  // Generic facet read (A16 / D-resolution-2): the child composition a nested kind wraps rides
+  // `composition_ref()`, never a `kind_id` string-switch. A non-nested cell returns an invalid ref.
+  arbc::Content* content = document.resolve(cell);
+  if (content == nullptr) {
+    return std::nullopt;
+  }
+  const arbc::ObjectId child = content->composition_ref();
+  if (!child.valid()) {
+    return std::nullopt;
+  }
+  return child;
+}
+
+arbc::ObjectId active_composition(const arbc::Document& document,
+                                  std::optional<arbc::ObjectId> entered) {
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return {};
+  }
+  // Fail-safe (Constraint 8 / D-look_through-7): the entered scope targets a live composition, else
+  // Root. A `nullopt` scope, or one naming a GC'd/undone-away/foreign id, resolves to Root here —
+  // re-evaluated every frame, so a vanished scope silently degrades rather than crashing.
+  if (entered && entered->valid() && state->find_composition(*entered) != nullptr) {
+    return *entered;
+  }
+  return root_composition(*state);
 }
 
 ZOrderPosition z_order_position(const std::vector<Cell>& ordered, arbc::ObjectId id) {
@@ -373,6 +430,80 @@ arbc::ObjectId placing_layer(const arbc::Document& document, arbc::ObjectId cell
   return found;
 }
 
+// One raw membership slot of a composition: the content it places and whether that content is a
+// CAMERA. `cells()` filters cameras out, so cells-space (camera-excluded) indices — which the list,
+// `z_order_position`, and the drag helper all speak — must be translated to raw `reorder_layer`
+// indices, which include camera slots. A camera is detected registry-free by the same
+// `dynamic_cast<CameraContent*>` the `set_cell_*` verbs use (A14), so this needs no registry.
+struct RawSlot {
+  arbc::ObjectId content;
+  bool is_camera = false;
+};
+std::vector<RawSlot> raw_membership(const arbc::Document& document, const arbc::DocRoot& state,
+                                    arbc::ObjectId composition) {
+  std::vector<RawSlot> raw;
+  state.for_each_layer_in(composition, [&](arbc::ObjectId layer_id) {
+    const arbc::LayerRecord* layer = state.find_layer(layer_id);
+    const arbc::ObjectId content = layer != nullptr ? layer->content : arbc::ObjectId{};
+    const bool camera = dynamic_cast<CameraContent*>(document.resolve(content)) != nullptr;
+    raw.push_back(RawSlot{content, camera});
+  });
+  return raw;
+}
+
+// Descend nested-cell `composition_ref()` links from `comp` collecting the crumb path to `target`.
+// Pushes each visited composition (with a display label — "Root" seeded by the caller, else the
+// descent cell's kind id, or "Nested" when unresolvable) as it goes and pops on a dead branch, so
+// `out` ends holding exactly `[comp … target]` on success and is left unchanged on failure. Pure
+// display, never a behavior branch on the kind (A16). Cycle-free by construction over a DAG.
+struct PathBuilder {
+  const arbc::Document& document;
+  const arbc::DocRoot& state;
+  const arbc::KindBridge& bridge;
+  arbc::ObjectId target;
+  std::vector<Breadcrumb>& out;
+
+  bool descend(arbc::ObjectId comp, std::string label) {
+    out.push_back(Breadcrumb{comp, std::move(label)});
+    if (comp == target) {
+      return true;
+    }
+    bool found = false;
+    state.for_each_layer_in(comp, [&](arbc::ObjectId layer_id) {
+      if (found) {
+        return;
+      }
+      const arbc::LayerRecord* layer = state.find_layer(layer_id);
+      if (layer == nullptr || !layer->content.valid()) {
+        return;
+      }
+      arbc::Content* content = document.resolve(layer->content);
+      if (content == nullptr) {
+        return;
+      }
+      const arbc::ObjectId child = content->composition_ref();
+      if (!child.valid()) {
+        return;
+      }
+      std::string child_label = "Nested";
+      if (const arbc::ContentRecord* rec = state.find_content(layer->content); rec != nullptr) {
+        std::string_view id;
+        std::string_view version;
+        if (bridge.lookup(rec->kind, id, version) && !id.empty()) {
+          child_label = std::string(id);
+        }
+      }
+      if (descend(child, std::move(child_label))) {
+        found = true;
+      }
+    });
+    if (!found) {
+      out.pop_back();
+    }
+    return found;
+  }
+};
+
 } // namespace
 
 bool set_cell_opacity(arbc::Document& document, const arbc::Registry& /*registry*/,
@@ -408,6 +539,119 @@ bool set_cell_visible(arbc::Document& document, const arbc::Registry& /*registry
   }
   auto txn = document.transact("set_cell_visible");
   txn.set_visible(layer, visible);
+  txn.commit();
+  return true;
+}
+
+std::vector<Breadcrumb> composition_path(const arbc::Document& document,
+                                         const arbc::Registry& registry,
+                                         std::optional<arbc::ObjectId> entered) {
+  std::vector<Breadcrumb> result;
+  arbc::KindBridge bridge;
+  project::seed_kind_bridge(bridge, registry);
+
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return result;
+  }
+  const arbc::ObjectId root = root_composition(*state);
+  if (!root.valid()) {
+    return result; // no composition at all — no breadcrumb
+  }
+  const arbc::ObjectId target = (entered && entered->valid()) ? *entered : root;
+  PathBuilder builder{document, *state, bridge, target, result};
+  if (!builder.descend(root, "Root")) {
+    // Fail-safe (Constraint 9): the entered composition is not reachable from Root (GC'd, undone
+    // away, or a foreign id) — the path degrades to Root only, exactly as `active_composition`
+    // does.
+    result.clear();
+    result.push_back(Breadcrumb{root, "Root"});
+  }
+  return result;
+}
+
+MembershipMove list_drag_to_membership(int list_from, int list_to, int count) {
+  MembershipMove move;
+  if (count <= 0) {
+    return move;
+  }
+  const int last = count - 1;
+  const int from = std::clamp(list_from, 0, last);
+  const int to = std::clamp(list_to, 0, last);
+  // The layers section is `cells()` REVERSED (slot 0 = frontmost = top of z), so a front→back list
+  // slot maps to a bottom→top membership index by `count-1-slot` — its own inverse (Constraint 2).
+  move.from_index = static_cast<std::uint32_t>(last - from);
+  move.to_index = static_cast<std::uint32_t>(last - to);
+  return move;
+}
+
+bool reorder_cell(arbc::Document& document, arbc::ObjectId composition, arbc::ObjectId moved,
+                  std::uint32_t to_index) {
+  if (!composition.valid() || !moved.valid()) {
+    return false;
+  }
+  // Reject a camera's content up front — cameras carry no z-order (A14); the
+  // `set_camera_resolution`/`set_cell_*` no-op-returning-false mould (Constraint 3).
+  if (dynamic_cast<CameraContent*>(document.resolve(moved)) != nullptr) {
+    return false;
+  }
+  const arbc::DocStatePtr state = document.pin();
+  if (!state || state->find_composition(composition) == nullptr) {
+    return false;
+  }
+  const std::vector<RawSlot> raw = raw_membership(document, *state, composition);
+
+  // `moved`'s raw index and its current CELLS-SPACE index (cameras excluded), plus the cells count.
+  std::uint32_t from_raw = 0;
+  std::uint32_t moved_cells_index = 0;
+  std::uint32_t cells_count = 0;
+  bool found = false;
+  for (std::uint32_t j = 0; j < raw.size(); ++j) {
+    if (raw[j].content == moved && !found) {
+      from_raw = j;
+      moved_cells_index = cells_count;
+      found = true;
+    }
+    if (!raw[j].is_camera) {
+      ++cells_count;
+    }
+  }
+  if (!found) {
+    return false; // `moved` is not a member of `composition` (e.g. a cell from a different scope)
+  }
+  if (to_index >= cells_count || to_index == moved_cells_index) {
+    return false; // out-of-range or already there: a no-op that opens NO transaction (Constraint 3)
+  }
+
+  // Translate the cells-space `to_index` to a raw insert index into the ERASED array (moved
+  // removed) — the index `reorder_layer` (erase-at-from, insert-at-to) consumes. The insert point
+  // is the first slot in the erased array with exactly `to_index` non-camera slots before it, so
+  // among the cells `moved` lands at position `to_index` regardless of interleaved camera slots.
+  std::uint32_t to_raw = 0;
+  std::uint32_t cells_before = 0;
+  bool placed = false;
+  for (std::uint32_t j = 0; j < raw.size(); ++j) {
+    if (j == from_raw) {
+      continue; // the erased array excludes `moved`
+    }
+    if (cells_before == to_index) {
+      // A slot's index in the erased array is `j` when it precedes `moved`, else `j - 1`.
+      to_raw = (j < from_raw) ? j : j - 1U;
+      placed = true;
+      break;
+    }
+    if (!raw[j].is_camera) {
+      ++cells_before;
+    }
+  }
+  if (!placed) {
+    to_raw = static_cast<std::uint32_t>(raw.size()) - 1U; // past the last cell (erased-array end)
+  }
+
+  // ONE transaction: the cell keeps its `ObjectId`, placement, and content — only its order in the
+  // composition's membership changes — so the shared selection and `undo` hold on the same object.
+  auto txn = document.transact("reorder_cell");
+  txn.reorder_layer(composition, from_raw, to_raw);
   txn.commit();
   return true;
 }

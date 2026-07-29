@@ -138,6 +138,17 @@ public:
   Selection& selection() { return selection_; }
   const Selection& selection() const { return selection_; }
 
+  // The entered-composition scope (editor.panels.layers / D-layers-3): `nullopt` = Root, an
+  // `ObjectId` = the nested composition the singleton Layers/Overview panels have isolated into
+  // (D17). PROJECT-LEVEL, transient, UI-thread-only session state — never persisted, never a
+  // transaction (D15), never journaled. It is re-resolved every frame over the live document
+  // through `scene::active_composition`, which is fail-safe when the id vanishes (GC'd/undone
+  // away/foreign → Root next frame), exactly as `look_through` re-resolves its camera
+  // (D-look_through-7). Distinct from the per-canvas look-through camera: the composition scope
+  // is a structural navigation state the singleton structure views share, so it is project-level.
+  std::optional<arbc::ObjectId>& entered_composition() { return entered_composition_; }
+  const std::optional<arbc::ObjectId>& entered_composition() const { return entered_composition_; }
+
   // The History panel's whole per-frame model, read ANY-THREAD from the library's published
   // history projection (arch A18, as amended by editor.canvas.history_snapshot_adopt). Retires
   // the host-side publisher mirror: `journal().history()` is the library's any-thread immutable
@@ -235,6 +246,10 @@ private:
   // `registry_`, which seeds it.
   arbc::KindBridge kind_bridge_;
   Selection selection_;
+  // The entered-composition scope (D-layers-3). Transient session state like `selection_`: never
+  // persisted, never journaled, moves cleanly with the defaulted move-construction. `nullopt` =
+  // Root. Re-resolved against the live document every frame (`scene::active_composition`).
+  std::optional<arbc::ObjectId> entered_composition_;
   bool rebuilt_from_canonical_ = false;
   // The D28 sidecar verdict, ferried off the bootstrap `OpenedProject` (never recomputed): true
   // when a mapped reopen recovered a document the `workspace/published.rev` sidecar proved in

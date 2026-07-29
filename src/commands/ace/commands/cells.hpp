@@ -7,6 +7,7 @@
 #include <arbc/base/transform.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -103,6 +104,18 @@ struct LayerTransform {
 // selection); an empty batch — or one that would touch ZERO live layers — opens no
 // transaction and adds no entry (Constraint 5), mirroring `remove_cells`' empty-span no-op.
 Command transform_cells_command(std::vector<LayerTransform> placements);
+
+// --- Reorder / z-order (editor.panels.layers) -------------------------------------------
+
+// The dispatchable "restack one cell" verb (D-layers-2): ONE `scene::reorder_cell` moving the cell
+// `moved` to bottom→top membership index `to_index` within `composition`, hence exactly ONE libarbc
+// transaction and one journal entry — one undo press restores the prior order on the same object
+// (the cell keeps its `ObjectId`). A stale/camera/non-member target, or an out-of-range/equal
+// index, is a no-op that opens no transaction and adds no entry (`scene::reorder_cell` returns
+// false). The arguments are captured BY VALUE into the returned command; dispatched through
+// `apply_edit` like every edit — never a direct L4 `Document` mutation.
+Command reorder_cell_command(arbc::ObjectId composition, arbc::ObjectId moved,
+                             std::uint32_t to_index);
 
 // The observable result of one `delete_selection`. `removed` counts the objects that
 // actually left the composition (stale members of the selection are skipped, so it can be

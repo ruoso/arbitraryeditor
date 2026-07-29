@@ -272,6 +272,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/resolution_test.cpp
                          tests/selection_test.cpp
                          tests/inspector_test.cpp
+                         tests/layers_test.cpp
                          tests/cells_remove_test.cpp
                          tests/frame_selection_test.cpp
                          tests/new_shot_from_view_test.cpp
@@ -341,6 +342,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/view_id_natural_order_e2e_test.cpp
                               tests/reopen_degradation_notice_e2e_test.cpp
                               tests/inspector_e2e_test.cpp
+                              tests/layers_e2e_test.cpp
                               tests/welcome_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)

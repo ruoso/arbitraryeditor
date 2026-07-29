@@ -29,6 +29,16 @@ waiting on a human choice rather than on evidence.
 
 # Waiting on evidence
 
+## Layers panel — enter/expand keyboard and double-click bindings
+
+**Source:** `tasks/refinements/editor.panels/layers.md` (editor.panels.layers, 2026-07-29) — Open questions.
+
+**Trigger:** §11 input map settled in `docs/00-design.md`.
+
+`editor.panels.layers` ships the shipped-idiom gestures: single-click select, disclosure-triangle expand, double-click enter, crumb-click climb. These bindings are provisional — §11 of `docs/00-design.md` (the input map) is still open, and the input-map owner may want to remap expand to a key chord or change the double-click-vs-modifier boundary. The scope model (`AppState::entered_composition`), the breadcrumb derivation, and all three L1 path helpers are independent of the bindings and need no change when they move; only the L4 dispatch in the panel body is rebindable. No WBS task — this is a human design call gated on the input map.
+
+---
+
 ## Assets view real-body owner
 
 **Source:** `tasks/refinements/editor/view_registry.md` (view_registry, 2026-07-17)

@@ -8,6 +8,7 @@
 #include <arbc/base/transform.hpp> // arbc::Affine
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <span>
@@ -183,6 +184,14 @@ struct CellDetail {
   // `ResolutionIndependent` cell and for an unavailable image (empty bounds): those have
   // no native resolution to show and no health verdict (health N/A, Constraint 4).
   std::optional<std::pair<int, int>> native_pixels;
+  // D11's "bytes where?" axis, orthogonal to the editable? axis `source` carries: `true` when
+  // the content borrows an external file (a non-empty generic `external_asset_ref()`), `false`
+  // when its bytes are owned (in `assets/`, or a painted grid, or resolution-independent). Read
+  // off the SAME pinned walk from the generic `arbc::Content` facet, never a `kind_id` switch
+  // (A16 / D-resolution-2), so the Layers list surfaces owned-vs-borrowed for any kind including
+  // a future plugin (D-layers-4). A referenced borrowed photo is `ReferencedImage` + borrowed;
+  // a pasted owned image is owned; a painted raster is `PaintedRaster` + owned.
+  bool borrowed = false;
 };
 
 struct Cell {
@@ -219,6 +228,75 @@ struct Cell {
 // reported with an EMPTY `kind_id` rather than dropped, so an unknown-passthrough
 // cell from a foreign `project.arbc` is still listable.
 std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& registry);
+
+// The same walk, parameterised on which composition to list — the one-argument generalisation
+// of the root-only overload above (which is exactly `cells(document, registry, root)`). Walks
+// `composition`'s members in the SAME bottom→top membership order, shape, kind resolution, and
+// camera exclusion; an invalid id or a composition the document does not hold yields an empty
+// list. This is the data source the Layers panel's expand (peek a nested child, D-layers-5) and
+// enter (re-root to a nested child, D-layers-3) draw from. PINNED read over `pin()` (A18).
+std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& registry,
+                        arbc::ObjectId composition);
+
+// The child composition a nested cell (`org.arbc.nested`) wraps, read GENERICALLY off
+// `arbc::Content::composition_ref()` — never a `kind_id` switch (A16 / D-resolution-2), so any
+// kind that exposes a composition ref resolves. `nullopt` for a non-nested cell (no ref) or an
+// unresolvable id. The Layers panel calls this to decide whether a row gets a disclosure
+// triangle and where expand/enter descend (Constraint 7). PINNED read over `resolve()`.
+std::optional<arbc::ObjectId> nested_composition_of(const arbc::Document& document,
+                                                    arbc::ObjectId cell);
+
+// The composition the Layers panel's reads and its reorder verb currently TARGET: the entered
+// composition when it names a live composition, else the root (Constraint 8's fail-safe — a
+// scope naming a GC'd/undone-away/foreign composition resolves to Root next frame, the
+// look_through precedent D-look_through-7). `nullopt` entered ⇒ Root. Invalid when the document
+// has no composition. PINNED read over `pin()`.
+arbc::ObjectId active_composition(const arbc::Document& document,
+                                  std::optional<arbc::ObjectId> entered);
+
+// One crumb of the derived breadcrumb `Root ▸ … ▸ child` (D17). `composition` is the composition
+// the crumb re-enters (the root's own id at index 0); `label` is "Root" at index 0, else the
+// descent cell's kind id (display only — never branched on, A16), or "Nested" when unresolvable.
+struct Breadcrumb {
+  arbc::ObjectId composition;
+  std::string label;
+};
+
+// The breadcrumb path from Root down to `entered`, DERIVED each frame (never stored, Constraint 9)
+// by descending nested-cell `composition_ref()` links from the root composition. Index 0 is
+// always Root. When `entered` is `nullopt`, invalid, or not reachable from Root (GC'd/undone away),
+// the path is just `[Root]` — the same fail-safe `active_composition` applies. The panel maps a
+// click on crumb `k` to a scope of `nullopt` (k == 0) or `path[k].composition`. PURE over the pin,
+// unit-tested independently of ImGui. Empty only when the document has no composition at all.
+std::vector<Breadcrumb> composition_path(const arbc::Document& document,
+                                         const arbc::Registry& registry,
+                                         std::optional<arbc::ObjectId> entered);
+
+// The (from_index, to_index) pair in bottom→top membership order for a front→back list drag from
+// list slot `list_from` to slot `list_to`, over a list of `count` rows. PURE (Constraint 2). The
+// layers section renders `cells()` REVERSED (slot 0 = frontmost = top of z), so each endpoint maps
+// slot → `count-1-slot`; the reversal is its own inverse. Agrees with `z_order_position` for every
+// slot (a cell at list slot s has membership index `count-1-s`). Slots outside `[0,count)` clamp
+// in.
+struct MembershipMove {
+  std::uint32_t from_index = 0;
+  std::uint32_t to_index = 0;
+};
+MembershipMove list_drag_to_membership(int list_from, int list_to, int count);
+
+// Move the CELL whose content id is `moved` to bottom→top membership index `to_index` within
+// `composition` — the interactive z-order reorder (D6/D-layers-2), minted as an exact mirror of
+// `set_camera_resolution`: resolve the cell's placing layer and its current membership index (its
+// `from_index`) on the live pin, then ONE `document.transact("reorder_cell")` +
+// `Transaction::reorder_layer` + commit. The cell keeps its `ObjectId`, so the shared selection
+// and `undo` hold on the SAME object across the reorder. Returns false — a no-op that opens NO
+// transaction and adds NO journal entry — for an unresolvable id, a camera (cameras carry no
+// z-order, A14), a cell that is not a member of `composition`, or a `to_index` that is out of
+// range or equal to `from_index` (the `reorder_layer` no-op contract). WRITER-THREAD ONLY; wrap it
+// in a `commands::reorder_cell_command` and `apply_edit` it — never a direct L4 `Document`
+// mutation.
+bool reorder_cell(arbc::Document& document, arbc::ObjectId composition, arbc::ObjectId moved,
+                  std::uint32_t to_index);
 
 // The (index, count) z-order position of the cell whose content id is `id` within `ordered`
 // (the back->front layer order `cells()` returns), for the inspector's "layer N of M" readout

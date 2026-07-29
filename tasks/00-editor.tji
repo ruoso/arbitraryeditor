@@ -406,6 +406,12 @@ task editor "Editor — host GUI over libarbc" {
       depends !arbc_router_split_pin
       note "Once arbc_router_split_pin lands, consume the new API: construct HostViewport on the render thread with both the settler slot and the DamageRouter registrant deferred (install_settler=false + the router-split flag), post the now-complete attach pair (settler + router) via attach_settler/detach_settler (or the dedicated pair). This satisfies settler_attach_split's Constraint 3 — the single posted closure carries every writer-thread-only mutation — so settler_attach_split unblocks. Source-of-debt: tasks/refinements/canvas/settler_attach_split.md (re-defer 2026-07-28). Design: docs/01-architecture.md A4.1/A5."
     }
+    task isolation_scope "Canvas visual reflection of the entered composition scope (dim outside)" {
+      effort 2d
+      allocate team
+      depends editor.panels.layers
+      note "Present the entered composition in the canvas and dim everything outside (D17: 'canvas … show the child's cells, everything outside dims'), consuming AppState::entered_composition published by editor.panels.layers. The list's re-root, breadcrumb and scope model ship with layers; this leaf owns the canvas render reflection — the CanvasRenderer/DocumentBinding path that composites the child and dims the parent. Source-of-debt: tasks/refinements/editor.panels/layers.md (Deferred WBS). Design: docs/00-design.md D17, docs/01-architecture.md A5/A6."
+    }
   }
 
   # ---- Cameras (D2/D9/D14) ----
@@ -582,6 +588,12 @@ task editor "Editor — host GUI over libarbc" {
       depends editor.canvas.arbc_v040, !remove
       note "ruoso/arbitrarycomposer#20 shipped `Document::create_content_and_attach` (document.hpp:128) and `Document::remove_contents(std::span<const Removal>)` (:151) in v0.4.0; both publish once, append ONE entry, and reverse whole. Consume both. CREATE: `add_content` self-commits — it was the only vtable-binding call — so every cell and camera create costs two journal entries (content first, then transact -> add_layer -> attach_layer -> commit) and passes through a published state in which a content exists attached to nothing. src/scene/cell.cpp:305-308 says so in a comment and add_camera mirrors it (D-cells_model-7); both collapse to one call. DELETE: editor.cells.remove ships the correct single-object verb, but an N-object multi-select delete produces N entries and needs N undo presses to reverse something the user did ONCE (D-cells_remove-2); route it through `remove_contents` so a multi-select delete is one undo unit. The `(composition, layer)` naming and Constraint 5's leave-the-rest-untouched rule are unchanged — this changes journal GRANULARITY, not what is removed. PROOF OBLIGATION: assert entry COUNT, not just final state — the existing tests pass on both the two-entry and one-entry shapes, which is why the debt survived this long. Undo-once-restores-everything for an N-selection delete, and undo-once-removes-a-created-cell-whole, are the two cases that fail today. tests/cells_remove_test.cpp, tests/cells_remove_e2e_test.cpp and tests/cell_model_test.cpp carry them. Source-of-debt: tasks/parking-lot.md 'arbc Document lacks atomic create-content-and-attach' + 'arbc batch removal verb'. Design: docs/00-design.md D15, docs/01-architecture.md A17. Refinement: tasks/refinements/editor.cells/one_action_one_entry.md"
     }
+    task scoped_edit "Make insert/delete verbs honor the entered composition scope" {
+      effort 2.5d
+      allocate team
+      depends editor.panels.layers, !remove
+      note "scene::remove_cells and add_cell currently hard-code root_composition; make them resolve the active composition (AppState::entered_composition) instead, so insert and delete operate on the entered nested scope when the user has entered one. The scope model and its entered_composition field ship with editor.panels.layers; this leaf owns the thin edit-plumbing that consumes it. src/scene/ace/scene/cell.hpp:157 comment already flags this gap. Source-of-debt: tasks/refinements/editor.panels/layers.md (Deferred WBS). Design: docs/00-design.md D17, docs/01-architecture.md A17."
+    }
   }
 
   # ---- Info panels (D5/D6/D10/D11) ----
@@ -596,8 +608,9 @@ task editor "Editor — host GUI over libarbc" {
     task layers "Layers list (+ cameras); reorder; referenced-vs-painted; nested expand / enter" {
       effort 3d
       allocate team
+      complete 100
       depends !inspector, editor.cells.model
-      note "The layer list (cameras section + layers front->back); reorder = z-order; the borrowed/owned (referenced-vs-painted) distinction shown; a nested cell can be expanded (peek) or entered (isolation scope + breadcrumb). Design: D6/D11/D17. Refinement: tasks/refinements/layers.md"
+      note "The layer list (cameras section + layers front->back); reorder = z-order; the borrowed/owned (referenced-vs-painted) distinction shown; a nested cell can be expanded (peek) or entered (isolation scope + breadcrumb). Design: D6/D11/D17. Refinement: tasks/refinements/editor.panels/layers.md"
     }
     task overview "Patterned-fill wireframe overview; z-order occlusion; editable" {
       effort 4d

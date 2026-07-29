@@ -5,6 +5,7 @@
 #include <arbc/runtime/document.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -109,6 +110,16 @@ Command transform_cells_command(std::vector<LayerTransform> placements) {
         }
         txn.commit();
       }};
+}
+
+Command reorder_cell_command(arbc::ObjectId composition, arbc::ObjectId moved,
+                             std::uint32_t to_index) {
+  // Captured by value; `scene::reorder_cell` resolves the cell's live `from_index` and no-ops on a
+  // stale/camera/non-member target or an out-of-range/equal index (opening no transaction), so the
+  // command needs no separate pre-validation — the one writer-thread verb owns all of it.
+  return Command{"reorder_cell", [composition, moved, to_index](arbc::Document& doc) {
+                   scene::reorder_cell(doc, composition, moved, to_index);
+                 }};
 }
 
 DeleteOutcome delete_selection(AppState& state) {

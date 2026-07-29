@@ -2,6 +2,7 @@
 #include <ace/app/export_wiring.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/inspector_panel.hpp>
+#include <ace/app/layers_panel.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
@@ -363,6 +364,14 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::views::register_view_body(
         ace::dockmodel::ViewType::Inspector,
         [&inspector](std::string_view view_id) { inspector.draw(view_id); });
+    // The Layers view body is the order/hierarchy/naming structure view (editor.panels.layers;
+    // D6/D11/D17): a cameras section + the active composition's cells front→back, driving z-order
+    // reorder through the same apply_edit seam and the shared selection/entered-composition scope
+    // on the one AppState. It captures the AppState& and the CanvasView (edit runner) and is
+    // cleared on exit like the other bodies (the seam is process-global).
+    ace::app::LayersPanel layers(app_state, canvas);
+    ace::views::register_view_body(ace::dockmodel::ViewType::Layers,
+                                   [&layers](std::string_view view_id) { layers.draw(view_id); });
     // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
     // it renders each open view by its instance id and syncs the tab ✕ back into
     // the authoritative DockLayout.
@@ -512,6 +521,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::views::register_view_body(ace::dockmodel::ViewType::Canvas, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Inspector, {});
+    ace::views::register_view_body(ace::dockmodel::ViewType::Layers, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Export, {});
     // The export job reads the one owned `Document`, so it must be off the road before
     // anything below runs (Constraint 8): cancel between items, then JOIN — never

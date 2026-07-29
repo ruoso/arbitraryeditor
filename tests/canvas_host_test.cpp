@@ -1878,6 +1878,97 @@ TEST_CASE("canvas_host: UI-thread inspector reads + a set_cell_opacity edit run 
   CHECK(final_opacity < 0.91);
 }
 
+TEST_CASE("canvas_host: UI-thread layers reads + a reorder_cell edit run clean against the live "
+          "render walk") {
+  // editor.panels.layers Acceptance (Threading): the Layers panel reads `scene::cells(active)` +
+  // `scene::cameras` + `scene::nested_composition_of` + the breadcrumb resolve
+  // (`scene::active_composition` / `scene::composition_path`) on the UI thread and dispatches a
+  // `reorder_cell` edit through `apply_edit` — concurrent with a render thread walking the SAME
+  // document over the lock-free `pin()` seam. Reads are const reads of construction-stable content
+  // state (Constraint 10 / A18); the edit rides the ONE writer funnel (D-layers-2), one
+  // transaction. No new lock, no new thread, no new suppression. `writer` outlives `host`.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // Two reorderable cells, a nested cell (so the reads exercise nested_composition_of + the
+  // breadcrumb descent), and a camera (excluded from the layers section, present in cameras()).
+  arbc::ObjectId moved;
+  arbc::ObjectId child;
+  apply_edit(writer, host, [&] {
+    const auto a = ace::scene::add_cell(*probe.document, registry, "org.arbc.raster", "48x48",
+                                        arbc::Affine::translation(2.0, 2.0));
+    const auto b = ace::scene::add_cell(*probe.document, registry, "org.arbc.raster", "48x48",
+                                        arbc::Affine::translation(4.0, 4.0));
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    moved = *a;
+    child = probe.document->add_composition(32.0, 32.0);
+    REQUIRE(ace::scene::add_cell(*probe.document, registry, "org.arbc.nested",
+                                 std::to_string(child.value), arbc::Affine::translation(6.0, 6.0))
+                .has_value());
+    REQUIRE(ace::scene::add_camera(*probe.document, registry, "Hero",
+                                   ace::scene::Resolution{64, 64}, arbc::Affine::scaling(0.5, 0.5))
+                .valid());
+  });
+
+  const arbc::ObjectId root = ace::scene::active_composition(*probe.document, std::nullopt);
+  REQUIRE(root.valid());
+  const std::size_t seeded_count = ace::scene::cells(*probe.document, registry, root).size();
+
+  constexpr int k_iters = 24;
+  for (int i = 0; i < k_iters; ++i) {
+    // The UI-thread read path the panel runs EVERY frame: the active composition, its cells, the
+    // cameras, each cell's nested-child probe, and the derived breadcrumb — against the live walk.
+    for (int r = 0; r < 3; ++r) {
+      const arbc::ObjectId active = ace::scene::active_composition(*probe.document, std::nullopt);
+      const std::vector<ace::scene::Cell> cells =
+          ace::scene::cells(*probe.document, registry, active);
+      const std::vector<ace::scene::Camera> cams = ace::scene::cameras(*probe.document);
+      (void)cams;
+      for (const ace::scene::Cell& cell : cells) {
+        (void)ace::scene::nested_composition_of(*probe.document, cell.id);
+      }
+      (void)ace::scene::composition_path(*probe.document, registry, std::nullopt);
+      (void)ace::scene::composition_path(*probe.document, registry, child);
+    }
+    // The panel's edit, through the one writer funnel, interleaved with the reads above: reorder
+    // the moved cell between the bottom and top of the (cells-space) z-order.
+    const std::uint32_t to_index = (i % 2 == 0) ? 2U : 0U;
+    apply_edit(writer, host, [&] {
+      const ace::commands::Command cmd = ace::commands::reorder_cell_command(root, moved, to_index);
+      cmd.apply(*probe.document);
+    });
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  host.stop();
+  handle->join();
+
+  // The document still reads a consistent layers list on the same objects after the interleaving.
+  const std::vector<ace::scene::Cell> final_cells = ace::scene::cells(
+      *probe.document, registry, ace::scene::active_composition(*probe.document, std::nullopt));
+  CHECK(final_cells.size() == seeded_count); // reorder preserves membership (camera stays excluded)
+  bool moved_present = false;
+  for (const ace::scene::Cell& cell : final_cells) {
+    if (cell.id == moved) {
+      moved_present = true;
+    }
+  }
+  CHECK(moved_present); // the moved cell kept its ObjectId across every reorder
+}
+
 TEST_CASE("canvas_host: a frame-selection mint — a full document READ plus a camera WRITE in one "
           "apply_edit — runs clean against the live render walk") {
   // The document's ONE writer identity, bound the way the shipped bootstrap binds it
