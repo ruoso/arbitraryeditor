@@ -44,6 +44,12 @@ constexpr double k_zoom_base = 1.2;
 // call site, not a palette entry (D-accent_palette-4).
 constexpr float k_focus_marker_thickness = 1.0F;
 
+// The composition grid (editor.canvas.grid; D-grid-4): the per-axis line cap handed to
+// `interact::composition_grid_lines`. A grid so fine it would exceed this at the current zoom
+// VANISHES rather than smear the pane grey or balloon the snap-candidate list — a defined, testable
+// degradation, not a slow render. 1024 lines per axis is far more than a legible grid ever shows.
+constexpr int k_grid_line_cap = 1024;
+
 // The four-arm switch that turns L1's `SelectionChange` VALUE into a mutation of the ONE
 // project-level selection (D-selection-2). `interact` may not see `commands` and does not: this
 // is the whole of the L4 side of the modifier policy, and every branch it dispatches to is a
@@ -256,6 +262,41 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       p.scale_bar_units = bar.units;
       views::draw_scale_bar(bar.units, bar.device_px);
 
+      // The composition grid (editor.canvas.grid; D-grid-2/-5): passive draw-list chrome computed
+      // ONCE per frame from the pane's visible composition region, in the same style as the scale
+      // bar and drawn UNDER the gizmos/selection below so those stay legible on top. The SAME line
+      // set is stashed on the presenter and fed to the snap wiring further down (D-grid-2 — the
+      // lines you snap to are exactly the lines you see). Empty when the grid is hidden, when the
+      // viewport camera is degenerate, or when the grid vanishes at an over-dense zoom (D-grid-4).
+      p.grid_lines_xs.clear();
+      p.grid_lines_ys.clear();
+      if (p.grid_show) {
+        if (const std::optional<arbc::Affine> cam_inv = p.camera.inverse()) {
+          const arbc::Rect visible = cam_inv->map_rect(arbc::Rect::from_size(
+              static_cast<double>(p.tex_width), static_cast<double>(p.tex_height)));
+          const interact::GridLines grid =
+              interact::composition_grid_lines(p.grid_spacing, visible, k_grid_line_cap);
+          p.grid_lines_xs = grid.xs;
+          p.grid_lines_ys = grid.ys;
+          ImDrawList* grid_dl = ImGui::GetWindowDrawList();
+          const ImU32 col_grid =
+              accent(70); // a subtle accent hairline, below the 2 px gizmo strokes
+          auto grid_to_screen = [&](arbc::Vec2 comp) {
+            const arbc::Vec2 dev = p.camera.apply(comp);
+            return ImVec2(pane_origin.x + static_cast<float>(dev.x),
+                          pane_origin.y + static_cast<float>(dev.y));
+          };
+          for (const double gx : grid.xs) {
+            grid_dl->AddLine(grid_to_screen({gx, visible.y0}), grid_to_screen({gx, visible.y1}),
+                             col_grid, 1.0F);
+          }
+          for (const double gy : grid.ys) {
+            grid_dl->AddLine(grid_to_screen({visible.x0, gy}), grid_to_screen({visible.x1, gy}),
+                             col_grid, 1.0F);
+          }
+        }
+      }
+
       // The camera-frame gizmo overlay (editor.cameras.manip; D-manip-4): hit-test/drag the
       // shot frames in the free viewport and commit a reframe. Drawn over the pane, under the
       // picker (which is drawn last). Free viewport only — reframing a shot is a scene edit,
@@ -353,6 +394,14 @@ void CanvasView::draw_camera_picker(std::string_view view_id, Presenter& p,
       p.look_through = cam.id;
     }
   }
+  // The per-pane composition-grid control (editor.canvas.grid; D-grid-5): a "Show grid" checkbox
+  // plus a spacing input, on the same top-left overlay slot. Both bind directly to the transient
+  // presenter session fields (no transaction — D-grid-1). The `###id` suffix decouples the widget
+  // id from the visible label so the e2e can drive them by a stable ref regardless of the text.
+  ImGui::Checkbox("Show grid###grid_show", &p.grid_show);
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(80.0F);
+  ImGui::InputDouble("Spacing###grid_spacing", &p.grid_spacing, 0.0, 0.0, "%.0f");
 }
 
 void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,
@@ -592,8 +641,11 @@ void CanvasView::draw_cell_gizmos(std::string_view view_id, Presenter& p,
             others.push_back(t);
           }
         }
-        const interact::SnapResult snap =
-            interact::snap_placement(moved, p.gizmo_cell_extent, others, corner_tol, cmd);
+        // The composition grid feeds the SAME line set drawn above (D-grid-2). The presenter's
+        // grid vectors are populated only while the grid is shown (D-grid-3 — grid snap is coupled
+        // to grid visibility); when hidden they are empty and this reproduces object-only snap.
+        const interact::SnapResult snap = interact::snap_placement(
+            moved, p.gizmo_cell_extent, others, corner_tol, cmd, p.grid_lines_xs, p.grid_lines_ys);
         preview = snap.placement;
         guides = snap.guides;
       } else if (handle == interact::CellHandle::Rotate) {
@@ -804,8 +856,10 @@ void CanvasView::draw_group_gizmo(std::string_view view_id, Presenter& p,
             others.push_back(t);
           }
         }
-        const interact::SnapResult snap =
-            interact::snap_placement(moved, p.gizmo_group_extent, others, corner_tol, cmd);
+        // ...and against the SAME composition grid the single-cell path uses (D-grid-2/-3), so a
+        // group drag snaps the union box to the grid identically. Empty while the grid is hidden.
+        const interact::SnapResult snap = interact::snap_placement(
+            moved, p.gizmo_group_extent, others, corner_tol, cmd, p.grid_lines_xs, p.grid_lines_ys);
         new_union = snap.placement;
         guides = snap.guides;
       } else if (handle == interact::CellHandle::Rotate) {
@@ -1031,6 +1085,30 @@ void CanvasView::set_look_through(std::string_view view_id, std::optional<arbc::
 std::optional<arbc::ObjectId> CanvasView::look_through(std::string_view view_id) const {
   auto it = presenters_.find(view_id);
   return it == presenters_.end() ? std::nullopt : it->second.look_through;
+}
+
+void CanvasView::set_grid_visible(std::string_view view_id, bool show) {
+  auto it = presenters_.find(view_id);
+  if (it != presenters_.end()) {
+    it->second.grid_show = show;
+  }
+}
+
+bool CanvasView::grid_visible(std::string_view view_id) const {
+  auto it = presenters_.find(view_id);
+  return it == presenters_.end() ? false : it->second.grid_show;
+}
+
+void CanvasView::set_grid_spacing(std::string_view view_id, double spacing) {
+  auto it = presenters_.find(view_id);
+  if (it != presenters_.end()) {
+    it->second.grid_spacing = spacing;
+  }
+}
+
+double CanvasView::grid_spacing(std::string_view view_id) const {
+  auto it = presenters_.find(view_id);
+  return it == presenters_.end() ? 0.0 : it->second.grid_spacing;
 }
 
 void CanvasView::apply_edit(const std::function<void()>& edit) {

@@ -341,6 +341,37 @@ CellHandle hit_cell(const PickTarget& target, arbc::Vec2 pivot, arbc::Vec2 point
   return inside ? CellHandle::Body : CellHandle::None;
 }
 
+GridLines composition_grid_lines(double spacing, const arbc::Rect& region, int max_lines) {
+  GridLines out;
+  // Total and self-limiting (D-grid-4 / Constraint 7): a bad spacing or a degenerate/non-finite
+  // region yields no grid at all rather than a divide-by-zero or a NaN coordinate.
+  if (!(spacing > 0.0) || !std::isfinite(spacing) || region.empty() || !finite(region) ||
+      max_lines < 0) {
+    return out;
+  }
+  // Origin-anchored: the lines within `region` are the integer multiples k*spacing for k running
+  // from ceil(lo/spacing) to floor(hi/spacing) on each axis (negatives included when the region
+  // spans the origin).
+  const double kx0 = std::ceil(region.x0 / spacing);
+  const double kx1 = std::floor(region.x1 / spacing);
+  const double ky0 = std::ceil(region.y0 / spacing);
+  const double ky1 = std::floor(region.y1 / spacing);
+  // Vanish an over-dense grid (extreme zoom-out with a fine spacing) rather than smear the pane or
+  // balloon the snap-candidate list: a per-axis count above `max_lines` returns an empty result.
+  const double count_x = kx1 - kx0 + 1.0;
+  const double count_y = ky1 - ky0 + 1.0;
+  if (count_x > static_cast<double>(max_lines) || count_y > static_cast<double>(max_lines)) {
+    return out;
+  }
+  for (double k = kx0; k <= kx1; k += 1.0) {
+    out.xs.push_back(k * spacing);
+  }
+  for (double k = ky0; k <= ky1; k += 1.0) {
+    out.ys.push_back(k * spacing);
+  }
+  return out;
+}
+
 namespace {
 
 // One snap candidate line along an axis, carrying the ORTHOGONAL span of the object that owns it

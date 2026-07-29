@@ -131,6 +131,15 @@ public:
   // after a zoom (the scale readout tracks the camera; D-nav-6).
   double scale_bar_units(std::string_view view_id) const;
 
+  // The per-pane composition-grid display toggle + spacing (editor.canvas.grid, D-grid-1):
+  // transient session state, never a transaction. `set_*` drives the pane's grid from the e2e /
+  // overlay control; the readback reports `false`/`0.0` for an unknown id. When the grid is shown
+  // its lines feed `snap_placement` (D-grid-3 — grid snap is coupled to grid visibility).
+  void set_grid_visible(std::string_view view_id, bool show);
+  bool grid_visible(std::string_view view_id) const;
+  void set_grid_spacing(std::string_view view_id, double spacing);
+  double grid_spacing(std::string_view view_id) const;
+
   // The transient viewport framing of the first (lowest-id) live, sized canvas pane —
   // camera + device size, BY VALUE. A zero-pane `ViewFraming` when no canvas has been
   // sized yet. `editor.cells.model` reads this to compute a freshly-inserted cell's
@@ -195,6 +204,17 @@ private:
     // The active-camera selection (editor.cameras.look_through, D-look_through-1): nullopt =
     // free viewport, an ObjectId = look through that shot. UI-thread-only session state.
     std::optional<arbc::ObjectId> look_through;
+    // The composition grid (editor.canvas.grid; D-grid-1/-4): a per-pane display toggle + a
+    // composition-unit spacing, transient UI-thread session state exactly like `camera`/pan-zoom
+    // and `look_through` — never journaled, never document/project state, off by default with a
+    // round `64.0` spacing. `grid_lines_*` are the per-frame scratch produced by
+    // `interact::composition_grid_lines` in `draw_content`: the SINGLE line set both the grid draw
+    // and the `snap_placement` wiring consume (D-grid-2 — the lines you snap to are the lines you
+    // see), empty when the grid is hidden or vanishes at an over-dense zoom.
+    bool grid_show = false;
+    double grid_spacing = 64.0;
+    std::vector<double> grid_lines_xs;
+    std::vector<double> grid_lines_ys;
     // The camera last submitted through host_.request_camera. While a shot is selected the
     // submitted camera is the shot's (not `camera`, which is left at its free value —
     // D-look_through-6), so the two diverge; this dedups the per-frame submit across both.

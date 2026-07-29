@@ -210,6 +210,25 @@ struct SnapResult {
   bool snapped_y = false;
 };
 
+// A uniform composition-space grid's line coordinates (D-grid-2): `xs`/`ys` are the composition-X
+// positions of the vertical lines and the composition-Y positions of the horizontal lines. This is
+// the SINGLE source both the L4 grid draw and `snap_placement` consume, so the lines a user snaps
+// to are exactly the lines they see.
+struct GridLines {
+  std::vector<double> xs;
+  std::vector<double> ys;
+};
+
+// The composition-space line coordinates of a uniform grid of the given `spacing`, ORIGIN-anchored
+// (lines sit at integer multiples k*spacing from the composition origin) and clipped to `region` —
+// the pane's currently-visible composition rect (editor.canvas.grid; §6:260, D-grid-4). Feeds BOTH
+// the grid draw and `snap_placement`'s `grid_x`/`grid_y`, so the drawn and snapped lines are
+// identical by construction. Total and self-limiting: a `spacing <= 0`/non-finite, a
+// degenerate/non-finite `region`, or a per-axis line count exceeding `max_lines` (an over-dense
+// grid at extreme zoom-out) all yield an EMPTY result — the grid simply is not there at that
+// spacing/zoom, a defined no-op that draws nothing and snaps to nothing (Constraint 7).
+GridLines composition_grid_lines(double spacing, const arbc::Rect& region, int max_lines);
+
 // Snap the moving cell's placed AABB edges/centers to the OTHER placed objects' edges/centers
 // (§6): the candidate placement (mapping `moving_extent`) is nudged by up to `tol` composition
 // units so a moving edge/center lands flush on a target edge/center, emitting the alignment

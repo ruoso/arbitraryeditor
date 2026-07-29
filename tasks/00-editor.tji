@@ -389,8 +389,9 @@ task editor "Editor — host GUI over libarbc" {
     task grid "Composition grid: display toggle + spacing setting + snap-to-grid wiring" {
       effort 2d
       allocate team
+      complete 100
       depends editor.cells.gizmo
-      note "The composition grid docs/00-design.md:260 names: a display toggle + spacing setting (local UI state), and feeding the grid lines into the gizmo's already-general snap_placement engine (interact/pick.hpp) so a placement snaps to grid. Deferred from editor.cells.gizmo because snap-to-an-invisible-grid with no spacing control is a non-affordance; the snap engine was built to consume grid lines the moment a grid exists. Source-of-debt: tasks/refinements/editor/gizmo.md. Design: docs/00-design.md D7/D8 SS6."
+      note "The composition grid docs/00-design.md:260 names: a display toggle + spacing setting (local UI state), and feeding the grid lines into the gizmo's already-general snap_placement engine (interact/pick.hpp) so a placement snaps to grid. Deferred from editor.cells.gizmo because snap-to-an-invisible-grid with no spacing control is a non-affordance; the snap engine was built to consume grid lines the moment a grid exists. Source-of-debt: tasks/refinements/editor/gizmo.md. Design: docs/00-design.md D7/D8 §6. Refinement: tasks/refinements/editor/grid.md"
     }
     task arbc_router_split_pin "Bump libarbc pin to the release that splits DamageRouter registration into attach/detach_settler" {
       effort 0.5d
