@@ -13,7 +13,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -94,9 +93,7 @@ struct CanvasHost::Impl {
   std::map<arbc::Document*, std::unique_ptr<arbc::DamageRouter>> routers;
 
   mutable std::mutex mu;
-  std::condition_variable cv;
-  bool stop = false;  // stop requested (UI thread -> render thread)
-  bool dirty = false; // work pending: an add/remove/resize/poke/self-signal
+  bool stop = false; // stop requested (UI thread -> render thread)
 
   // The document's ONE writer thread (borrowed, may be null == "the caller is the identity";
   // D-writer_thread-8). The writer-priority document lease this host used to hold is GONE, not
@@ -107,9 +104,10 @@ struct CanvasHost::Impl {
   writer::WriterThread* writer = nullptr;
 
   // Run `work` on the writer thread and BLOCK. Called from the render thread (and, at teardown,
-  // from the owner's thread) — NEVER while holding `mu`: the posted settle nudge calls back into
-  // poke(), which takes `mu`, so posting under it would deadlock. With no writer bound the caller
-  // IS the one identity and it runs inline. False == the writer refused (D-writer_thread-6).
+  // from the owner's thread) — NEVER while holding `mu`: `submit_sync` blocks the caller until the
+  // writer runs the closure, so posting under the host lock would hold `mu` across a cross-thread
+  // round-trip. With no writer bound the caller IS the one identity and it runs inline. False ==
+  // the writer refused (D-writer_thread-6).
   bool on_writer(const std::function<void()>& work) {
     if (writer == nullptr) {
       work();
@@ -136,15 +134,13 @@ struct CanvasHost::Impl {
   // single-threaded unit fixtures before any thread spawns.
   std::function<void()> after_adds_swap_hook;
 
-  // Wake the render loop (the fan-out poke). Split out of CanvasHost::poke so the writer-thread
-  // settle nudge can call it without going through the public API.
-  void wake() {
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      dirty = true;
-    }
-    cv.notify_all();
-  }
+  // Wake the render loop parked in run()'s WorkerPool::wait_completions — the single fan-out poke.
+  // Split out of CanvasHost::poke so the writer-thread settle nudge (nudge_settle) can call it
+  // without going through the public API. The loop's ONE wait is the shared pool's completion
+  // substrate (D-render_loop_liveness_wake-1), so a host event wakes it exactly as a worker's
+  // tile-completion poke() does: bump the settle generation and broadcast. Never blocks, takes no
+  // host lock.
+  void wake() { pool.poke(); }
 
   // The render thread's arrival NUDGE (D-writer_thread-10): the step saw arrivals it could not
   // install (it is not the writer thread), so post ONE async settle. Async because the render
@@ -229,45 +225,40 @@ void CanvasHost::add(std::string id, arbc::Document& document, const arbc::Regis
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     impl_->pending_adds.push_back(Impl::PendingAdd{std::move(id), &document, registry, bridge});
-    impl_->dirty = true;
   }
-  impl_->cv.notify_all();
+  impl_->wake();
 }
 
 void CanvasHost::remove(std::string_view id) {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     impl_->pending_removes.emplace_back(id);
-    impl_->dirty = true;
   }
-  impl_->cv.notify_all();
+  impl_->wake();
 }
 
 void CanvasHost::request_resize(std::string_view id, int width, int height) {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     impl_->pending_resizes[std::string(id)] = {width, height};
-    impl_->dirty = true;
   }
-  impl_->cv.notify_all();
+  impl_->wake();
 }
 
 void CanvasHost::request_camera(std::string_view id, const arbc::Affine& camera) {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     impl_->pending_cameras[std::string(id)] = camera;
-    impl_->dirty = true;
   }
-  impl_->cv.notify_all();
+  impl_->wake();
 }
 
 void CanvasHost::request_scope(std::string_view id, std::optional<arbc::ObjectId> entered) {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     impl_->pending_scopes[std::string(id)] = entered;
-    impl_->dirty = true;
   }
-  impl_->cv.notify_all();
+  impl_->wake();
 }
 
 void CanvasHost::poke() { impl_->wake(); }
@@ -277,7 +268,9 @@ void CanvasHost::stop() {
     std::lock_guard<std::mutex> lock(impl_->mu);
     impl_->stop = true;
   }
-  impl_->cv.notify_all();
+  // Poke the completion substrate (via the fan-out wake) so a run() parked in wait_completions
+  // returns promptly, then join (Constraint 4).
+  impl_->wake();
 }
 
 bool CanvasHost::drive_once() {
@@ -381,7 +374,8 @@ bool CanvasHost::drive_once() {
     //    that never receives its size stays zero-area: it builds no viewport, issues no frame and
     //    publishes no sequence, i.e. a silent and PERMANENT stall (the intermittent gcc-tsan hang
     //    in the edit_render_sync anchor). No extra wakeup is owed — the add that creates the entry
-    //    sets `dirty` itself, so the deferred request applies on the iteration that services it.
+    //    wakes the loop itself (wake()'s poke), so the deferred request applies on the iteration
+    //    that services it.
     //    A request for a REMOVED id is erased by step 2 above; one for an id never added is inert
     //    and bounded (both maps are keyed by id, so a repeat overwrites rather than accumulates).
     items.reserve(impl_->entries.size());
@@ -492,15 +486,21 @@ bool CanvasHost::drive_once() {
 }
 
 void CanvasHost::run(const std::function<bool()>& should_stop) {
+  // The render loop's ONE wait is the shared WorkerPool's completion substrate
+  // (D-render_loop_liveness_wake-1). `cursor` is a render-thread-local seeded from the pool's
+  // settle generation BEFORE each drive: a worker that settles a tile between drive_once's
+  // pending().tiles poll and the park below bumps the generation past this cursor, so
+  // wait_completions returns at once instead of parking cold — closing the blank_first_frame
+  // lost-wakeup (Constraint 2). The wake condition is the settle GENERATION, never the racy
+  // pending().tiles poll that stranded the pre-fix loop.
+  arbc::CompletionCursor cursor;
   for (;;) {
+    cursor.drained_gen = impl_->pool.settle_generation();
     {
-      std::unique_lock<std::mutex> lock(impl_->mu);
-      impl_->cv.wait(lock,
-                     [&] { return impl_->stop || impl_->dirty || (should_stop && should_stop()); });
+      std::lock_guard<std::mutex> lock(impl_->mu);
       if (impl_->stop || (should_stop && should_stop())) {
         return;
       }
-      impl_->dirty = false;
     }
     // No lease around the iteration any more (D-writer_thread-11): the render walk reads the
     // document lock-free (`pin()` + the copy-on-write binding table), the DamageAccumulator
@@ -508,13 +508,19 @@ void CanvasHost::run(const std::function<bool()>& should_stop) {
     // writer thread — so nothing here needs mutual exclusion against an edit. What the
     // iteration DOES owe the writer, it posts (D-writer_thread-8/10).
     const bool more_pending = drive_once();
-    if (more_pending) {
-      // A frame settled or an entry is unsettled under its bounded budget; re-arm so the
-      // next iteration re-checks rather than sleeping through the tail (Constraint 4c /
-      // D-multi_canvas-3). A subsequent all-still iteration publishes nothing and idles.
-      std::lock_guard<std::mutex> lock(impl_->mu);
-      impl_->dirty = true;
-    }
+    // Park on the pool instead of the pre-fix busy-spin (more_pending -> re-arm dirty -> immediate
+    // re-drive with no wait). A worker's poke() on tile completion re-drives us; wake() pokes for
+    // host events and stop(); a settle that raced the seed above already advanced the generation,
+    // so the park returns immediately. While work is outstanding (more_pending) the timeout is a
+    // defensive re-check cadence for a follow-up composite of already-reaped arrivals that owes no
+    // further worker poke (Constraint 3); a settled/empty document (more_pending == false) parks
+    // indefinitely with ZERO wakeups (Constraint 1) until a host event or stop pokes it.
+    const std::optional<std::chrono::steady_clock::time_point> until =
+        more_pending ? std::optional<
+                           std::chrono::steady_clock::time_point>{std::chrono::steady_clock::now() +
+                                                                  impl_->budget}
+                     : std::nullopt;
+    impl_->pool.wait_completions(cursor, until);
   }
 }
 

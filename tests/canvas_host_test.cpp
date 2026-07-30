@@ -1180,6 +1180,81 @@ TEST_CASE("canvas_host: a blank-then-content first frame publishes under the REA
   CHECK(host.published_sequence("canvas#1") > before);
 }
 
+// --- editor.canvas.render_loop_liveness_wake: park-on-completions, no spin, no lost wakeup ----
+//
+// The blank_first_frame content gate withholds sequence 0 until the first composited coverage; the
+// pre-fix run() loop stayed alive through that blank phase by BUSY-SPINNING on the racy
+// pending().tiles poll, with a rare LOST WAKEUP when the poll flickered empty while a worker was
+// still settling a tile (the group_transform ASan/TSan flake). The fix parks the loop on the shared
+// WorkerPool's completion substrate (wait_completions/poke), seeded from settle_generation() before
+// each drive, so a worker's completion re-drives it event-driven and a settle that races the poll
+// is caught by the generation, not missed. Direct-seeded rasters (build_raster_doc): no external
+// load (Constraint 7), no threaded nested render (the arbc nested-render detach-race memo).
+
+TEST_CASE(
+    "canvas_host: the render loop reaches the first content frame in BOUNDED drive iterations "
+    "under the REAL pool — park-and-wake, not spin "
+    "(editor.canvas.render_loop_liveness_wake)") {
+  // Same writer-outlives-host contract as the blank-then-content fixture above.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  auto doc = build_on_writer(writer, [] { return build_raster_doc(); });
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  // No pokes after the initial add/resize: the loop must reach content ON ITS OWN — the property
+  // the pre-fix lost-wakeup could violate.
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // The load-bearing assertion (the direct regression guard for the flake): park-and-wake is
+  // O(completion rounds); the pre-fix spin burns hundreds-to-thousands of drive_once() calls over
+  // the SAME millisecond-scale tile resolution. A generous bound fails the pre-fix spin (and, in
+  // the racy window, the pump_until deadline above) yet passes the event-driven fix comfortably,
+  // even under a sanitizer's slowdown — it is a real assertion, not a tautology.
+  CHECK(host.iterations() < 500);
+
+  host.stop();
+  handle->join();
+}
+
+TEST_CASE("canvas_host: the render loop PARKS at rest (no busy-spin) and a host wake re-drives it "
+          "(editor.canvas.render_loop_liveness_wake)") {
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  auto doc = build_on_writer(writer, [] { return build_raster_doc(); });
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // At rest the scene is still and no worker is running: the loop PARKS on wait_completions with
+  // ZERO wakeups (Constraints 1 & 3), it does not busy-spin. This host owns its pool, so there are
+  // not even sibling settles to spuriously wake it — the liveness counter must hold steady across a
+  // quiet window (a spinning loop would burn thousands of iterations here).
+  const std::uint64_t at_rest = host.iterations();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  CHECK(host.iterations() - at_rest < 50);
+
+  // A host event pokes the pool (Impl::wake), interrupting the park (Constraint 4): the loop wakes,
+  // re-drives, and republishes at the new size with NO other poke. This FAILS if wake() stops
+  // poking the pool (the loop parked on wait_completions would sleep through the resize forever),
+  // so it directly guards the wake()->pool.poke() half of the fix.
+  const std::uint64_t before = host.published_sequence("canvas#1");
+  host.request_resize("canvas#1", 48, 40);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") > before; }));
+
+  host.stop();
+  handle->join();
+}
+
 // --- editor.canvas.nested_composition_binding: the external-arrival settle hook ----------
 //
 // The interactive CanvasRenderer/CanvasHost now wires a real KindBridge/Registry

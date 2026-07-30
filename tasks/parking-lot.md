@@ -255,16 +255,6 @@ D10 (`docs/00-design.md:477`) forbids a v1 blend-space toggle; libarbc v0.4.0 ha
 
 ---
 
-## render_loop_liveness_wake re-defer — `pending_external_loads()` is writer-thread-only
-
-**Source:** `tasks/refinements/editor.canvas/render_loop_liveness_wake.md` (re-defer 2026-07-29).
-
-**Trigger:** Either (a) refinement_writer re-issues `render_loop_liveness_wake.md` with a corrected design that avoids the any-thread read of `Document::pending_external_loads()` — e.g. by guarding the read behind a document-scoped `settle_in_flight` check and updating D-1 / D-3 / Constraint 4 and the A4.1b doc delta accordingly — OR (b) a new libarbc release adds an atomic any-thread `pending()` counter to `PendingExternalLoads` (mirroring `d_ready_count` / `ready()`) so the render loop can witness the full request→arrival window without racing the writer-thread settle.
-
-`Document::pending_external_loads()` is **writer-thread-only**: `PendingExternalLoads::pending()` returns `d_pending.size() + d_pending_assets.size()` over plain `std::unordered_map`s explicitly marked "Writer/load-thread-only state" (`pending_external_loads.hpp:127,162-168`), with no mutex. The writer's `settle_external_loads` → `take_pending_asset` does `d_pending_assets.erase(…)` unsynchronized; a concurrent render-thread read of `pending()` races that erase — TSan flags it. The A4.1b lock-free read list (`docs/01-architecture.md:211-214`) names `external_loads_ready()` but **not** `pending_external_loads()`; only `ready()` (the atomic `d_ready_count`) is designated the render-thread poll (`pending_external_loads.hpp:146-154`). The pre-emptive A4.1b amendment at `docs/01-architecture.md:225-233` (committed before implementation confirmed feasibility) claims `Document::pending_external_loads()` as a render-thread poll; that claim is incorrect and must be reverted or corrected when the refinement is re-derived.
-
----
-
 ## arbc v0.4.0 nested-render worker-detach race
 
 **Source:** `tasks/refinements/editor/overview.md` (editor.panels.overview, 2026-07-30) — fixer sub-agent return summary (attempts 1–5).

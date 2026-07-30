@@ -140,9 +140,12 @@ public:
   // then joins the render thread before destroying this host (Constraint 5). Idempotent.
   void stop();
 
-  // RENDER thread: block until woken by an add/remove/resize/poke, self-signalled
-  // settling work, stop(), or `should_stop()`; then drive one iteration. Returns when
-  // stop() was called or `should_stop()` is observed true. No busy-spin.
+  // RENDER thread: drive one iteration, then PARK on the shared WorkerPool's completion
+  // substrate (WorkerPool::wait_completions) until a worker's tile-completion poke(), a host
+  // event / stop() (which poke via wake()), or — while work is outstanding — a defensive re-check
+  // cadence re-drives it. A settled/empty document parks indefinitely with zero wakeups; there is
+  // no busy-spin (D-render_loop_liveness_wake-1). Returns when stop() was called or
+  // `should_stop()` is observed true.
   void run(const std::function<bool()>& should_stop);
 
   // RENDER thread: service pending add/remove, then drive one bounded step() per live
