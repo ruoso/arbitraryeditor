@@ -420,4 +420,71 @@ std::vector<arbc::Affine> group_transform(const arbc::Affine& old_union,
                                           const arbc::Affine& new_union,
                                           std::span<const arbc::Affine> start_placements);
 
+// --- Overview schematic: hatch identity + content-space hatch (editor.panels.overview; D6/§5) --
+// Two pure helpers the render-free composition overview draws with, kept in L1 so the shared
+// list↔overview identity (`overview_pattern`) and the content-space hatch geometry
+// (`hatch_segments`) are unit-tested headless and the deferred list-side swatch
+// (`editor.panels.hatch_swatch`) reuses the EXACT identity with no forking (D-overview-4).
+// Neither names a `scene`/ImGui type — `arbc` geometry in, plain values out.
+
+// A hatch line style in the cell's CONTENT space (§5:191, §5:201): `angle_rad` is the primary
+// hatch direction and `cross` adds a second set perpendicular to it. Because the direction is
+// content-space, the hatch TILTS with the cell once its segments are mapped through `placement`
+// (the "orientation reads for free" claim), and its density SCALES with the cell for the same
+// reason.
+struct HatchStyle {
+  double angle_rad = 0.0; // primary hatch direction, radians, in content space
+  bool cross = false;     // draw a second set of lines perpendicular to `angle_rad`
+};
+
+// The per-layer overview identity (§5:191): a distinct hatch `style` plus, once the fixed set of
+// distinct styles is exhausted, a `color_index` that carries the distinction instead — the
+// §5:204 "how many auto-distinct patterns before color must carry the load" open item, decided
+// here with a defensible default (`k_overview_hatch_style_count` styles first, then color). The
+// swatch a future Layers row draws is `overview_pattern(row_ordinal, layer_count)`.
+struct OverviewPattern {
+  HatchStyle style;
+  // -1 while distinct hatch styles still separate every layer; >=0 (a palette index in
+  // [0, k_overview_palette_count)) once the styles have wrapped and color must distinguish.
+  int color_index = -1;
+};
+
+// The number of distinct hatch styles assigned before the color fallback engages (§5:204).
+inline constexpr int k_overview_hatch_style_count = 6;
+// The number of fallback colors cycled once the hatch styles wrap.
+inline constexpr int k_overview_palette_count = 6;
+
+// The deterministic overview identity for the layer at bottom→top `ordinal` in a composition of
+// `count` layers (§5:191, Constraint 4). PURE: the same `ordinal` always yields the same pattern,
+// the first `k_overview_hatch_style_count` ordinals are distinguished by hatch style alone
+// (`color_index == -1`), and only past that does `color_index` become >=0. `ordinal` is clamped
+// into `[0, count)` so an out-of-range index is defined (a degenerate `count <= 0` yields the
+// style-0 default). Style and color depend only on `ordinal`, so the list-side swatch and the
+// overview box agree by construction.
+OverviewPattern overview_pattern(int ordinal, int count);
+
+// One hatch line segment in CONTENT space (before the cell's `placement`).
+struct HatchSegment {
+  arbc::Vec2 a;
+  arbc::Vec2 b;
+};
+
+// The largest number of hatch lines PER DIRECTION `hatch_segments` will emit before it declines
+// (returns empty) — the over-dense guard, the `composition_grid_lines` `max_lines` discipline.
+inline constexpr int k_max_hatch_lines = 4096;
+
+// The CONTENT-space hatch fill of `content_bounds`: a set of parallel line segments at
+// `style.angle_rad`, spaced `spacing` content units apart (perpendicular distance), ORIGIN-
+// anchored (lines sit at integer multiples of `spacing` from the content origin, so two cells
+// sharing content align), each clipped to `content_bounds`; `style.cross` appends a second set
+// perpendicular to the first (§5:201). Generated in content space and returned BEFORE
+// `placement`, so the count and spacing are INVARIANT to the cell's placement rotation and SCALE
+// with the content extent (the load-bearing "scales/tilts with the cell" claim, Constraint 4) —
+// the L4 draw maps each endpoint through `placement` and the overview transform. Total and
+// self-limiting: a `spacing <= 0`/non-finite, a degenerate/non-finite `content_bounds`, or a
+// per-direction line count exceeding `k_max_hatch_lines` (an over-fine hatch) all yield an EMPTY
+// result — a defined no-op that draws nothing (the D-fit_bounds-3 fallback discipline).
+std::vector<HatchSegment> hatch_segments(const arbc::Rect& content_bounds, double spacing,
+                                         const HatchStyle& style);
+
 } // namespace ace::interact

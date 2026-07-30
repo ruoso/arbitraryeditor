@@ -258,3 +258,35 @@ D10 (`docs/00-design.md:477`) forbids a v1 blend-space toggle; libarbc v0.4.0 ha
 **Trigger:** Either (a) refinement_writer re-issues `render_loop_liveness_wake.md` with a corrected design that avoids the any-thread read of `Document::pending_external_loads()` — e.g. by guarding the read behind a document-scoped `settle_in_flight` check and updating D-1 / D-3 / Constraint 4 and the A4.1b doc delta accordingly — OR (b) a new libarbc release adds an atomic any-thread `pending()` counter to `PendingExternalLoads` (mirroring `d_ready_count` / `ready()`) so the render loop can witness the full request→arrival window without racing the writer-thread settle.
 
 `Document::pending_external_loads()` is **writer-thread-only**: `PendingExternalLoads::pending()` returns `d_pending.size() + d_pending_assets.size()` over plain `std::unordered_map`s explicitly marked "Writer/load-thread-only state" (`pending_external_loads.hpp:127,162-168`), with no mutex. The writer's `settle_external_loads` → `take_pending_asset` does `d_pending_assets.erase(…)` unsynchronized; a concurrent render-thread read of `pending()` races that erase — TSan flags it. The A4.1b lock-free read list (`docs/01-architecture.md:211-214`) names `external_loads_ready()` but **not** `pending_external_loads()`; only `ready()` (the atomic `d_ready_count`) is designated the render-thread poll (`pending_external_loads.hpp:146-154`). The pre-emptive A4.1b amendment at `docs/01-architecture.md:225-233` (committed before implementation confirmed feasibility) claims `Document::pending_external_loads()` as a render-thread poll; that claim is incorrect and must be reverted or corrected when the refinement is re-derived.
+
+---
+
+## arbc v0.4.0 nested-render worker-detach race
+
+**Source:** `tasks/refinements/editor/overview.md` (editor.panels.overview, 2026-07-30) — fixer sub-agent return summary (attempts 1–5).
+
+**Trigger:** a new libarbc release that fixes the `NestedContent::d_doc` detach race in the `WorkerPool` render path, OR a libarbc API that lets the interactive render join deferred worker tasks before the per-frame `OperatorBindingScope` destructor runs.
+
+arbc v0.4.0 has a data race in its threaded interactive render path: `NestedContent::render` reads `d_doc` (`nested_content.cpp:515`) unsynchronized while the frame's `OperatorBindingScope` destructor nulls it (`:133`) on a worker thread. This fires only when the canvas renders nested compositions (`org.arbc.nested`) through the threaded interactive pool (`default_interactive_pool_config`); the inline pool (`WorkerPoolConfig{}`) is race-free. The editor's overview e2e works around this by using the inline pool for its canvas scaffolding. All live-canvas e2es that render `org.arbc.nested` (isolation_scope e2e, cells_scoped_edit e2e, others) are latently affected. No editor-side fix is appropriate — the race is inside the pinned dep.
+
+**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting that `NestedContent` either joins its deferred worker task before `detach()` nulls `d_doc`, or that the `OperatorBindingScope` detach is deferred until all in-flight worker tasks referencing the scope have completed.
+
+---
+
+## Overview visual-polish open items (§5:204-206)
+
+**Source:** `tasks/refinements/editor/overview.md` (editor.panels.overview, 2026-07-30) — Open questions / §5:204-206.
+
+**Trigger:** a design pass after the overview has been used in real compositions.
+
+The overview ships provisional defaults for the three §5:204-206 open polish items: the exact hatch style and semi-opacity level (currently a defensible visual default); the pattern-count threshold before color must carry the load (the `overview_pattern` fallback is parameterized but the threshold is provisional); and the camera visual language (frame outline + label, no affordance chrome beyond the look-through click target). All three are human/design-taste calls that retune without touching the model or geometry. No WBS task — retune the L4 draw constants when a design pass produces a preferred value.
+
+---
+
+## Overview keyboard/gesture bindings
+
+**Source:** `tasks/refinements/editor/overview.md` (editor.panels.overview, 2026-07-30) — Open questions.
+
+**Trigger:** §11 input map settled in `docs/00-design.md`.
+
+The overview ships provisional idiom gestures (double-click-to-enter, zoom-control chord, fit-to-camera click). These bindings are provisional — §11 of `docs/00-design.md` (the input map) is still open, and the input-map owner may want to remap them without touching the navigator seam. The scope model, breadcrumb derivation, and all L1 geometry helpers are independent of the bindings and need no change when they move; only the L4 dispatch in `OverviewPanel` is rebindable. No WBS task — this is a human design call gated on the input map, mirroring the same note for the layers panel bindings.

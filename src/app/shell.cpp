@@ -3,6 +3,7 @@
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/inspector_panel.hpp>
 #include <ace/app/layers_panel.hpp>
+#include <ace/app/overview_panel.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/app/shell.hpp>
 #include <ace/commands/app_state.hpp>
@@ -372,6 +373,17 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::app::LayersPanel layers(app_state, canvas);
     ace::views::register_view_body(ace::dockmodel::ViewType::Layers,
                                    [&layers](std::string_view view_id) { layers.draw(view_id); });
+    // The Overview view body is the render-free composition schematic (editor.panels.overview;
+    // D6/§5): every active-composition cell as a content-space hatched, dotted-bordered box with
+    // front-occludes-back z-order, cameras as frames + shot map, the live viewport as a draggable
+    // navigator, and drag-to-place / z-order edits over the same shared selection + apply_edit
+    // funnel + entered-composition scope on the one AppState. It captures the AppState& and the
+    // CanvasView (edit runner + the navigator's drive_focused_camera) and is cleared on exit like
+    // the other bodies (the seam is process-global).
+    ace::app::OverviewPanel overview(app_state, canvas);
+    ace::views::register_view_body(
+        ace::dockmodel::ViewType::Overview,
+        [&overview](std::string_view view_id) { overview.draw(view_id); });
     // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
     // it renders each open view by its instance id and syncs the tab ✕ back into
     // the authoritative DockLayout.
@@ -522,6 +534,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::views::register_view_body(ace::dockmodel::ViewType::History, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Inspector, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Layers, {});
+    ace::views::register_view_body(ace::dockmodel::ViewType::Overview, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Export, {});
     // The export job reads the one owned `Document`, so it must be off the road before
     // anything below runs (Constraint 8): cancel between items, then JOIN — never

@@ -767,4 +767,148 @@ std::vector<arbc::Affine> group_transform(const arbc::Affine& old_union,
   return out;
 }
 
+// --- Overview schematic: hatch identity + content-space hatch (editor.panels.overview; D6/§5) --
+
+namespace {
+
+// The fixed table of distinct hatch styles, indexed by `style_index % k_overview_hatch_style_count`
+// (§5:191). Angles are content-space radians; the last two add a perpendicular cross so a
+// six-strong palette reads as six distinct fills before color has to carry the load (§5:204).
+constexpr double k_pi = 3.14159265358979323846;
+HatchStyle hatch_style_for(int style_index) {
+  switch (((style_index % k_overview_hatch_style_count) + k_overview_hatch_style_count) %
+          k_overview_hatch_style_count) {
+  case 0:
+    return {k_pi * 0.25, false}; // 45°
+  case 1:
+    return {k_pi * 0.75, false}; // 135°
+  case 2:
+    return {0.0, false}; // horizontal
+  case 3:
+    return {k_pi * 0.5, false}; // vertical
+  case 4:
+    return {k_pi * 0.25, true}; // 45° cross
+  default:
+    return {0.0, true}; // orthogonal cross
+  }
+}
+
+// Clip the infinite line { base + t*dir : t in R } to axis-aligned `rect`, returning the
+// [t0, t1] parameter interval (empty optional when the line misses the rect). A slab clip on
+// each axis; a direction component of zero constrains that axis to a validity test rather than
+// a bound. `dir` is assumed non-zero and finite (the caller guards).
+std::optional<std::pair<double, double>> clip_line(arbc::Vec2 base, arbc::Vec2 dir,
+                                                   const arbc::Rect& rect) {
+  double t0 = -std::numeric_limits<double>::infinity();
+  double t1 = std::numeric_limits<double>::infinity();
+  const double lo[2] = {rect.x0, rect.y0};
+  const double hi[2] = {rect.x1, rect.y1};
+  const double b[2] = {base.x, base.y};
+  const double d[2] = {dir.x, dir.y};
+  for (int axis = 0; axis < 2; ++axis) {
+    if (std::abs(d[axis]) < 1e-12) {
+      if (b[axis] < lo[axis] || b[axis] > hi[axis]) {
+        return std::nullopt; // parallel to this axis and outside the slab: no intersection
+      }
+      continue;
+    }
+    double ta = (lo[axis] - b[axis]) / d[axis];
+    double tb = (hi[axis] - b[axis]) / d[axis];
+    if (ta > tb) {
+      std::swap(ta, tb);
+    }
+    t0 = std::max(t0, ta);
+    t1 = std::min(t1, tb);
+    if (t0 > t1) {
+      return std::nullopt;
+    }
+  }
+  return std::make_pair(t0, t1);
+}
+
+// Append the parallel-line set at `dir` (with normal `nrm`) spanning `content_bounds`, origin-
+// anchored at multiples of `spacing`, to `out`. Returns false when the set would exceed
+// `k_max_hatch_lines` (the caller then abandons the whole hatch as over-fine).
+bool emit_line_set(std::vector<HatchSegment>& out, const arbc::Rect& r, double spacing,
+                   arbc::Vec2 dir, arbc::Vec2 nrm) {
+  // The perpendicular-offset range the rect's four corners span, projected onto `nrm`.
+  const double p[4] = {nrm.x * r.x0 + nrm.y * r.y0, nrm.x * r.x1 + nrm.y * r.y0,
+                       nrm.x * r.x1 + nrm.y * r.y1, nrm.x * r.x0 + nrm.y * r.y1};
+  double n_min = p[0];
+  double n_max = p[0];
+  for (int i = 1; i < 4; ++i) {
+    n_min = std::min(n_min, p[i]);
+    n_max = std::max(n_max, p[i]);
+  }
+  const long k_lo = static_cast<long>(std::ceil(n_min / spacing));
+  const long k_hi = static_cast<long>(std::floor(n_max / spacing));
+  if (k_hi < k_lo) {
+    return true; // no line at this spacing lands inside the rect: nothing to add, not an error
+  }
+  if (k_hi - k_lo + 1 > k_max_hatch_lines) {
+    return false; // over-fine hatch: decline the whole fill
+  }
+  for (long k = k_lo; k <= k_hi; ++k) {
+    const double offset = static_cast<double>(k) * spacing;
+    // A point on the line at perpendicular offset `offset`: `offset * nrm` (nrm is unit).
+    const arbc::Vec2 base{offset * nrm.x, offset * nrm.y};
+    if (const std::optional<std::pair<double, double>> t = clip_line(base, dir, r)) {
+      if (t->second > t->first) { // a genuine segment, not a corner touch
+        out.push_back(HatchSegment{{base.x + t->first * dir.x, base.y + t->first * dir.y},
+                                   {base.x + t->second * dir.x, base.y + t->second * dir.y}});
+      }
+    }
+  }
+  return true;
+}
+
+} // namespace
+
+OverviewPattern overview_pattern(int ordinal, int count) {
+  OverviewPattern out;
+  // Clamp the ordinal into the composition's own range so an out-of-range index is defined; a
+  // degenerate count collapses to the style-0 default (Constraint 4).
+  int idx = ordinal;
+  if (count > 0) {
+    idx = std::clamp(ordinal, 0, count - 1);
+  } else {
+    idx = 0;
+  }
+  if (idx < 0) {
+    idx = 0;
+  }
+  out.style = hatch_style_for(idx);
+  // The first `k_overview_hatch_style_count` layers are separated by hatch style alone
+  // (color_index == -1); past that the styles wrap and a palette color carries the distinction
+  // (§5:204's "pattern-count-before-color").
+  const int bucket = idx / k_overview_hatch_style_count;
+  out.color_index = bucket == 0 ? -1 : (bucket - 1) % k_overview_palette_count;
+  return out;
+}
+
+std::vector<HatchSegment> hatch_segments(const arbc::Rect& content_bounds, double spacing,
+                                         const HatchStyle& style) {
+  std::vector<HatchSegment> out;
+  if (!(spacing > 0.0) || !std::isfinite(spacing) || content_bounds.empty() ||
+      !std::isfinite(content_bounds.x0) || !std::isfinite(content_bounds.y0) ||
+      !std::isfinite(content_bounds.x1) || !std::isfinite(content_bounds.y1) ||
+      !std::isfinite(style.angle_rad)) {
+    return out; // degenerate spacing/bounds/angle: a defined empty no-op (Constraint 4)
+  }
+  const double cs = std::cos(style.angle_rad);
+  const double sn = std::sin(style.angle_rad);
+  const arbc::Vec2 dir{cs, sn};
+  const arbc::Vec2 nrm{-sn, cs}; // unit normal to the hatch direction
+  if (!emit_line_set(out, content_bounds, spacing, dir, nrm)) {
+    return {}; // over-fine: nothing (the whole hatch, both directions, is abandoned)
+  }
+  if (style.cross) {
+    // The perpendicular set: swap dir/normal (a 90° rotation), same spacing.
+    if (!emit_line_set(out, content_bounds, spacing, nrm, arbc::Vec2{-dir.x, -dir.y})) {
+      return {};
+    }
+  }
+  return out;
+}
+
 } // namespace ace::interact

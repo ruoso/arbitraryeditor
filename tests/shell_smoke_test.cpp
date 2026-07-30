@@ -33,9 +33,19 @@ TEST_CASE("shell smoke: run_editor exits 2 when the project dir cannot be opened
   // boundary (D-app_state-6 / Constraint 6).
   const std::filesystem::path not_a_dir =
       std::filesystem::temp_directory_path() / "ace_shell_smoke_not_a_dir";
+  // Start from a clean slate at this fixed path: a stale DIRECTORY left here (e.g.
+  // an interrupted prior run, or an earlier create_project against this path) makes
+  // the ofstream below a silent no-op, so run_editor would OPEN it as a valid project
+  // and return 0 — masking the contract. remove_all clears a file or a directory.
+  std::error_code ec;
+  std::filesystem::remove_all(not_a_dir, ec);
   {
     std::ofstream(not_a_dir) << "not a project directory";
   }
+  // The whole point of the case is a regular file, not a directory: assert the premise
+  // holds before asserting the behaviour, so a path collision fails loudly here rather
+  // than as a confusing 0 == 2 downstream.
+  REQUIRE(std::filesystem::is_regular_file(not_a_dir));
   ShellOptions opts;
   opts.headless = true;
   opts.max_frames = 1;
@@ -43,8 +53,9 @@ TEST_CASE("shell smoke: run_editor exits 2 when the project dir cannot be opened
   opts.height = 240;
   opts.project_dir = not_a_dir;
   CHECK(run_editor(opts) == 2);
-  std::error_code ec;
-  std::filesystem::remove(not_a_dir, ec);
+  // Recursive teardown: self-heals even if a regression ever creates a project here,
+  // so a single stale directory can never wedge every later run of this test.
+  std::filesystem::remove_all(not_a_dir, ec);
 }
 
 TEST_CASE("shell smoke: piecewise lifecycle honours the frame cap") {

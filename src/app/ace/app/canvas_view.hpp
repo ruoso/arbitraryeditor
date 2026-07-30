@@ -14,6 +14,7 @@
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -68,6 +69,16 @@ public:
   // strictly encloses this view's AND the document's (D-writer_thread-6): construct it before the
   // `AppState`, `stop()` it after this view is destroyed and before the document is released.
   CanvasView(commands::AppState& state, writer::WriterThread& writer);
+  // Test seam: construct the owned `render::CanvasHost` with an injected worker-pool config +
+  // per-frame budget instead of the shipped `default_interactive_pool_config()` + bounded budget.
+  // Production always uses the default ctor above; this mirrors the shipped `CanvasHost` overload
+  // (canvas_host.hpp) so a headless e2e can render its scaffolding canvas with the deterministic
+  // inline settle-fully pool (`arbc::WorkerPoolConfig{}`, `std::chrono::hours(1)`) — the same
+  // byte-identical degenerate the canvas goldens/units already use — keeping the render path off
+  // the cross-frame worker dispatch (arbc v0.4.0's threaded nested-render path). No behavior
+  // change to the panel under test; interactive worker threading is covered by the TSan case.
+  CanvasView(commands::AppState& state, writer::WriterThread& writer,
+             arbc::WorkerPoolConfig pool_config, std::chrono::steady_clock::duration frame_budget);
   ~CanvasView();
 
   CanvasView(const CanvasView&) = delete;
@@ -184,11 +195,26 @@ public:
   // `focused_view_id()`'s — valid until the next `reconcile()` drops that pane.
   std::string_view indicated_view_id() const;
 
+  // Push a transient viewport camera into the pane the framing-derived verbs act on — the
+  // WRITE-mirror of `focused_framing()` (editor.panels.overview, D-overview-3). Targets the
+  // `indicated_view_id()` pane (so *which pane the overview drives* is identical to *which pane
+  // the focused-canvas marker names*), sets that pane's transient `Presenter::camera`, and
+  // submits it through `host_.request_camera` with the same per-frame dedup `draw_content` uses.
+  // Transient session state ONLY: no transaction, no journal entry, no dirty, not undoable
+  // (D24/D15). A NO-OP that leaves every camera unchanged when no live/sized canvas exists
+  // (`indicated_view_id()` empty) — the refuse-rather-than-guess rule (D24). Callable on the UI
+  // thread exactly like the read seam.
+  void drive_focused_camera(const arbc::Affine& camera);
+
   // Stop + join the render thread and release every GL texture while the context is
   // still valid (before shutdown). Safe to call twice (the destructor also calls it).
   void destroy();
 
 private:
+  // Shared post-construction setup for both ctors: bind the writer thread and spawn the one
+  // render thread (must run AFTER `host_` is fully constructed by whichever ctor delegates here).
+  void init();
+
   // One per-canvas#N presenter: the latest frame consumed from that entry's double-buffer
   // and the GL texture it uploads to. All UI-thread state — including the TRANSIENT
   // viewport camera (D-nav-1: never a transact, never persisted; a per-pane value like

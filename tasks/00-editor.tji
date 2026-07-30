@@ -617,8 +617,21 @@ task editor "Editor — host GUI over libarbc" {
     task overview "Patterned-fill wireframe overview; z-order occlusion; editable" {
       effort 4d
       allocate team
+      complete 100
       depends !layers, editor.cameras.model
-      note "The render-free overview: each cell a hatch pattern (shared identity with the list), front fills occlude back with always-on-top dotted borders (z-order without a list), cameras as frames, the live viewport highlighted; editable (drag to place) + navigator + export/shot map. Design: D6/§5. Refinement: tasks/refinements/overview.md. Decided (pre-exec 2026-07-19): hatch density is CONTENT-space (scales/tilts with the cell so scale/orientation read for free). The overview is a full viewport NAVIGATOR — manipulate the active viewport with an in-overview zoom control (partners D2 deep-zoom aids, editor.canvas.nav_aids), NOT navigation-only — and it is the placement surface for editor.cells.model inserts (a new cell is placed here). Remaining open items are visual polish only (hatch style/opacity, pattern-count-before-color, camera visual language)."
+      note "The render-free overview: each cell a hatch pattern (shared identity with the list), front fills occlude back with always-on-top dotted borders (z-order without a list), cameras as frames, the live viewport highlighted; editable (drag to place) + navigator + export/shot map. Design: D6/§5. Refinement: tasks/refinements/editor/overview.md. Decided (pre-exec 2026-07-19): hatch density is CONTENT-space (scales/tilts with the cell so scale/orientation read for free). The overview is a full viewport NAVIGATOR — manipulate the active viewport with an in-overview zoom control (partners D2 deep-zoom aids, editor.canvas.nav_aids), NOT navigation-only — and it is the placement surface for editor.cells.model inserts (a new cell is placed here). Remaining open items are visual polish only (hatch style/opacity, pattern-count-before-color, camera visual language)."
+    }
+    task hatch_swatch "List-side hatch swatch + cross-highlight between list and overview" {
+      effort 1d
+      allocate team
+      depends !overview
+      note "Draw the deterministic interact::overview_pattern swatch beside each Layers-list row and wire AppState hover cross-highlight between the list and the overview (§5:191-194: 'the same pattern swatch appears beside the layer row … hovering either cross-highlights the other'). The overview side of the identity ships with editor.panels.overview; this leaf owns the list-side rendering and the cross-panel hover state. Source-of-debt: tasks/refinements/editor/overview.md. Design: docs/00-design.md D6/§5."
+    }
+    task overview_gizmo "Full scale/rotate/shear gizmo on schematic overview boxes" {
+      effort 2d
+      allocate team
+      depends !overview, editor.cells.gizmo
+      note "Full 8-handle scale/rotate/shear transform gizmo on schematic boxes in the overview, reusing the shipped interact cell-gizmo handle math (editor.cells.gizmo) fed through the overview transform. §6 makes the overview the coarse-arrangement surface (move + z-order shipped in editor.panels.overview); the full gizmo-in-overview is real, separable draw+dispatch work. Source-of-debt: tasks/refinements/editor/overview.md. Design: docs/00-design.md D7/D8/§6."
     }
     task color "sRGB picker; eyedropper (through camera); linear boundary" {
       effort 2d

@@ -15,12 +15,14 @@
 #include <arbc/base/geometry.hpp>
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
+#include <arbc/runtime/worker_pool.hpp> // WorkerPoolConfig (the test-seam ctor's by-value param)
 
 #include <imgui.h>
 
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <optional>
 #include <string>
@@ -89,6 +91,21 @@ namespace ace::app {
 
 CanvasView::CanvasView(commands::AppState& state, writer::WriterThread& writer)
     : state_(state), writer_(writer) {
+  // `host_` is default-constructed (the shipped default_interactive_pool_config() + bounded
+  // budget).
+  init();
+}
+
+CanvasView::CanvasView(commands::AppState& state, writer::WriterThread& writer,
+                       arbc::WorkerPoolConfig pool_config,
+                       std::chrono::steady_clock::duration frame_budget)
+    : state_(state), writer_(writer), host_(std::move(pool_config), frame_budget) {
+  // The test-seam ctor: `host_` above is constructed with the injected pool/budget (e.g. the
+  // inline settle-fully pool a headless e2e uses). Setup is otherwise identical.
+  init();
+}
+
+void CanvasView::init() {
   // Bind the document's writer thread BEFORE the render thread exists: the host posts its own
   // WRITER-THREAD-ONLY work there (the per-document DamageRouter, every HostViewport ctor/dtor —
   // D-writer_thread-8), and the first of those happens on the render thread's first iteration.
@@ -1303,6 +1320,38 @@ std::string_view CanvasView::indicated_view_id() const {
   // borrows `presenters_`'s keys, not `panes`, so it outlives this frame's projection.
   const std::vector<PaneFraming> panes = pane_rows();
   return focus_target(panes, focused_view_id_);
+}
+
+void CanvasView::drive_focused_camera(const arbc::Affine& camera) {
+  // The write-mirror of `focused_framing()` (D-overview-3): resolve the SAME pane the read seam
+  // and the focused-canvas marker name, then push a transient viewport camera into it. An empty
+  // target means no live/sized canvas — a no-op that leaves every camera unchanged (D24).
+  const std::string_view target = indicated_view_id();
+  if (target.empty()) {
+    return;
+  }
+  auto it = presenters_.find(target);
+  if (it == presenters_.end()) {
+    return; // the marker named a pane that has since been reconciled away: nothing to drive
+  }
+  Presenter& p = it->second;
+  // The navigator drives the FREE viewport camera (D-nav-1) — never a `transact`, never journaled
+  // (D24/D15). While looking through a shot the free camera is frozen (D-look_through-6), so the
+  // per-frame path keeps submitting the shot; setting `camera` here still updates what the pane
+  // reverts to on exit.
+  p.camera = camera;
+  if (!p.look_through.has_value()) {
+    // Free viewport: the framing tracks the camera immediately, so a `focused_framing()` read
+    // right after this call (the overview's own next frame, a headless driver) reflects the nudge
+    // without waiting for the next `draw_content` refresh.
+    p.framing_camera = camera;
+  }
+  // The same submit dedup `draw_content` runs (canvas_view.cpp): only touch the render channel
+  // when the camera actually moved.
+  if (!(camera == p.submitted)) {
+    p.submitted = camera;
+    host_.request_camera(target, camera);
+  }
 }
 
 void CanvasView::destroy() {

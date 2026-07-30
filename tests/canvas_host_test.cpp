@@ -2626,3 +2626,82 @@ TEST_CASE("canvas_host: the contact-sheet phase renders the live document clean 
   CHECK(report->contact_sheet->width == plan.contact_sheet->width);
   CHECK(report->contact_sheet->height == plan.contact_sheet->height);
 }
+
+TEST_CASE("canvas_host: a stream of UI-thread cell TRANSFORM commits runs clean against the "
+          "overview panel's read path (editor.panels.overview TSan anchor)") {
+  // editor.panels.overview Acceptance (Threading, Constraint 11): the overview reads the shipped
+  // UI-thread scene read-seam every frame — `scene::cells(active)` + `scene::cameras` +
+  // `active_composition` + `composition_path` — while a box drag commits a REAL
+  // `transform_cells_command` mutation through apply_edit. This drives that whole read path on the
+  // UI thread against the live render walk while the transform stream rewrites a layer, so the
+  // reads genuinely overlap the writes in wall-clock time. No new lock, no new thread, no new
+  // suppression — the writer-identity + lock-free `pin()` seam covers it, exactly as the
+  // cells.gizmo / pick_targets anchors above assert. (The navigator's `drive_focused_camera` and
+  // `focused_framing` touch ONLY transient per-pane session state — no `Document` access and no
+  // writer work — so they carry no cross-thread document hazard and are covered behaviourally by
+  // the e2e, not this document-race anchor.)
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  // A couple of placed cells plus a camera so the overview's cells+cameras merge is fully walked.
+  writer.submit_sync([&] {
+    REQUIRE(ace::scene::add_cell(*probe.document, registry, "org.arbc.raster", "16x16",
+                                 arbc::Affine::translation(8.0, 8.0))
+                .has_value());
+    REQUIRE(ace::scene::add_camera(*probe.document, registry, "Hero",
+                                   ace::scene::Resolution{32, 24},
+                                   arbc::Affine::translation(4.0, 4.0))
+                .valid());
+  });
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  constexpr int k_gestures = 48;
+  arbc::Affine last = arbc::Affine::identity();
+  std::size_t last_cells = 0;
+  for (int i = 0; i < k_gestures; ++i) {
+    const double s = 1.0 + static_cast<double>(i % 8) * 0.25; // a varying, non-degenerate scale
+    last = arbc::Affine{s, 0.0, 0.0, s, static_cast<double>(i), static_cast<double>(-i)};
+    apply_edit(writer, host, [&] {
+      ace::commands::transform_cells_command({ace::commands::LayerTransform{probe.layer, last}})
+          .apply(*probe.document);
+    });
+    // The overview's per-frame read path, overlapping the writer + render reads.
+    const arbc::ObjectId active = ace::scene::active_composition(*probe.document, std::nullopt);
+    const std::vector<ace::scene::Cell> cells =
+        ace::scene::cells(*probe.document, registry, active);
+    const std::vector<ace::scene::Camera> cameras = ace::scene::cameras(*probe.document);
+    const std::vector<ace::scene::Breadcrumb> path =
+        ace::scene::composition_path(*probe.document, registry, std::nullopt);
+    last_cells = cells.size();
+    (void)cameras;
+    (void)path;
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  // The committed placement is stable and finite; the read path saw a consistent snapshot.
+  bool found = false;
+  for (const ace::interact::PickTarget& tgt :
+       ace::interact::pick_targets(*probe.document, registry)) {
+    if (tgt.layer == probe.layer) {
+      found = true;
+      CHECK(tgt.placement == last);
+    }
+  }
+  CHECK(found);
+  CHECK(last_cells >= 1);
+
+  host.stop();
+  handle->join();
+}
