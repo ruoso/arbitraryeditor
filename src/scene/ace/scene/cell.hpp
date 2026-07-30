@@ -7,6 +7,7 @@
 #include <arbc/base/ids.hpp>       // arbc::ObjectId
 #include <arbc/base/transform.hpp> // arbc::Affine
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -271,6 +272,28 @@ struct Breadcrumb {
 std::vector<Breadcrumb> composition_path(const arbc::Document& document,
                                          const arbc::Registry& registry,
                                          std::optional<arbc::ObjectId> entered);
+
+// The entered composition's PLACED FOCUS QUAD — the four corners of the wrapping nested cell's
+// `placement` applied to its `content_bounds`, transformed all the way up to ROOT composition
+// space (the space render's viewport camera maps to device). This is D17's "the child": the
+// canvas keeps it bright and dims its complement (editor.canvas.isolation_scope /
+// D-isolation_scope-4). The corners are returned in content-bounds order — (x0,y0), (x1,y0),
+// (x1,y1), (x0,y1) — mapped through the accumulated placement, so a rotated/sheared placement
+// yields a TRUE quad, not an AABB; the render dims the true complement.
+//
+// REGISTRY-FREE by design (A16): it descends the composition tree using only the generic
+// `arbc::Content::composition_ref()` link + layer placements off the pinned model, never a
+// `kind_id` switch, so `render` calls it without threading a `Registry`. `nullopt` for every
+// no-dim case (the render's "no scrim" signal), matching the layers `active_composition` fail-safe
+// (Constraint 6): the scope is `nullopt`/Root, an id that no longer names a live composition
+// (GC'd / undone-away / foreign), a composition Root does not reach through a wrapping nested cell,
+// or a wrapping cell whose content is UNBOUNDED (no finite focus region — never dims the whole
+// plane's empty complement, Constraint 5). PINNED read over `pin()` (A18), lock-free.
+struct FocusQuad {
+  std::array<arbc::Vec2, 4> corners;
+};
+std::optional<FocusQuad> composition_focus_quad(const arbc::Document& document,
+                                                std::optional<arbc::ObjectId> entered);
 
 // The (from_index, to_index) pair in bottom→top membership order for a front→back list drag from
 // list slot `list_from` to slot `list_to`, over a list of `count` rows. PURE (Constraint 2). The

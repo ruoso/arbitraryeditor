@@ -409,8 +409,9 @@ task editor "Editor — host GUI over libarbc" {
     task isolation_scope "Canvas visual reflection of the entered composition scope (dim outside)" {
       effort 2d
       allocate team
+      complete 100
       depends editor.panels.layers
-      note "Present the entered composition in the canvas and dim everything outside (D17: 'canvas … show the child's cells, everything outside dims'), consuming AppState::entered_composition published by editor.panels.layers. The list's re-root, breadcrumb and scope model ship with layers; this leaf owns the canvas render reflection — the CanvasRenderer/DocumentBinding path that composites the child and dims the parent. Source-of-debt: tasks/refinements/editor.panels/layers.md (Deferred WBS). Design: docs/00-design.md D17, docs/01-architecture.md A5/A6."
+      note "Present the entered composition in the canvas and dim everything outside (D17: 'canvas … show the child's cells, everything outside dims'), consuming AppState::entered_composition published by editor.panels.layers. The list's re-root, breadcrumb and scope model ship with layers; this leaf owns the canvas render reflection — the CanvasRenderer/DocumentBinding path that composites the child and dims the parent. Source-of-debt: tasks/refinements/editor.panels/layers.md (Deferred WBS). Design: docs/00-design.md D17, docs/01-architecture.md A5/A6. Refinement: tasks/refinements/editor.canvas/isolation_scope.md"
     }
   }
 

@@ -229,6 +229,14 @@ private:
     // submitted camera is the shot's (not `camera`, which is left at its free value —
     // D-look_through-6), so the two diverge; this dedups the per-frame submit across both.
     arbc::Affine submitted = arbc::Affine::identity();
+    // The isolation scope last submitted through host_.request_scope (editor.canvas.isolation_scope
+    // / D-isolation_scope-3): AppState::entered_composition mirrored down this entry's scope
+    // channel, deduped per frame so the one project-level scope (D19) reflects identically across
+    // all canvases with no per-frame channel churn. `scope_submitted` distinguishes "never
+    // submitted" from "submitted nullopt (Root)", so the first frame always primes the channel — a
+    // scope already entered when a canvas opens dims immediately.
+    std::optional<arbc::ObjectId> submitted_scope;
+    bool scope_submitted = false;
     // --- camera-frame gizmo (editor.cameras.manip; D-manip-4) ------------------
     // The in-progress border-grab, if any: previewed as UI-thread session state (the gizmo
     // redraws at the dragged `Affine`, no journal churn) and committed as ONE

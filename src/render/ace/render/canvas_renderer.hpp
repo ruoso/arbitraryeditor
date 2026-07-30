@@ -2,10 +2,13 @@
 
 #include <ace/render/render.hpp>
 
+#include <arbc/base/ids.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace arbc {
 class Document;
@@ -107,6 +110,17 @@ public:
   // and its TileCache are render-thread-only (A4), so only the driver's drive loop
   // calls this. A value-identical camera is free — the next step issues no frame.
   void set_camera(const arbc::Affine& camera);
+
+  // Set the ISOLATION SCOPE this canvas reflects (editor.canvas.isolation_scope /
+  // D-isolation_scope-3): the entered nested composition (nullopt = Root). The next frame dims
+  // everything OUTSIDE that composition's placed extent (D17's canvas half), computed registry-free
+  // from the pin() snapshot via scene::composition_focus_quad and baked into the working-space
+  // frame before the sRGB8 convert (D10). A VALUE CHANGE bumps the frame version so the host
+  // re-publishes even when the arbc scene is still — the mechanism that lets a pure scope toggle
+  // reflect on the next frame; a nullopt / unresolvable scope leaves the frame byte-identical to
+  // the un-scoped render (Constraint 2). RENDER-THREAD-confined like set_camera; a value-identical
+  // scope is free.
+  void set_scope(std::optional<arbc::ObjectId> entered);
 
   // Drive one HostViewport::step(). The first step always composites
   // (frames_issued() == 1); a subsequent step on an unchanged, playhead-pinned

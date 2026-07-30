@@ -281,6 +281,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/contact_sheet_test.cpp
                          tests/writer_thread_test.cpp
                          tests/raster_tile_store_test.cpp
+                         tests/isolation_scope_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene ace::writer
@@ -343,6 +344,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/reopen_degradation_notice_e2e_test.cpp
                               tests/inspector_e2e_test.cpp
                               tests/layers_e2e_test.cpp
+                              tests/isolation_scope_e2e_test.cpp
                               tests/welcome_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
 add_test(NAME ace_shell_test COMMAND ace_shell_test)

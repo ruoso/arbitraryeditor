@@ -184,6 +184,20 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
     host_.request_resize(view_id, target_w, target_h);
   }
 
+  // Mirror the one project-level isolation scope (AppState::entered_composition, D19) down this
+  // entry's scope channel on a genuine change — the canvas half of D17: the render dims everything
+  // outside the entered composition's placed extent, every canvas reflecting the one shared scope
+  // (editor.canvas.isolation_scope / D-isolation_scope-3). Transient session state, never a
+  // transaction (D15); the submit rides the settled per-entry render-thread channel exactly like
+  // request_camera. The fail-safe (a GC'd / foreign id -> no dim) is the render's, resolved each
+  // frame from the pin() by scene::composition_focus_quad — so the raw scope is fed down as-is.
+  const std::optional<arbc::ObjectId> want_scope = state_.entered_composition();
+  if (!p.scope_submitted || want_scope != p.submitted_scope) {
+    p.scope_submitted = true;
+    p.submitted_scope = want_scope;
+    host_.request_scope(view_id, want_scope);
+  }
+
   // Consume this entry's latest settled frame from its double-buffer (non-blocking);
   // upload to GL only when the sequence advanced (Constraint 3). A fresh upload on the
   // first frame or a size change (a new texture object), an in-place update thereafter.

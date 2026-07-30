@@ -3,6 +3,7 @@
 #include <ace/render/render.hpp>
 #include <ace/writer/writer_thread.hpp>
 
+#include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/runtime/damage_router.hpp>
 #include <arbc/runtime/document.hpp>
@@ -19,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -122,6 +124,9 @@ struct CanvasHost::Impl {
   std::vector<std::string> pending_removes;
   std::map<std::string, std::pair<int, int>, std::less<>> pending_resizes;
   std::map<std::string, arbc::Affine, std::less<>> pending_cameras; // per-entry camera submits
+  // per-entry isolation-scope submits (editor.canvas.isolation_scope): the entered composition or
+  // nullopt (Root). One value slot beside pending_cameras, under the same lock — no new primitive.
+  std::map<std::string, std::optional<arbc::ObjectId>, std::less<>> pending_scopes;
 
   std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries;
 
@@ -256,6 +261,15 @@ void CanvasHost::request_camera(std::string_view id, const arbc::Affine& camera)
   impl_->cv.notify_all();
 }
 
+void CanvasHost::request_scope(std::string_view id, std::optional<arbc::ObjectId> entered) {
+  {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->pending_scopes[std::string(id)] = entered;
+    impl_->dirty = true;
+  }
+  impl_->cv.notify_all();
+}
+
 void CanvasHost::poke() { impl_->wake(); }
 
 void CanvasHost::stop() {
@@ -274,6 +288,8 @@ bool CanvasHost::drive_once() {
     int height;
     bool do_camera;
     arbc::Affine camera;
+    bool do_scope;
+    std::optional<arbc::ObjectId> scope;
   };
   std::vector<DriveItem> items;
   // Entries removed this iteration destruct AFTER the lock is released (a
@@ -353,6 +369,7 @@ bool CanvasHost::drive_once() {
                     [&id](const Impl::PendingAdd& add) { return add.id == id; });
       impl_->pending_resizes.erase(id);
       impl_->pending_cameras.erase(id);
+      impl_->pending_scopes.erase(id);
     }
     impl_->pending_removes.clear();
 
@@ -373,14 +390,20 @@ bool CanvasHost::drive_once() {
       const bool do_resize = rit != impl_->pending_resizes.end();
       auto cit = impl_->pending_cameras.find(id);
       const bool do_camera = cit != impl_->pending_cameras.end();
+      auto sit = impl_->pending_scopes.find(id);
+      const bool do_scope = sit != impl_->pending_scopes.end();
       items.push_back(DriveItem{entry.get(), do_resize, do_resize ? rit->second.first : 0,
                                 do_resize ? rit->second.second : 0, do_camera,
-                                do_camera ? cit->second : arbc::Affine::identity()});
+                                do_camera ? cit->second : arbc::Affine::identity(), do_scope,
+                                do_scope ? sit->second : std::optional<arbc::ObjectId>{}});
       if (do_resize) {
         impl_->pending_resizes.erase(rit);
       }
       if (do_camera) {
         impl_->pending_cameras.erase(cit);
+      }
+      if (do_scope) {
+        impl_->pending_scopes.erase(sit);
       }
     }
   }
@@ -407,6 +430,12 @@ bool CanvasHost::drive_once() {
     // (editor.canvas.nav / D-nav-3).
     if (item.do_camera) {
       entry->renderer.set_camera(item.camera);
+    }
+    // Apply the submitted isolation scope (editor.canvas.isolation_scope / D-isolation_scope-3): a
+    // value change bumps the renderer's frame version so the still-scene canvas re-publishes the
+    // (un)dimmed frame this cycle. One channel slot beside the camera, same discipline (A5).
+    if (item.do_scope) {
+      entry->renderer.set_scope(item.scope);
     }
 
     // A bounded step: schedule_follow_up means the budget did not settle the frame, so

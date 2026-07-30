@@ -487,6 +487,67 @@ TEST_CASE("canvas_host: a stream of UI-thread edits runs clean against the rende
   handle->join();
 }
 
+TEST_CASE("canvas_host: streamed isolation-scope toggles run clean against the render read "
+          "(isolation_scope TSan anchor)") {
+  // editor.canvas.isolation_scope: the new per-canvas scope channel coexists with the settled
+  // camera/resize channels under the ONE host-lock discipline — it adds a value slot, not a new
+  // synchronization primitive (Constraint 8). The UI thread streams request_scope(entered) <->
+  // request_scope(nullopt) toggles interleaved with request_camera and apply_edit(damage) while the
+  // render thread drive_once's BOTH entries and each convert recomputes the focus quad from the
+  // lock-free pin() snapshot (for_each_layer_in + resolve + bounds) — so a scope read genuinely
+  // overlaps the writes in wall-clock time. Must be data-race-clean.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+
+  // A nested child under root so a scope of `child` drives the full focus-quad DFS under
+  // contention, not just the fail-safe early-out.
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  arbc::ObjectId child;
+  writer.submit_sync([&] {
+    child = probe.document->add_composition(32.0, 32.0);
+    const arbc::ObjectId content = probe.document->add_content(std::make_shared<arbc::SolidContent>(
+        arbc::Rgba{0.7F, 0.0F, 0.0F, 1.0F}, arbc::Rect{0.0, 0.0, 32.0, 32.0}));
+    const arbc::ObjectId layer = probe.document->add_layer(content, arbc::Affine::identity());
+    probe.document->attach_layer(child, layer);
+    (void)ace::scene::add_cell(*probe.document, registry, "org.arbc.nested",
+                               std::to_string(child.value), arbc::Affine::translation(16.0, 16.0));
+  });
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document, &registry);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // Stream the toggles: many rounds so TSan gets a wide overlap window against the looping read.
+  constexpr int k_rounds = 64;
+  for (int i = 0; i < k_rounds; ++i) {
+    const std::optional<arbc::ObjectId> scope =
+        (i % 2 == 0) ? std::optional<arbc::ObjectId>{child} : std::optional<arbc::ObjectId>{};
+    host.request_scope("canvas#1", scope);
+    host.request_scope("canvas#2", scope);
+    host.request_camera("canvas#1",
+                        arbc::Affine{1.0, 0.0, 0.0, 1.0, static_cast<double>(-(i % 4)), 0.0});
+    apply_edit(writer, host, [&] { damage(*probe.document, probe.composition); });
+  }
+  // Both live readers converge on the streamed revisions off-thread.
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+}
+
 TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean against the render read "
           "(cells.remove TSan anchor)") {
   // The document's ONE writer identity, bound the way the shipped bootstrap binds it
@@ -757,6 +818,38 @@ void settle(CanvasHost& host) {
   }
 }
 } // namespace
+
+TEST_CASE("canvas_host: a scope change republishes the still frame; a no-op scope does not "
+          "(editor.canvas.isolation_scope)") {
+  // The scope channel bumps the renderer's frame version on a genuine value change, so the still
+  // scene re-publishes the newly (un)dimmed frame; a value-identical submit is free (set_scope
+  // early return). Deterministic inline pool so drive_once settles in one pass and the sequence is
+  // exact.
+  auto doc = build_raster_doc();
+  CanvasHost host = make_inline_host();
+  host.add("canvas#1", *doc);
+  host.request_resize("canvas#1", k_w, k_h);
+  settle(host);
+  const std::uint64_t seq0 = host.published_sequence("canvas#1");
+  REQUIRE(seq0 >= 1);
+
+  // nullopt == the initial scope: set_scope early-returns, nothing republishes.
+  host.request_scope("canvas#1", std::nullopt);
+  settle(host);
+  CHECK(host.published_sequence("canvas#1") == seq0);
+
+  // A real change (nullopt -> some id) bumps the scope generation, so the still scene republishes
+  // even though no new arbc frame was issued (the mechanism a pure scope toggle relies on).
+  host.request_scope("canvas#1", arbc::ObjectId{1});
+  settle(host);
+  CHECK(host.published_sequence("canvas#1") > seq0);
+  const std::uint64_t seq1 = host.published_sequence("canvas#1");
+
+  // Re-sending the SAME value is a no-op (set_scope early return): no further republish.
+  host.request_scope("canvas#1", arbc::ObjectId{1});
+  settle(host);
+  CHECK(host.published_sequence("canvas#1") == seq1);
+}
 
 TEST_CASE("canvas_host: request_camera reaches HostViewport::set_camera — the frame reframes") {
   auto doc = build_raster_doc();

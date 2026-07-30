@@ -2,11 +2,13 @@
 
 #include <ace/base/image.hpp>
 
+#include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace arbc {
 class Document;
@@ -91,6 +93,21 @@ Srgb8Image render_document_srgb8_over_pinned(const arbc::Document& document,
                                              const arbc::DocStatePtr& state, int width, int height,
                                              const arbc::Affine& camera,
                                              std::array<std::uint8_t, 4> background);
+
+// `render_document_srgb8` with the entered-composition ISOLATION DIM baked in
+// (editor.canvas.isolation_scope / D17): render the full document once, then — when `entered`
+// resolves through `scene::composition_focus_quad` to a live nested composition with a finite
+// placed extent — composite a neutral dim over the COMPLEMENT of that composition's focus quad in
+// the LINEAR WORKING SPACE (never the sRGB8 bytes, D10), leaving the child bright. A `nullopt` /
+// Root / unresolvable / unbounded scope composites NO scrim, so the frame is BYTE-IDENTICAL to
+// `render_document_srgb8(document, width, height, camera)` (Constraint 2 — the regression guarantee
+// that keeps every other canvas/export golden valid without re-baseline). This is the OFFLINE
+// mirror of the interactive CanvasRenderer scope channel (D-isolation_scope-1); the export path
+// does NOT call it (it renders through the 2-arg `render_document_srgb8`, root anchor, no scope),
+// so an exported PNG never dims (D10/D14). Empty image on the (defensive) render error path.
+Srgb8Image render_document_srgb8_scoped(const arbc::Document& document, int width, int height,
+                                        const arbc::Affine& camera,
+                                        std::optional<arbc::ObjectId> entered);
 
 // The probe convenience: build the probe document (ace::project) and render it.
 Srgb8Image render_probe_srgb8(int width, int height);

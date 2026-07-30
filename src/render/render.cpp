@@ -16,7 +16,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
+
+#include "dim_scrim.hpp"
 
 namespace ace::render {
 namespace {
@@ -120,6 +123,22 @@ Srgb8Image render_document_srgb8_over_pinned(const arbc::Document& document,
   const arbc::Viewport viewport{width, height, camera};
   return to_srgb8_over(backend, arbc::render_offline(document, state, viewport, backend), width,
                        height, background);
+}
+
+Srgb8Image render_document_srgb8_scoped(const arbc::Document& document, int width, int height,
+                                        const arbc::Affine& camera,
+                                        std::optional<arbc::ObjectId> entered) {
+  arbc::CpuBackend backend;
+  const arbc::Viewport viewport{width, height, camera};
+  FrameResult frame = arbc::render_offline(document, viewport, backend);
+  // The focus quad is resolved registry-free off the same document (its own pin). A nullopt scope
+  // — or one that does not name a live, bounded nested composition — yields no quad, so no scrim is
+  // composited and the sRGB8 tail is byte-identical to render_document_srgb8 (Constraint 2).
+  const std::optional<scene::FocusQuad> focus = scene::composition_focus_quad(document, entered);
+  if (frame.has_value() && focus) {
+    composite_isolation_dim(backend, **frame, *focus, camera);
+  }
+  return to_srgb8(backend, frame, width, height);
 }
 
 Srgb8Image render_probe_srgb8(int width, int height) {

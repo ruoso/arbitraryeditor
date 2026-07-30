@@ -28,6 +28,8 @@
 #include <optional>
 #include <span>
 
+#include "dim_scrim.hpp" // the isolation dim + scene::composition_focus_quad (render->scene)
+
 namespace ace::render {
 
 // The tile-cache byte budget the host-interactive example uses for one viewport.
@@ -169,9 +171,28 @@ struct CanvasRenderer::Impl {
   void convert() {
     // Only ever called from step() while `target` is live, so no null guard.
     image = Srgb8Image{};
+    // The isolation dim (editor.canvas.isolation_scope / D-isolation_scope-1) is baked HERE — into
+    // the working-space frame, before the sRGB8 encode (D10). `target` is composited INCREMENTALLY
+    // across frames, so the dim goes onto a SCRATCH COPY, never in place: an in-place scrim would
+    // poison the next frame's incremental composite. No scope / no focus quad => the scratch is
+    // skipped and the convert is byte-identical to the un-scoped path (Constraint 2).
+    const std::optional<scene::FocusQuad> focus = scene::composition_focus_quad(document, scope);
+    const arbc::Surface* source = target.get();
+    std::unique_ptr<arbc::Surface> scratch;
+    if (focus) {
+      auto made = backend.make_surface(width, height, target->format());
+      if (made.has_value()) {
+        scratch = std::move(*made);
+        // Source-over the settled target onto the fresh (transparent) scratch == an exact copy at
+        // integer alignment, then dim the complement of the focus quad through the current camera.
+        backend.composite(*scratch, *target, arbc::Affine::identity(), 1.0);
+        composite_isolation_dim(backend, *scratch, *focus, camera);
+        source = scratch.get();
+      }
+    }
     auto srgb = backend.make_surface(width, height, arbc::k_fast_rgba8srgb);
     if (srgb.has_value()) { // false only on a defensive allocation failure.
-      backend.convert(**srgb, *target);
+      backend.convert(**srgb, *source);
       const std::span<const std::uint8_t> bytes = (*srgb)->span<arbc::PixelFormat::Rgba8Srgb>();
       image.width = width;
       image.height = height;
@@ -223,6 +244,15 @@ struct CanvasRenderer::Impl {
   // with it (Constraint 3); default identity is the pre-nav framing. Render-thread-only.
   arbc::Affine camera = arbc::Affine::identity();
 
+  // The entered-composition isolation scope this canvas reflects (editor.canvas.isolation_scope /
+  // D-isolation_scope-3); nullopt = Root (no dim). `scope_generation` bumps on every value change
+  // so the frame version (step()) advances and the host re-publishes even when the arbc scene
+  // issued no new frame — how a pure scope toggle reflects on the next frame. Render-thread-only,
+  // fed by the host's scope channel; the focus quad itself is recomputed from the lock-free pin()
+  // each convert.
+  std::optional<arbc::ObjectId> scope;
+  std::uint64_t scope_generation = 0;
+
   std::unique_ptr<arbc::Surface> target;
   std::optional<arbc::InteractiveRenderer> renderer;
   std::unique_ptr<arbc::HostViewport> viewport;
@@ -261,6 +291,16 @@ void CanvasRenderer::set_camera(const arbc::Affine& camera) {
   }
 }
 
+void CanvasRenderer::set_scope(std::optional<arbc::ObjectId> entered) {
+  if (entered == impl_->scope) {
+    return; // value-identical: no re-publish (mirrors set_camera's "value-identical is free").
+  }
+  impl_->scope = entered;
+  // Bump the version the frame count folds into (frames_issued / step), so the still-scene canvas
+  // re-converts and the host re-publishes the newly (un)dimmed frame on the next drive.
+  ++impl_->scope_generation;
+}
+
 bool CanvasRenderer::step() {
   if (!impl_->viewport) {
     return false; // zero-area / defensive: nothing to drive (Constraint 7).
@@ -272,9 +312,13 @@ bool CanvasRenderer::step() {
   // (D-writer_thread-10). Zero for the single-threaded fixtures, where the step IS the writer.
   impl_->loads_ready = outcome.external_loads_ready;
   const std::uint64_t frames = impl_->viewport->frames_issued();
-  if (frames != impl_->converted_frames) {
+  // Fold the scope generation into the convert/publish version so a pure scope toggle (no new arbc
+  // frame) still re-converts and re-publishes the (un)dimmed frame (editor.canvas.isolation_scope).
+  // Zero stays zero: a blank / never-rendered canvas publishes nothing regardless of scope.
+  const std::uint64_t version = frames == 0 ? 0 : frames + impl_->scope_generation;
+  if (version != impl_->converted_frames) {
     impl_->convert();
-    impl_->converted_frames = frames;
+    impl_->converted_frames = version;
   }
   // "Not settled" — the host loop must re-drive this entry until true (D-multi_canvas-3):
   //   * schedule_follow_up: the bounded budget owes a follow-up frame; OR
@@ -293,7 +337,14 @@ bool CanvasRenderer::step() {
 const Srgb8Image& CanvasRenderer::image() const { return impl_->image; }
 
 std::uint64_t CanvasRenderer::frames_issued() const {
-  return impl_->viewport ? impl_->viewport->frames_issued() : 0;
+  if (!impl_->viewport) {
+    return 0;
+  }
+  // Fold the scope generation in so the host's publish gate (frames != published_frames) fires on a
+  // pure scope toggle too (editor.canvas.isolation_scope); zero (never rendered) stays zero. Both
+  // terms are monotonic, so the sum is a valid monotonic frame version — no publish is ever missed.
+  const std::uint64_t frames = impl_->viewport->frames_issued();
+  return frames == 0 ? 0 : frames + impl_->scope_generation;
 }
 
 int CanvasRenderer::width() const { return impl_->width; }

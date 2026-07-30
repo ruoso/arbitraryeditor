@@ -2,11 +2,14 @@
 
 #include <ace/render/render.hpp>
 
+#include <arbc/base/ids.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -116,6 +119,14 @@ public:
   // lock, applied on the render thread before that entry's next step(); a submit for
   // an unknown id is dropped. Also wakes the loop (a camera change is device damage).
   void request_camera(std::string_view id, const arbc::Affine& camera);
+
+  // UI thread: submit the ISOLATION SCOPE for entry `id` (editor.canvas.isolation_scope /
+  // D-isolation_scope-3): the entered nested composition (nullopt = Root). Per-entry, stashed under
+  // the host lock and applied on the render thread before that entry's next step() — the SAME
+  // channel discipline as request_camera, adding one value slot, no new lock (A5). A submit for an
+  // unknown id is dropped; also wakes the loop (a scope change re-publishes the frame). The one
+  // project-level scope (D19) is fed identically to every canvas, so N canvases dim the same child.
+  void request_scope(std::string_view id, std::optional<arbc::ObjectId> entered);
 
   // ANY thread: wake the render loop to re-render EVERY live entry after an edit (the
   // fan-out poke — one writer, N observers; Constraint 4). This is the wake half of the edit
