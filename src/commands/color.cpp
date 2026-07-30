@@ -1,15 +1,23 @@
 #include <ace/commands/color.hpp>
 
 #include <arbc/backend_cpu/cpu_backend.hpp>
+#include <arbc/base/geometry.hpp> // arbc::Rect (the 1×1 device clip)
+#include <arbc/base/ids.hpp>      // arbc::ObjectId (the isolated sampler's layer target)
 #include <arbc/base/transform.hpp>
-#include <arbc/compositor/compositor.hpp> // arbc::Viewport
+#include <arbc/compositor/compositor.hpp>     // arbc::Viewport / render_layer / ContentResolver
+#include <arbc/compositor/operator_graph.hpp> // arbc::is_operator (the leaf/operator gate)
+#include <arbc/contract/content.hpp>          // arbc::Content::composition_ref()
 #include <arbc/media/pixel_traits.hpp>
+#include <arbc/model/model.hpp>   // arbc::DocStatePtr::find_layer / working_space
+#include <arbc/model/records.hpp> // arbc::LayerRecord
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/offline.hpp>
 #include <arbc/surface/surface.hpp>
-#include <arbc/surface/typed_span.hpp> // arbc::visit_surface (format-generic decode)
+#include <arbc/surface/surface_pool.hpp> // arbc::SurfacePool (render_layer's temp source)
+#include <arbc/surface/typed_span.hpp>   // arbc::visit_surface (format-generic decode)
 
 #include <memory>
+#include <optional>
 
 namespace ace::commands {
 
@@ -56,6 +64,65 @@ arbc::WorkingPixel sample_composited_color(const arbc::Document& document,
     using Traits = arbc::PixelTraits<decltype(typed)::format>;
     if (typed.data.size() < Traits::channels) {
       return {0.0F, 0.0F, 0.0F, 0.0F}; // no CPU readback (defensive): transparent
+    }
+    return Traits::decode(typed.data.data());
+  });
+}
+
+std::optional<arbc::WorkingPixel> sample_cell_color(const arbc::Document& document,
+                                                    const arbc::Affine& camera,
+                                                    arbc::ObjectId layer, double device_x,
+                                                    double device_y) {
+  // The active-cell modifier (D10 :477 / §7:290 / D-eyedrop_cell-1): the selected cell's OWN
+  // straight colour, unmixed with any sibling, is a single-layer render through the active camera —
+  // the twin of `sample_composited_color`, differing only in the render call (`render_layer` of one
+  // layer instead of the whole-document `render_offline`) and the leaf/operator gate. A pure PINNED
+  // read: no document mutation, no transaction, no writer thread — the pin, the layer record, its
+  // content and the working space all come off ONE published generation.
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return std::nullopt;
+  }
+  const arbc::LayerRecord* record = state->find_layer(layer);
+  if (record == nullptr) {
+    return std::nullopt; // empty selection, a camera, or an id that names no placed layer
+  }
+  // The leaf/operator gate (D-eyedrop_cell-2): a bare `render_layer` stands up no pull service, so
+  // an operator (non-empty `inputs()`) or a nested-composition cell (a valid `composition_ref()`)
+  // cannot be isolated here — the caller degrades to the composited sample. The library owns the
+  // structural predicate; this is NOT a kind allow-list (respects D-cells_model-8).
+  arbc::Content* content = document.resolve(record->content);
+  if (content == nullptr || arbc::is_operator(content) || content->composition_ref().valid()) {
+    return std::nullopt;
+  }
+  // Translate the camera so the sampled device point lands at output pixel (0,0), then compose with
+  // the layer's placement to get the content→device transform `render_layer` expects — the exact
+  // 1×1-shift trick `sample_composited_color` uses, extended by the placement compose (Constraint
+  // 2).
+  const arbc::Affine shifted =
+      arbc::compose(arbc::Affine::translation(-device_x, -device_y), camera);
+  const arbc::Affine composed = arbc::compose(shifted, record->transform);
+  arbc::CpuBackend backend;
+  const arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> target =
+      backend.make_surface(1, 1, state->working_space());
+  if (!target.has_value()) {
+    return std::nullopt; // an unstorable working space: no isolated sample (defensive)
+  }
+  // `render_layer` composites the layer source-over into the target, so start from transparent —
+  // a culled layer (degenerate/out-of-bounds/sub-pixel) then reads as `{0,0,0,0}`, not residue.
+  backend.clear(**target, 0.0F, 0.0F, 0.0F, 0.0F);
+  arbc::SurfacePool pool(backend);
+  const arbc::ContentResolver resolve = [&document](arbc::ObjectId id) {
+    return document.resolve(id);
+  };
+  const arbc::Rect device_rect{0.0, 0.0, 1.0, 1.0};
+  arbc::render_layer(resolve, *record, composed, device_rect, backend, pool, **target);
+  // Decode the single premultiplied-linear working pixel through the library codec (whatever format
+  // the composition configured), exactly as the composited sampler does.
+  return arbc::visit_surface(**target, [](auto typed) -> arbc::WorkingPixel {
+    using Traits = arbc::PixelTraits<decltype(typed)::format>;
+    if (typed.data.size() < Traits::channels) {
+      return arbc::WorkingPixel{0.0F, 0.0F, 0.0F, 0.0F}; // no CPU readback (defensive): transparent
     }
     return Traits::decode(typed.data.data());
   });

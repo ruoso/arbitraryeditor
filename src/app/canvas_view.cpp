@@ -634,10 +634,35 @@ void CanvasView::dispatch_eyedropper(Presenter& p, const views::CanvasInput& in)
   // is the L1 byte-exact `commands::sample_composited_color` over `arbc::render_offline` — this L4
   // arm only supplies `Presenter::camera` + the click point. Sampling on the held/released edges
   // (like `dispatch_brush`'s dab edges) makes a click sample the pixel under it; the drag is the
-  // tool's own (D20), never a Select fallback. The active-cell own-straight-color modifier is
-  // deferred to `editor.panels.color_eyedrop_cell`.
+  // tool's own (D20), never a Select fallback.
+  //
+  // The active-cell own-straight-color modifier (editor.panels.color_eyedrop_cell / D10 :477 /
+  // §7:290): with Alt held, sample the SELECTED cell's own straight colour in isolation instead of
+  // the composite. Resolve the selection-primary content to its placing layer through the same
+  // `scene::cells` walk the brush uses, call the isolated `commands::sample_cell_color`, and on a
+  // value decode + set exactly as the composited path does. On `std::nullopt` (Alt not held, no
+  // cell selected, or a content the isolated render cannot represent — an operator / nested cell)
+  // the gesture falls through to the shipped composited sample, so it always yields a meaningful
+  // colour (D-eyedrop_cell-3/-4). Alt is the provisional binding pending the full input map.
   if (!(in.down || in.released)) {
     return;
+  }
+  if (in.alt) {
+    const arbc::ObjectId primary = state_.selection().primary();
+    if (primary.valid()) {
+      const arbc::ObjectId comp =
+          scene::active_composition(state_.document(), state_.entered_composition());
+      for (const scene::Cell& cell : scene::cells(state_.document(), state_.registry(), comp)) {
+        if (cell.id == primary) {
+          if (const std::optional<arbc::WorkingPixel> own = commands::sample_cell_color(
+                  state_.document(), p.camera, cell.layer, in.focus_x, in.focus_y)) {
+            state_.set_active_color(commands::working_to_srgb(*own));
+            return;
+          }
+          break; // the selected cell is not isolable: fall through to the composited sample
+        }
+      }
+    }
   }
   const arbc::WorkingPixel sampled =
       commands::sample_composited_color(state_.document(), p.camera, in.focus_x, in.focus_y);

@@ -17,6 +17,12 @@
 //   active_color()
 //     to its sRGB (round-tripped from the composited premul-linear), and a subsequent stroke paints
 //     with it.
+//   * eyedropper modifier → own color (editor.panels.color_eyedrop_cell) — Alt-clicking a selected
+//     BACK cell under an opaque FRONT sibling sets active_color() to the back cell's OWN sRGB
+//     (isolated single-cell render), while a plain click at the same point yields the FRONT
+//     composite — the modifier and the default visibly diverge;
+//   * eyedropper modifier fallback — Alt-clicking with NO cell selected degrades to the composited
+//     sample (never empty/black), proving the std::nullopt graceful fallback.
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/color_panel.hpp>
 #include <ace/app/folder_dialog.hpp>
@@ -84,6 +90,14 @@ constexpr double k_raster_at = 40.0;
 // The backdrop's straight-alpha premultiplied-linear colour, seeded opaque so its composite over
 // transparent black is itself — the eyedropper's known target.
 constexpr arbc::WorkingPixel k_backdrop{0.15F, 0.2F, 0.25F, 1.0F};
+// The active-cell modifier's occlusion pair (editor.panels.color_eyedrop_cell): a BACK solid over
+// comp [120,170]^2 partly covered by a FRONT solid over [140,190]^2 added after it (so the front is
+// higher in z). Both OPAQUE, so config value == premultiplied == straight colour, and the composite
+// inside the overlap is the front alone. A back-only point (125,125) selects the back cell; the
+// overlap point (155,155) is where the modifier (back's own colour) and the default (front
+// composite) diverge.
+constexpr arbc::WorkingPixel k_back{0.5F, 0.25F, 0.1F, 1.0F};
+constexpr arbc::WorkingPixel k_front{0.2F, 0.4F, 0.8F, 1.0F};
 
 struct ScratchDir {
   std::filesystem::path root;
@@ -99,7 +113,8 @@ struct ScratchDir {
   }
 };
 
-arbc::ObjectId seed(AppState& state) {
+arbc::ObjectId seed(AppState& state, arbc::ObjectId& back, arbc::ObjectId& front,
+                    arbc::ObjectId& nested) {
   arbc::Document& doc = state.document();
   doc.add_composition(256.0, 256.0);
   // Opaque unbounded backdrop first (so the pane issues a non-transparent first frame AND the
@@ -109,6 +124,28 @@ arbc::ObjectId seed(AppState& state) {
   const arbc::expected<arbc::ObjectId, std::string> r =
       ace::scene::add_cell(doc, state.registry(), "org.arbc.raster", "60x60",
                            arbc::Affine::translation(k_raster_at, k_raster_at));
+  // The occlusion pair: bounded solids (config carries the "x,y,w,h" extent), identity placement,
+  // BACK added before FRONT so the front is on top. Both leaf cells (isolable by
+  // sample_cell_color).
+  const arbc::expected<arbc::ObjectId, std::string> b =
+      ace::scene::add_cell(doc, state.registry(), "org.arbc.solid", "0.5,0.25,0.1,1,120,120,50,50",
+                           arbc::Affine::identity());
+  const arbc::expected<arbc::ObjectId, std::string> f =
+      ace::scene::add_cell(doc, state.registry(), "org.arbc.solid", "0.2,0.4,0.8,1,140,140,50,50",
+                           arbc::Affine::identity());
+  back = b.has_value() ? *b : arbc::ObjectId{};
+  front = f.has_value() ? *f : arbc::ObjectId{};
+  // A NESTED cell in an empty bottom-left region ([10,50]x[190,230]) — a non-isolable cell (its
+  // content answers a valid `composition_ref()`, so `sample_cell_color` gates to std::nullopt). It
+  // is pickable (bounds-based, D-selection-11) yet renders transparent (empty child), so the
+  // isolated eyedropper degrades to the composited backdrop there — the `break` fall-through
+  // (editor.panels.color_eyedrop_cell / canvas_view.cpp). Placed clear of every earlier sample
+  // point so phases i–vi are undisturbed.
+  const arbc::ObjectId child = doc.add_composition(40.0, 40.0);
+  const arbc::expected<arbc::ObjectId, std::string> n =
+      ace::scene::add_cell(doc, state.registry(), "org.arbc.nested", std::to_string(child.value),
+                           arbc::Affine::translation(10.0, 190.0));
+  nested = n.has_value() ? *n : arbc::ObjectId{};
   return r.has_value() ? *r : arbc::ObjectId{};
 }
 
@@ -176,6 +213,9 @@ struct E2EState {
   AppState* state;
   ace::dock::Dockspace* dockspace;
   arbc::ObjectId raster;
+  arbc::ObjectId back;
+  arbc::ObjectId front;
+  arbc::ObjectId nested;
   std::atomic<bool> request_undo{false};
   std::atomic<bool> undo_done{false};
 };
@@ -189,8 +229,14 @@ TEST_CASE("color e2e: boot continuity, picker->state, picker->brush boundary, ey
   REQUIRE(session.ok());
   AppState& state = session.state();
   arbc::ObjectId raster;
-  session.on_writer([&] { raster = seed(state); });
+  arbc::ObjectId back;
+  arbc::ObjectId front;
+  arbc::ObjectId nested;
+  session.on_writer([&] { raster = seed(state, back, front, nested); });
   REQUIRE(raster.valid());
+  REQUIRE(back.valid());
+  REQUIRE(front.valid());
+  REQUIRE(nested.valid());
 
   Shell shell;
   ShellOptions opts;
@@ -236,7 +282,7 @@ TEST_CASE("color e2e: boot continuity, picker->state, picker->brush boundary, ey
   te_io.ConfigNoThrottle = true;
   ImGuiTestEngine_Start(engine, shell.imgui_context());
 
-  E2EState e2e{&canvas, &state, &dockspace, raster};
+  E2EState e2e{&canvas, &state, &dockspace, raster, back, front, nested};
   ImGuiTest* test = IM_REGISTER_TEST(engine, "color", "boot_picker_brush_eyedropper");
   test->UserData = &e2e;
   test->TestFunc = [](ImGuiTestContext* ctx) {
@@ -246,6 +292,9 @@ TEST_CASE("color e2e: boot continuity, picker->state, picker->brush boundary, ey
     ace::dock::Dockspace& dockspace = *e2e->dockspace;
     ace::commands::Selection& sel = state.selection();
     const arbc::ObjectId raster = e2e->raster;
+    const arbc::ObjectId back = e2e->back;
+    const arbc::ObjectId front = e2e->front;
+    const arbc::ObjectId nested = e2e->nested;
 
     IM_CHECK(pump_until(ctx, [&] { return canvas.frames_issued("canvas#1") >= 1; }));
     ctx->WindowFocus("canvas#1");
@@ -289,6 +338,23 @@ TEST_CASE("color e2e: boot continuity, picker->state, picker->brush boundary, ey
     const auto paint_stroke = [&]() {
       set_tool(ToolId::Brush);
       drag(at(55.0F, 55.0F), at(85.0F, 85.0F));
+    };
+    // Drive the picker's 0–255 RGB inputs to move the active colour to a KNOWN value, so a later
+    // eyedrop is observable as a change (the same ref path phases ii/iv use).
+    const auto set_rgb = [&](int r, int g, int b) {
+      ctx->WindowFocus("Color");
+      ctx->Yield(2);
+      ctx->ItemInputValue("Color/###color_picker/##rgb/##X", r);
+      ctx->ItemInputValue("Color/###color_picker/##rgb/##Y", g);
+      ctx->ItemInputValue("Color/###color_picker/##rgb/##Z", b);
+      ctx->Yield(2);
+    };
+    // An Eyedropper click with Alt HELD (the active-cell modifier, D-eyedrop_cell-4): the arm reads
+    // `in.alt` off `io.KeyAlt`, so hold the mod across the whole press/release.
+    const auto alt_click_at = [&](ImVec2 pos) {
+      ctx->KeyDown(ImGuiMod_Alt);
+      click_at(pos);
+      ctx->KeyUp(ImGuiMod_Alt);
     };
 
     ctx->MouseMove("canvas#1/##canvas_nav"); // establish the viewport for raw-position moves
@@ -340,6 +406,50 @@ TEST_CASE("color e2e: boot continuity, picker->state, picker->brush boundary, ey
     paint_stroke();
     IM_CHECK(near_working(max_alpha_pixel(raster_pixels(state, raster)),
                           ace::commands::srgb_to_working(state.active_color()), 0.03F));
+
+    // --- (v) Modifier -> own colour (the isolation proof, editor.panels.color_eyedrop_cell).
+    // ------ Select the BACK cell (a back-only point, outside the front), move the active colour
+    // away, then Alt-Eyedrop the OVERLAP: active_color() is the back cell's OWN sRGB. A plain
+    // (no-Alt) Eyedrop at the SAME point yields the FRONT/composite colour — the modifier and the
+    // default diverge.
+    const SrgbColor back_srgb = ace::commands::working_to_srgb(k_back);
+    const SrgbColor front_srgb = ace::commands::working_to_srgb(k_front);
+    set_tool(ToolId::Select);
+    click_at(at(125.0F, 125.0F)); // inside back [120,170]^2, outside front [140,190]^2
+    IM_CHECK(sel.primary() == back);
+    set_rgb(10, 250,
+            10); // move away from both back and front so the sample is an observable change
+    set_tool(ToolId::Eyedropper);
+    alt_click_at(at(155.0F, 155.0F)); // inside the overlap: the back cell's OWN colour, isolated
+    IM_CHECK(near_srgb(state.active_color(), back_srgb, 4));
+    click_at(at(155.0F, 155.0F)); // plain: the composite there is the FRONT (opaque, on top)
+    IM_CHECK(near_srgb(state.active_color(), front_srgb, 4));
+
+    // --- (vi) Graceful fallback (Constraint 4 / D-eyedrop_cell-3): Alt-Eyedrop with NO cell
+    // -------- selected sets active_color() to the COMPOSITED sample, not empty/black — the
+    // std::nullopt fallback. Clear the selection so the modifier has no cell to isolate, then
+    // Alt-click the backdrop; the arm degrades to the composited sample it always shipped.
+    sel.clear();
+    IM_CHECK(!sel.primary().valid());
+    set_rgb(40, 200, 60); // away from the backdrop so the fallback sample is observable
+    const SrgbColor expected_backdrop_fallback = ace::commands::working_to_srgb(k_backdrop);
+    set_tool(ToolId::Eyedropper);
+    alt_click_at(at(200.0F, 200.0F)); // backdrop-only region; no cell selected -> composited sample
+    IM_CHECK(near_srgb(state.active_color(), expected_backdrop_fallback, 4));
+
+    // --- (vii) Non-isolable selected cell -> the `break` fall-through (editor.panels.
+    // -------- color_eyedrop_cell). Select the NESTED cell, then Alt-Eyedrop it: the modifier
+    // enters the selected-cell arm, but `sample_cell_color` gates a nested (composition_ref) cell
+    // to std::nullopt, so the gesture breaks out and degrades to the composited sample — the empty
+    // child renders transparent, so the composite there is the backdrop. Distinct from (vi): here a
+    // cell IS selected, exercising the loop's `break`, not the invalid-primary skip.
+    set_tool(ToolId::Select);
+    click_at(at(30.0F, 210.0F)); // inside the nested cell's bounds ([10,50]x[190,230])
+    IM_CHECK(sel.primary() == nested);
+    set_rgb(250, 10, 250); // away from the backdrop so the composited fall-through is observable
+    set_tool(ToolId::Eyedropper);
+    alt_click_at(at(30.0F, 210.0F)); // selected nested -> nullopt -> break -> composited backdrop
+    IM_CHECK(near_srgb(state.active_color(), expected_backdrop_fallback, 4));
   };
   ImGuiTestEngine_QueueTest(engine, test);
 

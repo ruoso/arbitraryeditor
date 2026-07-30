@@ -12,10 +12,12 @@
 // the library transfer helpers (`arbc/media/pixel_traits.hpp`); there is no hand-rolled
 // transfer function here.
 
+#include <arbc/base/ids.hpp>           // arbc::ObjectId (the isolated sampler's layer target)
 #include <arbc/base/transform.hpp>     // arbc::Affine (the eyedropper's view camera)
 #include <arbc/media/pixel_traits.hpp> // arbc::WorkingPixel + the transfer/premultiply helpers
 
 #include <cstdint>
+#include <optional>
 
 namespace arbc {
 class Document;
@@ -64,5 +66,26 @@ SrgbColor working_to_srgb(const arbc::WorkingPixel& working);
 arbc::WorkingPixel sample_composited_color(const arbc::Document& document,
                                            const arbc::Affine& camera, double device_x,
                                            double device_y);
+
+// Sample the selected cell's OWN straight colour, rendered in ISOLATION (siblings absent) — the
+// active-cell eyedropper modifier (D10 :477 / §7:290 / D-eyedrop_cell-1), the twin of
+// `sample_composited_color` for a SINGLE `layer`. It renders exactly that one layer through
+// `camera` at device point `(device_x, device_y)` via the library's public `arbc::render_layer`
+// (a render through a camera, not a lookup / mask), returning the premultiplied-linear
+// `arbc::WorkingPixel` the cell alone produces there — never the composite. Like the composited
+// sampler it is a pure PINNED read (no document mutation, no writer thread): the pin, the layer
+// record and its content come off one published generation.
+//
+// Returns `std::nullopt` — so the arm degrades gracefully to the composited sample
+// (D-eyedrop_cell-3) — when the isolated path cannot represent the target: `layer` names no placed
+// layer (an empty selection, or a camera / non-cell id), or its content pulls inputs through a pull
+// service a bare `render_layer` does not stand up (an operator, or a nested-composition cell — the
+// structural `is_operator || composition_ref` gate, D-eyedrop_cell-2, NOT a kind allow-list). A
+// value is always a real premultiplied-linear sample: a point outside the cell's coverage (or a
+// culled layer) reads transparent `{0,0,0,0}`, never a phantom colour.
+std::optional<arbc::WorkingPixel> sample_cell_color(const arbc::Document& document,
+                                                    const arbc::Affine& camera,
+                                                    arbc::ObjectId layer, double device_x,
+                                                    double device_y);
 
 } // namespace ace::commands

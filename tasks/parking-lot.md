@@ -304,3 +304,13 @@ The overview ships provisional idiom gestures (double-click-to-enter, zoom-contr
 **Trigger:** a design row in `docs/00-design.md` demanding one of these features, or a concrete consumer that cannot be served by the current single-cell soft round dab.
 
 `editor.paint.brush` ships a single soft `round_dab` that paints only the selection-primary `org.arbc.raster` cell. D-brush-7 explicitly defers cross-cell stroke distribution and brush hardness/eraser/blend-mode/pressure as parking-lot observations: the arbc dab API supports hard/soft and explicit masks (`raster_content.hpp:99-104`) so each is cheap to add when a consumer asks, but minting controls now is machinery ahead of a requirement. No WBS task — enter the WBS when a design row or concrete product need exists.
+
+---
+
+## Eyedropper modifier final key chord (Alt provisional)
+
+**Source:** `tasks/refinements/editor.panels/color_eyedrop_cell.md` (panels.color_eyedrop_cell, 2026-07-30) — D-eyedrop_cell-4.
+
+**Trigger:** §11 input map settled in `docs/00-design.md`.
+
+`editor.panels.color_eyedrop_cell` ships Alt as the modifier key for the active-cell isolated eyedropper, read from `CanvasInput.alt` (`src/views/ace/views/views.hpp:69`). Alt is free in the Eyedropper context and is the conventional "sample this specific thing" modifier, so it is a defensible v1 binding. The binding is **provisional** pending the full input map (`docs/00-design.md:507` §11), the same provisional status D24's keyboard bindings carry. When the input map is written, the chord may be confirmed, remapped, or given a dedicated modifier; the L4 dispatch in `dispatch_eyedropper` (`src/app/canvas_view.cpp`) reads `in.alt` in one place and requires no other change when the binding moves. No WBS task — this is a human design call gated on the input map.

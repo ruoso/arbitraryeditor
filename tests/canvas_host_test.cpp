@@ -2985,6 +2985,17 @@ TEST_CASE("canvas_host: a stream of active-color paints runs clean against the r
   REQUIRE(raster.valid());
   ace::commands::AppState& state = *state_opt;
 
+  // The raster's placing layer — the isolated eyedropper modifier samples through it
+  // (editor.panels.color_eyedrop_cell). A UI-thread pinned read, taken once here.
+  arbc::ObjectId raster_layer;
+  for (const ace::scene::Cell& cell : ace::scene::cells(state.document(), state.registry())) {
+    if (cell.id == raster) {
+      raster_layer = cell.layer;
+      break;
+    }
+  }
+  REQUIRE(raster_layer.valid());
+
   CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
   host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
@@ -3011,6 +3022,16 @@ TEST_CASE("canvas_host: a stream of active-color paints runs clean against the r
       ace::scene::brush_dab(state.document(), state.registry(), raster, centers, 2.0, 4.0, color,
                             key);
     });
+    // The active-cell eyedropper modifier's isolated sampler (editor.panels.color_eyedrop_cell):
+    // a pure pinned read on the UI thread, whose `WorkingPixel` crosses to nothing shared, run
+    // CONCURRENT with the live render walk to prove it is TSan-clean like the composited sampler —
+    // no new lane, no new suppression. On the gate's `nullopt` (never here — a leaf raster) it is a
+    // no-op; a value drives `set_active_color`, the same UI-thread-only field the loop already
+    // owns.
+    if (const std::optional<arbc::WorkingPixel> own = ace::commands::sample_cell_color(
+            state.document(), arbc::Affine::identity(), raster_layer, 16.0, 16.0)) {
+      state.set_active_color(ace::commands::working_to_srgb(*own));
+    }
   }
   REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
 

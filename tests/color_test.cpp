@@ -13,19 +13,26 @@
 #include <ace/project/project.hpp>
 
 #include <arbc/backend_cpu/cpu_backend.hpp>
+#include <arbc/base/geometry.hpp>
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/compositor/compositor.hpp>
+#include <arbc/kind_nested/nested_content.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/media/pixel_traits.hpp>
+#include <arbc/media/surface_format.hpp>
 #include <arbc/model/journal.hpp>
+#include <arbc/model/model.hpp>
+#include <arbc/model/records.hpp>
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/offline.hpp>
 #include <arbc/surface/surface.hpp>
+#include <arbc/surface/surface_pool.hpp>
 #include <arbc/surface/typed_span.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -34,6 +41,7 @@
 #include <utility>
 
 using ace::commands::AppState;
+using ace::commands::sample_cell_color;
 using ace::commands::sample_composited_color;
 using ace::commands::srgb_to_working;
 using ace::commands::SrgbColor;
@@ -77,6 +85,33 @@ arbc::WorkingPixel full_render_pixel(const arbc::Document& doc, int w, int h, in
                              static_cast<std::size_t>(px)) *
                             Traits::channels;
     return Traits::decode(typed.data.data() + idx);
+  });
+}
+
+// A byte-exact reference for the ISOLATED sampler: a hand-driven `render_layer` of exactly one
+// layer into a 1×1 target, mirroring `sample_cell_color`'s substrate. What the sampler's isolated
+// 1×1 render must reproduce (the golden-in-a-value form, the single-layer twin of
+// `full_render_pixel`).
+arbc::WorkingPixel hand_layer_pixel(const arbc::Document& doc, arbc::ObjectId layer,
+                                    const arbc::Affine& camera, double x, double y) {
+  const arbc::DocStatePtr state = doc.pin();
+  REQUIRE(state);
+  const arbc::LayerRecord* record = state->find_layer(layer);
+  REQUIRE(record != nullptr);
+  const arbc::Affine shifted = arbc::compose(arbc::Affine::translation(-x, -y), camera);
+  const arbc::Affine composed = arbc::compose(shifted, record->transform);
+  arbc::CpuBackend backend;
+  const arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> target =
+      backend.make_surface(1, 1, state->working_space());
+  REQUIRE(target.has_value());
+  backend.clear(**target, 0.0F, 0.0F, 0.0F, 0.0F);
+  arbc::SurfacePool pool(backend);
+  const arbc::ContentResolver resolve = [&doc](arbc::ObjectId id) { return doc.resolve(id); };
+  arbc::render_layer(resolve, *record, composed, arbc::Rect{0.0, 0.0, 1.0, 1.0}, backend, pool,
+                     **target);
+  return arbc::visit_surface(**target, [](auto typed) -> arbc::WorkingPixel {
+    using Traits = arbc::PixelTraits<decltype(typed)::format>;
+    return Traits::decode(typed.data.data());
   });
 }
 
@@ -191,4 +226,128 @@ TEST_CASE("color: sample_composited_color returns the exact composited pixel; ex
   // "nothing here", not a phantom colour.
   const arbc::WorkingPixel exterior = sample_composited_color(doc, camera, 2.0, 2.0);
   CHECK(exterior == arbc::WorkingPixel{0.0F, 0.0F, 0.0F, 0.0F});
+}
+
+// --- The isolated single-cell sampler (D-eyedrop_cell-1/-2, Constraints 1..3, 5) ------------
+
+TEST_CASE("color: sample_cell_color returns the selected cell's own colour under an occluder; the "
+          "composite there is the front cell (isolation proof)") {
+  // A BACK solid over [10,50]^2 (its own opaque colour), partly covered by a FRONT opaque solid
+  // over [20,40]^2 added AFTER it (so the front is higher in z). At (30,30) — inside the overlap —
+  // the isolated sample of the BACK layer is the back's own straight colour, while the composited
+  // sample is the FRONT colour. The two samplers disagree exactly where the sibling occludes
+  // (Constraints 1, 2). Working space is rgba32f, so the isolated pixel is byte-exact against both
+  // the authored premultiplied colour AND a hand-driven single-layer `render_layer` (the
+  // golden-in-a-value form).
+  constexpr int k_edge = 64;
+  const arbc::WorkingPixel k_back{0.5F, 0.25F, 0.1F, 1.0F}; // opaque premultiplied-linear
+  const arbc::WorkingPixel k_front{0.2F, 0.4F, 0.8F, 1.0F}; // opaque, distinct
+  arbc::Document doc;
+  const arbc::ObjectId comp =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId back_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{k_back[0], k_back[1], k_back[2], k_back[3]}, arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+  const arbc::ObjectId back_layer = doc.add_layer(back_content, arbc::Affine::identity());
+  doc.attach_layer(comp, back_layer);
+  const arbc::ObjectId front_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{k_front[0], k_front[1], k_front[2], k_front[3]},
+      arbc::Rect{20.0, 20.0, 40.0, 40.0}));
+  doc.attach_layer(comp, doc.add_layer(front_content, arbc::Affine::identity()));
+
+  const arbc::Affine camera = arbc::Affine::identity();
+
+  // Isolated sample of the BACK layer at the overlap point: the back cell's OWN colour, byte-exact
+  // against the authored constant and against a hand-driven single-layer render.
+  const std::optional<arbc::WorkingPixel> back_own =
+      sample_cell_color(doc, camera, back_layer, 30.0, 30.0);
+  REQUIRE(back_own.has_value());
+  CHECK(*back_own == k_back);
+  CHECK(*back_own == hand_layer_pixel(doc, back_layer, camera, 30.0, 30.0));
+
+  // The composite at the SAME point is the FRONT cell (opaque, on top) — not the back's own colour.
+  const arbc::WorkingPixel composite = sample_composited_color(doc, camera, 30.0, 30.0);
+  CHECK(composite == k_front);
+  CHECK(*back_own != composite);
+}
+
+TEST_CASE("color: sample_cell_color of a leaf recovers its own STRAIGHT colour (unpremultiply)") {
+  // A single semi-transparent solid whose premultiplied-linear colour is the D10 boundary decode of
+  // an authored sRGB straight colour. The isolated sample, decoded back through `working_to_srgb`,
+  // recovers that exact authored sRGB — proving `unpremultiply` yields straight, not premultiplied,
+  // colour (Constraint 5). Exact (not toleranced) because the working space is rgba32f.
+  constexpr int k_edge = 64;
+  const SrgbColor authored{200, 100, 50, 128};
+  const arbc::WorkingPixel premul = srgb_to_working(authored);
+  arbc::Document doc;
+  const arbc::ObjectId comp =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{premul[0], premul[1], premul[2], premul[3]}, arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+  const arbc::ObjectId layer = doc.add_layer(content, arbc::Affine::identity());
+  doc.attach_layer(comp, layer);
+
+  const std::optional<arbc::WorkingPixel> sampled =
+      sample_cell_color(doc, arbc::Affine::identity(), layer, 30.0, 30.0);
+  REQUIRE(sampled.has_value());
+  CHECK(*sampled == premul);                    // the raw premultiplied-linear own colour
+  CHECK(working_to_srgb(*sampled) == authored); // decoded to the authored straight sRGB, exactly
+}
+
+TEST_CASE("color: sample_cell_color returns nullopt for a non-cell id and for a non-isolable "
+          "(nested/operator) cell") {
+  // The leaf/operator gate (D-eyedrop_cell-2): an id that names no placed layer, and a cell whose
+  // content pulls inputs through a pull service a bare `render_layer` does not stand up, both yield
+  // `std::nullopt` so the arm degrades to the composited sample (D-eyedrop_cell-3).
+  constexpr int k_edge = 64;
+  arbc::Document doc;
+  const arbc::ObjectId comp =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::Affine camera = arbc::Affine::identity();
+
+  // Not a placed layer: the invalid (empty-selection) id and a valid-shaped id naming nothing.
+  CHECK(!sample_cell_color(doc, camera, arbc::ObjectId{}, 30.0, 30.0).has_value());
+  CHECK(!sample_cell_color(doc, camera, arbc::ObjectId{999999}, 30.0, 30.0).has_value());
+
+  // A nested-composition cell: its content answers a valid `composition_ref()`, so the structural
+  // gate refuses the isolated render (the library's own predicate, not a kind allow-list). A child
+  // composition supplies the ref; the isolated path never renders it.
+  const arbc::ObjectId child =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId nested_content =
+      doc.add_content(std::make_shared<arbc::NestedContent>(child));
+  const arbc::ObjectId nested_layer = doc.add_layer(nested_content, arbc::Affine::identity());
+  doc.attach_layer(comp, nested_layer);
+  CHECK(!sample_cell_color(doc, camera, nested_layer, 30.0, 30.0).has_value());
+}
+
+TEST_CASE("color: sample_cell_color decodes the isolated pixel through every working-space storage "
+          "format") {
+  // The isolated sampler reads pixel 0 through `arbc::visit_surface`, which dispatches over ALL
+  // three storage formats (rgba32f / rgba16f / rgba8srgb). Sampling under each configured working
+  // space proves the decode is format-generic — it never assumes f32 and reproduces the cell's own
+  // opaque colour whatever storage the composition carries (the library owns the codec; the sampler
+  // makes no format assumption, D-color-2). Each round-trip is checked within its storage
+  // precision, not byte-exact, because f16 and 8-bit sRGB quantize.
+  constexpr int k_edge = 64;
+  const arbc::WorkingPixel k_own{0.5F, 0.25F, 0.1F, 1.0F}; // opaque premultiplied-linear
+  for (const arbc::SurfaceFormat& space :
+       {arbc::k_working_rgba32f, arbc::k_working_rgba16f, arbc::k_fast_rgba8srgb}) {
+    arbc::Document doc;
+    const arbc::ObjectId comp =
+        doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+    doc.set_working_space(comp, space);
+    const arbc::ObjectId content = doc.add_content(std::make_shared<arbc::SolidContent>(
+        arbc::Rgba{k_own[0], k_own[1], k_own[2], k_own[3]}, arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+    const arbc::ObjectId layer = doc.add_layer(content, arbc::Affine::identity());
+    doc.attach_layer(comp, layer);
+
+    const std::optional<arbc::WorkingPixel> own =
+        sample_cell_color(doc, arbc::Affine::identity(), layer, 30.0, 30.0);
+    REQUIRE(own.has_value());
+    // Opaque, so premultiplied == straight; each storage recovers the own colour to its precision.
+    CHECK(std::abs((*own)[0] - k_own[0]) < 0.02F);
+    CHECK(std::abs((*own)[1] - k_own[1]) < 0.02F);
+    CHECK(std::abs((*own)[2] - k_own[2]) < 0.02F);
+    CHECK(std::abs((*own)[3] - k_own[3]) < 0.01F);
+  }
 }
