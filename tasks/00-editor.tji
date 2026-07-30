@@ -624,8 +624,9 @@ task editor "Editor — host GUI over libarbc" {
     task hatch_swatch "List-side hatch swatch + cross-highlight between list and overview" {
       effort 1d
       allocate team
+      complete 100
       depends !overview
-      note "Draw the deterministic interact::overview_pattern swatch beside each Layers-list row and wire AppState hover cross-highlight between the list and the overview (§5:191-194: 'the same pattern swatch appears beside the layer row … hovering either cross-highlights the other'). The overview side of the identity ships with editor.panels.overview; this leaf owns the list-side rendering and the cross-panel hover state. Source-of-debt: tasks/refinements/editor/overview.md. Design: docs/00-design.md D6/§5."
+      note "Draw the deterministic interact::overview_pattern swatch beside each Layers-list row and wire AppState hover cross-highlight between the list and the overview (§5:191-194: 'the same pattern swatch appears beside the layer row … hovering either cross-highlights the other'). The overview side of the identity ships with editor.panels.overview; this leaf owns the list-side rendering and the cross-panel hover state. Source-of-debt: tasks/refinements/editor/overview.md. Design: docs/00-design.md D6/§5. Refinement: tasks/refinements/editor.panels/hatch_swatch.md"
     }
     task overview_gizmo "Full scale/rotate/shear gizmo on schematic overview boxes" {
       effort 2d

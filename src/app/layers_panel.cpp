@@ -1,7 +1,9 @@
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/layers_panel.hpp>
+#include <ace/app/pattern_swatch.hpp> // draw_pattern_swatch — the shared list↔overview identity
 #include <ace/commands/app_state.hpp>
-#include <ace/commands/cells.hpp> // reorder_cell_command
+#include <ace/commands/cells.hpp>    // reorder_cell_command
+#include <ace/interact/interact.hpp> // overview_pattern (the exact overview identity, no forking)
 #include <ace/scene/camera.hpp>
 #include <ace/scene/cell.hpp>
 
@@ -104,6 +106,22 @@ void LayersPanel::draw(std::string_view /*view_id*/) {
   }
   ImGui::Separator();
 
+  // Cross-panel hover authoring (editor.panels.hatch_swatch / D-hatch_swatch-2): the row the
+  // pointer is over this frame (a camera or a layer), authored onto `AppState` at end-of-frame —
+  // but ONLY when THIS panel's window holds the pointer (single-writer). `track_row` both captures
+  // the hover and, reading the shared `hovered_object`, draws the matching row's hover highlight (a
+  // light accent outline distinct from the Selectable's selection fill — Constraint 7).
+  std::optional<arbc::ObjectId> row_hover;
+  ImDrawList* const dl = ImGui::GetWindowDrawList();
+  const auto track_row = [&](arbc::ObjectId row_id) {
+    if (ImGui::IsItemHovered()) {
+      row_hover = row_id;
+    }
+    if (state_.hovered_object() == row_id) {
+      dl->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), accent(200), 0.0F, 0, 1.5F);
+    }
+  };
+
   // --- Cameras section — flat, selectable, NOT reorderable (Constraint 4, A14) -----------------
   const std::vector<scene::Camera> cameras = scene::cameras(document);
   ImGui::TextUnformatted("Cameras");
@@ -118,6 +136,8 @@ void LayersPanel::draw(std::string_view /*view_id*/) {
     if (ImGui::Selectable(label.c_str(), selected)) {
       apply_row_selection(state_.selection(), cam.id);
     }
+    track_row(
+        cam.id); // camera cross-highlight (no swatch — cameras are frames, §5:173/Constraint 4)
   }
 
   ImGui::Separator();
@@ -168,6 +188,21 @@ void LayersPanel::draw(std::string_view /*view_id*/) {
       ImGui::SameLine();
     }
 
+    // The list-side pattern swatch (Constraint 1/2, D-hatch_swatch-3): the SAME deterministic
+    // identity the overview box draws for this cell, keyed by the cell's BOTTOM→TOP ordinal
+    // `count - 1 - slot` — the exact `this_ordinal` the overview passes (`overview_panel.cpp`),
+    // NOT the raw front→back `slot`, so a box in the overview and this row match at a glance
+    // (§5:191-192). Reused verbatim with no forking (D-overview-4); top-level active-composition
+    // CELL rows only (cameras/peek-children carry none, Constraint 3 / D-hatch_swatch-4).
+    const int ordinal = count - 1 - slot;
+    const interact::OverviewPattern pattern = interact::overview_pattern(ordinal, count);
+    const float swatch_size = ImGui::GetFrameHeight();
+    const ImVec2 swatch_origin = ImGui::GetCursorScreenPos();
+    draw_pattern_swatch(dl, swatch_origin, swatch_size, pattern, state_.selection().contains(id),
+                        state_.hovered_object() == id);
+    ImGui::Dummy(ImVec2(swatch_size, swatch_size));
+    ImGui::SameLine();
+
     const std::string name = cell.kind_id.empty() ? "(unknown kind)" : cell.kind_id;
     // Provenance leads the visible label (D11) so it is distinct per class in the row text itself —
     // painted vs referenced vs owned/borrowed. The stable `###layer_row_<id>` id keys the row
@@ -184,6 +219,7 @@ void LayersPanel::draw(std::string_view /*view_id*/) {
         apply_row_selection(state_.selection(), id);
       }
     }
+    track_row(id); // list→overview cross-highlight for this cell row
 
     // Drag-reorder — z-order (Constraint 2/3). The payload carries the dragged row's list slot.
     if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
@@ -210,6 +246,14 @@ void LayersPanel::draw(std::string_view /*view_id*/) {
     const commands::Command command =
         commands::reorder_cell_command(active, pending_reorder->first, pending_reorder->second);
     canvas_.apply_edit([this, command] { command.apply(state_.document()); });
+  }
+
+  // Author the cross-panel hover target for this frame — ONLY when THIS panel's window holds the
+  // pointer (single-writer-per-frame, D-hatch_swatch-2). `row_hover` is the hovered camera/layer
+  // id, or `nullopt` when the pointer is over the window but no row (Constraint 5). The non-hovered
+  // Overview panel never writes, so the two singletons never contend and no shell reset is needed.
+  if (ImGui::IsWindowHovered()) {
+    state_.set_hovered(row_hover);
   }
 }
 

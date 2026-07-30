@@ -149,6 +149,19 @@ public:
   std::optional<arbc::ObjectId>& entered_composition() { return entered_composition_; }
   const std::optional<arbc::ObjectId>& entered_composition() const { return entered_composition_; }
 
+  // The cross-panel hover target (editor.panels.hatch_swatch / D-hatch_swatch-1): the object the
+  // pointer is currently over in EITHER of the two co-primary structure panels (a cell box/row or a
+  // camera frame/row), so hovering one view cross-highlights the same object in the other (§5:193).
+  // PROJECT-LEVEL transient UI-thread-only state, exactly the shape of `selection_` /
+  // `entered_composition_` above: never persisted, never journaled (D15), never a transaction,
+  // moves cleanly with the defaulted move-construction. `nullopt` = the pointer is over no object.
+  // Written once per frame by whichever panel's ImGui window currently holds the pointer
+  // (single-writer, D-hatch_swatch-2) and read by both panels to render a hover highlight distinct
+  // from selection. The writer thread never touches it, so it adds no cross-thread shared mutable
+  // state (D-hatch_swatch-6).
+  const std::optional<arbc::ObjectId>& hovered_object() const { return hovered_object_; }
+  void set_hovered(std::optional<arbc::ObjectId> id) { hovered_object_ = id; }
+
   // The History panel's whole per-frame model, read ANY-THREAD from the library's published
   // history projection (arch A18, as amended by editor.canvas.history_snapshot_adopt). Retires
   // the host-side publisher mirror: `journal().history()` is the library's any-thread immutable
@@ -250,6 +263,10 @@ private:
   // persisted, never journaled, moves cleanly with the defaulted move-construction. `nullopt` =
   // Root. Re-resolved against the live document every frame (`scene::active_composition`).
   std::optional<arbc::ObjectId> entered_composition_;
+  // The cross-panel hover target (D-hatch_swatch-1). Transient session state like `selection_` /
+  // `entered_composition_`: never persisted, never journaled, moves cleanly with the defaulted
+  // move-construction, UI-thread-only. `nullopt` = the pointer is over no object.
+  std::optional<arbc::ObjectId> hovered_object_;
   bool rebuilt_from_canonical_ = false;
   // The D28 sidecar verdict, ferried off the bootstrap `OpenedProject` (never recomputed): true
   // when a mapped reopen recovered a document the `workspace/published.rev` sidecar proved in

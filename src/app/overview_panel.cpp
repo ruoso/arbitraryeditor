@@ -1,5 +1,6 @@
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/overview_panel.hpp>
+#include <ace/app/pattern_swatch.hpp> // hatch_ink — the shared list↔overview color table (D-hatch_swatch-6)
 #include <ace/app/view_framing.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/commands/cells.hpp> // transform_cells_command, reorder_cell_command, LayerTransform
@@ -47,25 +48,6 @@ struct OverviewXform {
   // Panel pixels per composition unit (uniform — `fit_region` is a uniform scale).
   double scale() const { return t.a; }
 };
-
-// The fixed fallback hatch palette (§5:204 "pattern-count-before-color"): `color_index == -1`
-// (distinct hatch style is carrying the load) uses the neutral ink; a `>=0` index picks a
-// desaturated hue so a wrapped style still reads as a distinct fill. Visual polish only — a design
-// pass retunes these without touching the model (D-overview-4 / Open questions).
-ImU32 hatch_ink(int color_index, bool selected) {
-  if (selected) {
-    return IM_COL32(120, 200, 255, 235); // the accent for the selected box's hatch
-  }
-  static const ImU32 palette[] = {
-      IM_COL32(210, 210, 210, 180), IM_COL32(230, 170, 150, 180), IM_COL32(170, 210, 170, 180),
-      IM_COL32(170, 190, 230, 180), IM_COL32(220, 210, 160, 180), IM_COL32(210, 170, 210, 180),
-  };
-  if (color_index < 0) {
-    return palette[0];
-  }
-  const int n = static_cast<int>(sizeof(palette) / sizeof(palette[0]));
-  return palette[color_index % n];
-}
 
 // A dashed segment — the dotted-border primitive ImGui's draw list lacks (Constraint 4). Golden is
 // N/A for this panel, so the exact dash/gap is signal-only visual polish.
@@ -312,6 +294,23 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
   // degenerate (already guarded, but keep the total contract).
   const std::optional<arbc::Vec2> mouse_comp = x.to_comp(ImGui::GetIO().MousePos);
 
+  // The cross-panel hover target this frame (editor.panels.hatch_swatch / D-hatch_swatch-2/5). A
+  // CELL box is a draw-list quad with a click-through interior, so its hover resolves through the
+  // SAME L1 hit-test a click uses (`interact::pick`) rather than the AABB InvisibleButton — the
+  // hovered box is exactly the one a click would select. Cameras are real ImGui label items, so
+  // their hover is captured by `IsItemHovered()` in the camera loop below (which overrides a cell
+  // pick, matching the label-grab precedence). Authored onto `AppState` at end-of-frame, but ONLY
+  // when this panel's window holds the pointer (single-writer, D-hatch_swatch-2).
+  std::optional<arbc::ObjectId> hover_target;
+  if (mouse_comp) {
+    const std::vector<interact::PickTarget> targets =
+        interact::pick_targets(document, registry, entered);
+    const interact::PickHit hit = interact::pick(targets, *mouse_comp, edge_tol, corner_tol);
+    if (hit.hit && hit.kind == interact::PickKind::Cell) {
+      hover_target = hit.id;
+    }
+  }
+
   // ============================ PASS 1: interaction (ImGui items) ==============================
   // Background item — marquee + empty-space clicks (submitted first, lowest priority).
   ImGui::SetNextItemAllowOverlap();
@@ -419,6 +418,10 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     ImGui::SetCursorScreenPos(ImVec2{aabb->first.x, aabb->first.y});
     const std::string label = cam.name + "###ov_cam_" + std::to_string(cam.id.value);
     ImGui::SmallButton(label.c_str());
+    if (ImGui::IsItemHovered()) {
+      hover_target =
+          cam.id; // a hovered camera label wins the cross-highlight (label-grab precedence)
+    }
     if (ImGui::IsItemActivated() && mouse_comp) {
       move_ = MoveGesture{true, cam.id, cam.layer, cam.frame, *mouse_comp, false};
     }
@@ -519,6 +522,9 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
   }
 
   const commands::Selection& selection = state_.selection();
+  // The cross-panel hover target authored by whichever panel holds the pointer (D-hatch_swatch-2),
+  // read here to draw the hover treatment on the matching box/frame — distinct from selection.
+  const std::optional<arbc::ObjectId>& hovered = state_.hovered_object();
 
   // Fills + hatch, BOTTOM→TOP: a front cell's fill occludes the one behind it in the overlap, and
   // the semi-opaque hatch keeps the behind pattern faintly visible (§5:183-189).
@@ -577,6 +583,11 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     dashed_line(dl, tr, br, border, th);
     dashed_line(dl, br, bl, border, th);
     dashed_line(dl, bl, tl, border, th);
+    // Hover cross-highlight (Constraint 7): a SOLID accent outline over the box, distinct from the
+    // dotted selection border — reads as "the pointer is on this object", composing with selection.
+    if (hovered && *hovered == cell.id) {
+      dl->AddQuad(tl, tr, br, bl, accent(230), 2.0F);
+    }
   }
 
   // Cameras as distinct SOLID frames (never a hatch box, §5:173) + a label — always-on-top chrome.
@@ -595,6 +606,11 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     const ImVec2 bl = x.to_screen(frame.apply({res_rect.x0, res_rect.y1}));
     const ImU32 col = selected ? IM_COL32(120, 200, 255, 255) : IM_COL32(255, 210, 120, 255);
     dl->AddQuad(tl, tr, br, bl, col, selected ? 2.5F : 1.5F); // the name shows on the label button
+    // Camera cross-highlight (Constraint 4): a hovered camera frame lights even though it carries
+    // no swatch — a plain id match, so cameras participate in the cross-panel hover for free.
+    if (hovered && *hovered == cam.id) {
+      dl->AddQuad(tl, tr, br, bl, accent(230), 3.0F);
+    }
   }
 
   // The live viewport rect, highlighted on top of all (§5:179).
@@ -619,6 +635,15 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
   if (cells.empty() && cameras.empty()) {
     dl->AddText(ImVec2{x.origin.x + 6.0F, x.origin.y + 6.0F}, IM_COL32(160, 160, 160, 255),
                 "(empty composition)");
+  }
+
+  // Author the cross-panel hover target for this frame — but ONLY when THIS panel's window holds
+  // the pointer (single-writer-per-frame, D-hatch_swatch-2). Writing the resolved id (or clearing
+  // it to `nullopt` when over no box/label) is exclusive: the non-hovered Layers panel never
+  // writes, so the two singletons never contend and no shell-level per-frame reset is needed
+  // (Constraint 5).
+  if (ImGui::IsWindowHovered()) {
+    state_.set_hovered(hover_target);
   }
 }
 
