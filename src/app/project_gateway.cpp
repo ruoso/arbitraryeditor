@@ -340,8 +340,11 @@ std::string AppProjectGateway::insert_cell(const std::string& kind_id,
   const arbc::Affine placement =
       ace::interact::place_in_view(framing.camera, framing.pane_w, framing.pane_h, *bounds);
   ace::commands::InsertCellOutcome outcome;
-  const ace::commands::Command command = ace::commands::insert_cell_command(
-      app_state_.registry(), kind_id, *config, placement, outcome);
+  // Read the isolation scope on the UI thread HERE and thread it by value into the command
+  // (D-scoped_edit-2 / Constraint 3): a scoped insert lands in the entered composition (D29).
+  const ace::commands::Command command =
+      ace::commands::insert_cell_command(app_state_.registry(), kind_id, *config, placement,
+                                         outcome, app_state_.entered_composition());
   // Every UI-driven insert runs inside CanvasView::apply_edit (Constraint 5 /
   // edit_render_sync Constraint 1, which names cells) — never a bare dispatch+poke.
   run_edit([this, &command] { ace::commands::dispatch(app_state_, command); });
@@ -372,8 +375,8 @@ bool AppProjectGateway::frame_selection() {
   // never from a UI-thread pick-target cache taken frames earlier.
   bool minted = false;
   run_edit([this, &minted] {
-    const std::vector<ace::interact::PickTarget> targets =
-        ace::interact::pick_targets(app_state_.document(), app_state_.registry());
+    const std::vector<ace::interact::PickTarget> targets = ace::interact::pick_targets(
+        app_state_.document(), app_state_.registry(), app_state_.entered_composition());
     const std::optional<arbc::Rect> extent =
         ace::interact::selected_extent(targets, app_state_.selection().items());
     if (!extent.has_value()) {

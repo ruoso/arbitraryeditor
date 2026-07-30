@@ -261,8 +261,8 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
       // A selection with nothing bounded (empty, or only unbounded fills) is REFUSED: the
       // camera is left exactly where it is (D-nav_aids-5 / Constraint 6).
       if (in.frame_selection) {
-        const std::vector<interact::PickTarget> aid_targets =
-            interact::pick_targets(state_.document(), state_.registry());
+        const std::vector<interact::PickTarget> aid_targets = interact::pick_targets(
+            state_.document(), state_.registry(), state_.entered_composition());
         if (const std::optional<arbc::Rect> extent =
                 interact::selected_extent(aid_targets, state_.selection().items())) {
           camera = interact::fit_region(*extent, p.tex_width, p.tex_height);
@@ -336,8 +336,11 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
         // one gesture, not two (Constraint 11). The pick stack is assembled in L1 (A17) as a plain
         // lock-free `pin()` read; it opens no transaction and takes no lease, so this deliberately
         // does NOT go through apply_edit (Constraint 2/12).
-        const std::vector<interact::PickTarget> targets =
-            interact::pick_targets(state_.document(), state_.registry());
+        // The pick set is confined to the entered composition while isolated (D-scoped_edit-4):
+        // out-of-scope cells and all cameras drop out, so click-select, marquee, and both gizmos
+        // below inherit the confined set — the interactive half of D29's isolation lock.
+        const std::vector<interact::PickTarget> targets = interact::pick_targets(
+            state_.document(), state_.registry(), state_.entered_composition());
         // The cell transform gizmo (editor.cells.gizmo; D-gizmo-2): the direct-manipulation
         // transform for the ONE selected cell. Runs BEFORE draw_selection so a handle press claims
         // the gesture (setting p.gizmo_cell) and selection leaves that press alone.

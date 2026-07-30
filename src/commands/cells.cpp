@@ -6,18 +6,24 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
 namespace ace::commands {
 
 Command insert_cell_command(const arbc::Registry& registry, std::string kind_id, std::string config,
-                            const arbc::Affine& placement, InsertCellOutcome& outcome) {
+                            const arbc::Affine& placement, InsertCellOutcome& outcome,
+                            std::optional<arbc::ObjectId> entered) {
   outcome = InsertCellOutcome{};
-  return Command{"insert_cell", [&registry, &outcome, kind_id = std::move(kind_id),
-                                 config = std::move(config), placement](arbc::Document& doc) {
+  // `entered` is captured BY VALUE (D-scoped_edit-2 / Constraint 3): the UI-thread scope
+  // snapshot travels into the writer-thread closure, and `scene::add_cell` resolves it
+  // fail-safe against the pin the create lands on — the writer never reads live `AppState`.
+  return Command{"insert_cell",
+                 [&registry, &outcome, kind_id = std::move(kind_id), config = std::move(config),
+                  placement, entered](arbc::Document& doc) {
                    const arbc::expected<arbc::ObjectId, std::string> added =
-                       scene::add_cell(doc, registry, kind_id, config, placement);
+                       scene::add_cell(doc, registry, kind_id, config, placement, entered);
                    if (added) {
                      outcome.content = *added;
                    } else {
@@ -27,7 +33,8 @@ Command insert_cell_command(const arbc::Registry& registry, std::string kind_id,
 }
 
 std::vector<Removal> selected_removals(const arbc::Document& document,
-                                       const arbc::Registry& registry, const Selection& selection) {
+                                       const arbc::Registry& registry, const Selection& selection,
+                                       std::optional<arbc::ObjectId> entered) {
   std::vector<Removal> removals;
   if (selection.empty()) {
     return removals;
@@ -35,7 +42,15 @@ std::vector<Removal> selected_removals(const arbc::Document& document,
   // Both accessors read the document, never `interact::pick_targets` (D-cells_remove-3).
   // The two lists are disjoint by construction — `cells()` excludes `org.arbc.camera`
   // layers (A14) — so trying cells first costs no correctness.
-  const std::vector<scene::Cell> cells = scene::cells(document, registry);
+  //
+  // The cell walk is re-rooted to the ACTIVE composition (D-scoped_edit-3 / Constraint 5): while
+  // entered, an in-scope cell is NOT in the root list, so the shipped root-only walk would never
+  // find its layer and the delete would silently no-op. The composition overload finds it; a
+  // vanished scope degrades to Root through the same fail-safe (Constraint 2). Cameras stay the
+  // project-level list — the pick confinement keeps their ids out of an entered selection, and
+  // `remove_cells`' membership gate is the backstop for any that slip through.
+  const std::vector<scene::Cell> cells =
+      scene::cells(document, registry, scene::active_composition(document, entered));
   const std::vector<scene::Camera> cameras = scene::cameras(document);
   removals.reserve(selection.items().size());
   for (const arbc::ObjectId id : selection.items()) {
@@ -62,19 +77,24 @@ std::vector<Removal> selected_removals(const arbc::Document& document,
   return removals;
 }
 
-Command remove_cells_command(std::vector<Removal> removals, std::size_t& removed) {
+Command remove_cells_command(std::vector<Removal> removals, std::size_t& removed,
+                             std::optional<arbc::ObjectId> entered) {
   removed = 0;
-  return Command{"remove_cells", [removals = std::move(removals), &removed](arbc::Document& doc) {
+  // `entered` captured BY VALUE (D-scoped_edit-2): the writer-thread closure holds an immutable
+  // scope snapshot, exactly as it holds the removal list.
+  return Command{"remove_cells",
+                 [removals = std::move(removals), &removed, entered](arbc::Document& doc) {
                    // Marshal the editor's two-field removals into the scene-local batch type
                    // (`commands::Removal` stays composition-free, D-one_action_one_entry-3);
-                   // `scene::remove_cells` resolves the root composition once and validates
-                   // each pair against the live pin, skipping stale targets (Constraint 5).
+                   // `scene::remove_cells` resolves the ACTIVE composition once from `entered`
+                   // and validates each pair against the live pin, skipping stale or
+                   // out-of-scope targets (Constraint 5).
                    std::vector<scene::CellRemoval> targets;
                    targets.reserve(removals.size());
                    for (const Removal& removal : removals) {
                      targets.push_back(scene::CellRemoval{removal.content, removal.layer});
                    }
-                   removed = scene::remove_cells(doc, targets);
+                   removed = scene::remove_cells(doc, targets, entered);
                  }};
 }
 
@@ -124,14 +144,19 @@ Command reorder_cell_command(arbc::ObjectId composition, arbc::ObjectId moved,
 
 DeleteOutcome delete_selection(AppState& state) {
   DeleteOutcome outcome;
-  // Resolved HERE, inside the edit, against the live document (D-cells_remove-3).
+  // The isolation scope is read HERE, beside `state.selection()` (D-scoped_edit-2 /
+  // D-cells_remove-3): the same resolution point, same threading posture — a plain optional
+  // snapshotted by value, then threaded into both the resolver and the command. While entered,
+  // `selected_removals` finds in-scope layers and `remove_cells`' gate validates against the
+  // entered composition, so the delete confines to the scope (Constraint 5).
+  const std::optional<arbc::ObjectId> entered = state.entered_composition();
   std::vector<Removal> removals =
-      selected_removals(state.document(), state.registry(), state.selection());
+      selected_removals(state.document(), state.registry(), state.selection(), entered);
   // ONE command wrapping ONE `remove_contents` over the whole span (D-one_action_one_entry-2):
   // one journal entry, one undo press for N objects — one `Command` = one libarbc transaction
   // (remove Constraint 3, restored). An empty/wholly-stale batch adds no entry (Constraint 2).
   std::size_t removed = 0;
-  const Command command = remove_cells_command(std::move(removals), removed);
+  const Command command = remove_cells_command(std::move(removals), removed, entered);
   const DispatchOutcome dispatched = dispatch(state, command);
   outcome.removed = removed;
   outcome.journal_entries_added = dispatched.journal_entries_added;

@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,10 +34,17 @@ struct InsertCellOutcome {
 // `create_content_and_attach` shape, D-one_action_one_entry-1): one undo press removes
 // the created cell whole (no orphan content), one redo restores it on the same `ObjectId`.
 //
+// `entered` is the isolation scope (`AppState::entered_composition`, D17/D29), read on the UI
+// thread at command construction and CAPTURED BY VALUE into the writer-thread closure
+// (D-scoped_edit-2 / Constraint 3): the minted cell lands in the entered composition (resolved
+// fail-safe at apply time), or Root when `nullopt`. No live `AppState` scope field is read from
+// the writer thread.
+//
 // `registry` and `outcome` are held BY REFERENCE by the returned command and must
 // outlive the `dispatch` call (which is synchronous).
 Command insert_cell_command(const arbc::Registry& registry, std::string kind_id, std::string config,
-                            const arbc::Affine& placement, InsertCellOutcome& outcome);
+                            const arbc::Affine& placement, InsertCellOutcome& outcome,
+                            std::optional<arbc::ObjectId> entered = std::nullopt);
 
 // --- Delete (editor.cells.remove) -------------------------------------------------------
 
@@ -63,8 +71,17 @@ struct Removal {
 // A selected id with no live target — already deleted, undone away, GC'd out from under the
 // selection — is SKIPPED, not an error (Constraint 5). The result is therefore never longer
 // than the selection and carries no duplicates (`Selection` is a set).
+//
+// `entered` scopes the resolution (D-scoped_edit-3 / Constraint 5): the cell walk is re-rooted
+// to `scene::active_composition(document, entered)`, so while entered an in-scope cell's layer
+// is FOUND (the root-only walk never enumerated it) and a selected root cell resolves to no
+// removal. Cameras are resolved from the project-level `scene::cameras` on the Root path; while
+// entered the pick confinement keeps camera ids out of the selection and `remove_cells`'
+// membership gate is the backstop. With `nullopt` this is byte-for-byte the shipped root walk
+// (Constraint 4).
 std::vector<Removal> selected_removals(const arbc::Document& document,
-                                       const arbc::Registry& registry, const Selection& selection);
+                                       const arbc::Registry& registry, const Selection& selection,
+                                       std::optional<arbc::ObjectId> entered = std::nullopt);
 
 // The dispatchable "remove N placed objects" verb: ONE `scene::remove_cells` over the whole
 // span, hence exactly ONE libarbc transaction and one journal entry for the batch, so
@@ -73,11 +90,14 @@ std::vector<Removal> selected_removals(const arbc::Document& document,
 // command, NOT N commands (D-one_action_one_entry-2/-4). An empty span mutates nothing and
 // adds zero entries.
 //
-// `removals` is taken BY VALUE (moved into the command). `removed` is filled in when the
-// command RUNS (synchronously, inside `dispatch`, on the writer thread): the count of targets
-// that actually left the composition (stale ones are skipped). It is held BY REFERENCE and
-// must outlive the `dispatch` call.
-Command remove_cells_command(std::vector<Removal> removals, std::size_t& removed);
+// `removals` is taken BY VALUE (moved into the command). `entered` is the isolation scope
+// (D17/D29), captured BY VALUE into the closure and forwarded to `scene::remove_cells` so its
+// membership gate validates against the entered composition (Constraint 5). `removed` is filled
+// in when the command RUNS (synchronously, inside `dispatch`, on the writer thread): the count
+// of targets that actually left the composition (stale ones are skipped). It is held BY
+// REFERENCE and must outlive the `dispatch` call.
+Command remove_cells_command(std::vector<Removal> removals, std::size_t& removed,
+                             std::optional<arbc::ObjectId> entered = std::nullopt);
 
 // --- Group transform (editor.cells.group_transform) -------------------------------------
 

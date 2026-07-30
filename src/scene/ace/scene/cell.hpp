@@ -109,8 +109,15 @@ arbc::expected<std::string, std::string> build_config(const KindInsertSchema& sc
 arbc::expected<std::optional<arbc::Rect>, std::string>
 probe_bounds(const arbc::Registry& registry, std::string_view kind_id, std::string_view config);
 
-// Mint a cell of `kind_id` from `config` and place it in the root composition at
+// Mint a cell of `kind_id` from `config` and place it in the ACTIVE composition at
 // `placement`, returning the new `Content`'s `ObjectId`.
+//
+// `entered` is the raw isolation scope (`AppState::entered_composition`, D17/D29):
+// `nullopt` = Root, an `ObjectId` = the nested composition the user has entered. The target
+// composition is resolved through the `active_composition` fail-safe against the SAME pin the
+// create lands on (D-scoped_edit-1) — a scope naming a GC'd/undone-away/foreign id degrades to
+// Root there and then (Constraint 2), never a phantom un-editable composition. With `nullopt`
+// (or a failed fail-safe) the cell lands in Root exactly as before (Constraint 4).
 //
 // Content is constructed ONLY through `registry.factory(kind_id)` — never by naming
 // a concrete arbc type, which would be the hard-coded kind set A16 forbids — and the
@@ -125,7 +132,8 @@ probe_bounds(const arbc::Registry& registry, std::string_view kind_id, std::stri
 // with no intermediate published state in which the content is attached to nothing.
 arbc::expected<arbc::ObjectId, std::string>
 add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_view kind_id,
-         std::string_view config, const arbc::Affine& placement);
+         std::string_view config, const arbc::Affine& placement,
+         std::optional<arbc::ObjectId> entered = std::nullopt);
 
 // One resolved deletion target for the batch verb below: the `Content` a selection names and
 // the `Layer` that places it in the root composition. A scene-local mirror of
@@ -150,16 +158,25 @@ struct CellRemoval {
 // snapshot, and ONE undo restores all N objects on their SAME `ObjectId`s with layers and
 // placements intact (D15 / D-one_action_one_entry-2).
 //
-// The root composition is resolved ONCE (root-only, remove Constraint 12) and each removal is
-// validated against the live pinned generation: a removal with an invalid id, a layer that is
-// not a live member of the root composition, or a layer that does not place its stated content
-// — a target already deleted, undone away, or GC'd — is SKIPPED, not an error (Constraint 5).
-// Returns the number of removals that actually left the composition (never more than
-// `removals.size()`); an empty or wholly-stale batch mutates NOTHING and returns 0. Deleting
-// from an entered/isolated nested scope is `editor.panels.layers`', symmetric with `add_cell`,
-// which only inserts into the root. WRITER-THREAD ONLY (`document.hpp:151`); wrap it in a
-// `commands::Command` and `dispatch` it so the edit rides the single-writer seam.
-std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> removals);
+// The ACTIVE composition is resolved ONCE from `entered` through the `active_composition`
+// fail-safe against the live pin (D-scoped_edit-1) and each removal is validated against that
+// same pinned generation: a removal with an invalid id, a layer that is not a live member of
+// the ACTIVE composition, or a layer that does not place its stated content — a target already
+// deleted, undone away, GC'd, or belonging to a DIFFERENT (e.g. out-of-scope) composition — is
+// SKIPPED, not an error (Constraint 5). Returns the number of removals that actually left the
+// composition (never more than `removals.size()`); an empty or wholly-stale batch mutates
+// NOTHING and returns 0.
+//
+// `entered` is the raw isolation scope (`AppState::entered_composition`, D17/D29): `nullopt` =
+// Root, an `ObjectId` = the entered nested composition. While entered, the membership gate
+// validates each removal against the ENTERED composition, so an in-scope layer passes and a
+// root (out-of-scope) layer is skipped — symmetric with `add_cell`, which inserts into the
+// same active composition. A scope naming a vanished id degrades to Root (Constraint 2); with
+// `nullopt` this is byte-for-byte the shipped root-only removal (Constraint 4). WRITER-THREAD
+// ONLY (`document.hpp:151`); wrap it in a `commands::Command` and `dispatch` it so the edit
+// rides the single-writer seam.
+std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> removals,
+                         std::optional<arbc::ObjectId> entered = std::nullopt);
 
 // Where a cell's pixels come from, classified from the GENERIC `arbc::Content` facets
 // D11 defines (`docs/00-design.md:478`) — NEVER a `kind_id` string-switch (A16 /

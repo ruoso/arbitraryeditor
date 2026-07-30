@@ -60,6 +60,21 @@ arbc::ObjectId root_composition(const arbc::DocRoot& state) {
   return root_id;
 }
 
+// The active composition resolved against an ALREADY-PINNED generation (D-scoped_edit-1 /
+// Constraint 2): the entered scope when it names a live composition of `state`, else Root. The
+// `DocRoot`-taking sibling of the public `active_composition` — the edit verbs resolve the
+// scope off the SAME pin the mutation lands on, so a scope gone stale between the UI-thread
+// read and the writer-thread apply degrades to Root there and then (never a phantom), with no
+// redundant second pin. `active_composition` below delegates here after pinning, so the
+// fail-safe rule lives in exactly one place (D-scoped_edit-6).
+arbc::ObjectId active_composition_in(const arbc::DocRoot& state,
+                                     std::optional<arbc::ObjectId> entered) {
+  if (entered && entered->valid() && state.find_composition(*entered) != nullptr) {
+    return *entered;
+  }
+  return root_composition(state);
+}
+
 arbc::expected<std::unique_ptr<arbc::Content>, std::string>
 make_content(const arbc::Registry& registry, std::string_view kind_id, std::string_view config) {
   const arbc::ContentFactory* factory = registry.factory(kind_id);
@@ -235,7 +250,8 @@ probe_bounds(const arbc::Registry& registry, std::string_view kind_id, std::stri
 
 arbc::expected<arbc::ObjectId, std::string>
 add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_view kind_id,
-         std::string_view config, const arbc::Affine& placement) {
+         std::string_view config, const arbc::Affine& placement,
+         std::optional<arbc::ObjectId> entered) {
   // Factory FIRST (Constraint 3): everything below this point mutates the document,
   // so a refused kind or a malformed config leaves it byte-for-byte untouched.
   arbc::expected<std::unique_ptr<arbc::Content>, std::string> made =
@@ -249,7 +265,9 @@ add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_v
     if (!state) {
       return arbc::unexpected<std::string>("the document has no published state");
     }
-    composition = root_composition(*state);
+    // Resolve the scope against THIS pin (D-scoped_edit-1): the cell lands in the entered
+    // composition when it is still live, else Root (Constraint 2/4/6).
+    composition = active_composition_in(*state, entered);
   }
   if (!composition.valid()) {
     return arbc::unexpected<std::string>("no root composition to place a cell in");
@@ -266,14 +284,17 @@ add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_v
   return placed.content;
 }
 
-std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> removals) {
+std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> removals,
+                         std::optional<arbc::ObjectId> entered) {
   if (removals.empty()) {
     return 0; // an empty batch is a no-op that publishes nothing (Constraint 2)
   }
   // Resolve + validate every removal against the live pinned generation BEFORE opening
   // anything, so a wholly-stale batch costs exactly one snapshot read and leaves the
-  // document byte-for-byte untouched (Constraint 5). The root composition is resolved ONCE
-  // here (root-only, remove Constraint 12 / D-one_action_one_entry-3): every removal names it.
+  // document byte-for-byte untouched (Constraint 5). The ACTIVE composition is resolved ONCE
+  // here from the scope (D-scoped_edit-1): while entered the membership gate validates against
+  // the entered composition, so an in-scope layer passes and a root (out-of-scope) layer is
+  // skipped; a vanished scope degrades to Root (Constraint 2/5).
   std::vector<arbc::Document::Removal> validated;
   validated.reserve(removals.size());
   {
@@ -281,9 +302,9 @@ std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> 
     if (!state) {
       return 0;
     }
-    const arbc::ObjectId composition = root_composition(*state);
+    const arbc::ObjectId composition = active_composition_in(*state, entered);
     if (!composition.valid()) {
-      return 0; // no root composition to remove from
+      return 0; // no composition to remove from
     }
     for (const CellRemoval& removal : removals) {
       if (!removal.content.valid() || !removal.layer.valid()) {
@@ -300,7 +321,7 @@ std::size_t remove_cells(arbc::Document& document, std::span<const CellRemoval> 
         }
       });
       if (!member) {
-        continue; // live layer, but not in the root composition (a nested scope's)
+        continue; // live layer, but not in the ACTIVE composition (a different scope's)
       }
       validated.push_back(arbc::Document::Removal{removal.content, composition, removal.layer});
     }
@@ -371,11 +392,9 @@ arbc::ObjectId active_composition(const arbc::Document& document,
   }
   // Fail-safe (Constraint 8 / D-look_through-7): the entered scope targets a live composition, else
   // Root. A `nullopt` scope, or one naming a GC'd/undone-away/foreign id, resolves to Root here —
-  // re-evaluated every frame, so a vanished scope silently degrades rather than crashing.
-  if (entered && entered->valid() && state->find_composition(*entered) != nullptr) {
-    return *entered;
-  }
-  return root_composition(*state);
+  // re-evaluated every frame, so a vanished scope silently degrades rather than crashing. The rule
+  // lives in `active_composition_in`, shared with the edit verbs' apply-time resolution.
+  return active_composition_in(*state, entered);
 }
 
 ZOrderPosition z_order_position(const std::vector<Cell>& ordered, arbc::ObjectId id) {

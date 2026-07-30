@@ -592,8 +592,9 @@ task editor "Editor — host GUI over libarbc" {
     task scoped_edit "Make insert/delete verbs honor the entered composition scope" {
       effort 2.5d
       allocate team
+      complete 100
       depends editor.panels.layers, !remove
-      note "scene::remove_cells and add_cell currently hard-code root_composition; make them resolve the active composition (AppState::entered_composition) instead, so insert and delete operate on the entered nested scope when the user has entered one. The scope model and its entered_composition field ship with editor.panels.layers; this leaf owns the thin edit-plumbing that consumes it. src/scene/ace/scene/cell.hpp:157 comment already flags this gap. Source-of-debt: tasks/refinements/editor.panels/layers.md (Deferred WBS). Design: docs/00-design.md D17, docs/01-architecture.md A17."
+      note "scene::remove_cells and add_cell currently hard-code root_composition; make them resolve the active composition (AppState::entered_composition) instead, so insert and delete operate on the entered nested scope when the user has entered one. The scope model and its entered_composition field ship with editor.panels.layers; this leaf owns the thin edit-plumbing that consumes it. src/scene/ace/scene/cell.hpp:157 comment already flags this gap. Source-of-debt: tasks/refinements/editor.panels/layers.md (Deferred WBS). Design: docs/00-design.md D17, docs/01-architecture.md A17. Refinement: tasks/refinements/editor.cells/scoped_edit.md"
     }
   }
 

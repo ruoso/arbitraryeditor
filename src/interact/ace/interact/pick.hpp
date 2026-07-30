@@ -261,7 +261,18 @@ SnapResult snap_placement(const arbc::Affine& candidate, const arbc::Rect& movin
 // lease, no lock — the same per-frame read the canvas already performs, extended to cells. A
 // cell whose kind token does not resolve is still a target (mirroring `cells()`'s
 // empty-`kind_id` passthrough), because an unknown-passthrough cell is still selectable.
-std::vector<PickTarget> pick_targets(const arbc::Document& document,
-                                     const arbc::Registry& registry);
+//
+// `entered` is the raw isolation scope (`AppState::entered_composition`, D17/D29), resolved
+// through `scene::active_composition`. When it names a NON-ROOT live composition, the pickable
+// set is confined to that child's cells and NO cameras are appended (D-scoped_edit-4 /
+// Constraint 7/8): a camera is a project-level tool (A14/D19), not a member of a nested scope,
+// so it drops out of the pick set while entered — the user climbs to Root to manipulate it.
+// This single assembly adapter (A17) is where pointer/keyboard/drag confinement is expressed
+// ONCE: click-select, marquee, select-all, gizmo-hit, and frame-selection all read this set.
+// With `nullopt` (or a scope that fails the fail-safe) the result is byte-for-byte the shipped
+// all-root-cells-plus-all-cameras list (Constraint 4), so unchanged call sites keep root
+// behavior via the default.
+std::vector<PickTarget> pick_targets(const arbc::Document& document, const arbc::Registry& registry,
+                                     std::optional<arbc::ObjectId> entered = std::nullopt);
 
 } // namespace ace::interact

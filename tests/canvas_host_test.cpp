@@ -548,6 +548,91 @@ TEST_CASE("canvas_host: streamed isolation-scope toggles run clean against the r
   handle->join();
 }
 
+TEST_CASE("canvas_host: streamed SCOPED inserts/deletes run clean against the render read "
+          "(cells.scoped_edit TSan anchor)") {
+  // editor.cells.scoped_edit Acceptance (Threading / Constraint 3): a scoped `add_cell` /
+  // `remove_cells` — the entered composition captured BY VALUE into the writer-thread closure —
+  // streamed through `apply_edit` on the real interactive pool while the render thread walks the
+  // SAME document over the lock-free pin() seam AND consumes the per-canvas `set_scope` channel the
+  // isolation_scope leaf feeds (request_scope). The edit's captured scope id is a plain
+  // `std::optional<arbc::ObjectId>` value — it shares no mutable state with the render-thread scope
+  // generation, so a scoped edit overlapping a scope toggle is data-race-clean. No new lock, no new
+  // thread, no new suppression: the scope is a value and the transaction machinery is the
+  // already-covered single-writer seam.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  arbc::ObjectId child;
+  writer.submit_sync([&] {
+    child = probe.document->add_composition(32.0, 32.0);
+    const arbc::ObjectId content = probe.document->add_content(std::make_shared<arbc::SolidContent>(
+        arbc::Rgba{0.7F, 0.0F, 0.0F, 1.0F}, arbc::Rect{0.0, 0.0, 32.0, 32.0}));
+    const arbc::ObjectId layer = probe.document->add_layer(content, arbc::Affine::identity());
+    probe.document->attach_layer(child, layer);
+    (void)ace::scene::add_cell(*probe.document, registry, "org.arbc.nested",
+                               std::to_string(child.value), arbc::Affine::translation(16.0, 16.0));
+  });
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document, &registry);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // The scope value the closures capture BY VALUE — never a live AppState field read on the writer
+  // thread (Constraint 3). Both canvases run entered on the render side too, so the scoped edit
+  // overlaps a live focus-quad recompute off the same pin().
+  const std::optional<arbc::ObjectId> entered{child};
+  host.request_scope("canvas#1", entered);
+  host.request_scope("canvas#2", entered);
+
+  constexpr int k_rounds = 32;
+  arbc::ObjectId minted;
+  for (int i = 0; i < k_rounds; ++i) {
+    // Insert a scoped cell (scope captured by value), then delete exactly it with a scoped removal
+    // — both verbs threaded through the entered scope, overlapping the render read. `apply_edit`
+    // (submit_sync) runs each closure to completion on the writer thread, so `minted` is set before
+    // the delete reads it.
+    apply_edit(writer, host, [&, entered] {
+      const auto added =
+          ace::scene::add_cell(*probe.document, registry, "org.arbc.solid", "0,0,1,1,0,0,16,16",
+                               arbc::Affine::identity(), entered);
+      REQUIRE(added.has_value());
+      minted = *added;
+    });
+    apply_edit(writer, host, [&, entered] {
+      arbc::ObjectId layer;
+      for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry, child)) {
+        if (cell.id == minted) {
+          layer = cell.layer;
+        }
+      }
+      const std::vector<ace::scene::CellRemoval> batch{ace::scene::CellRemoval{minted, layer}};
+      (void)ace::scene::remove_cells(*probe.document, batch, entered);
+    });
+  }
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+
+  // The scoped delete removed exactly what the scoped insert added each round: the child holds only
+  // its original red solid, and the root holds only the probe solid + the nested wrapper.
+  CHECK(ace::scene::cells(*probe.document, registry, child).size() == 1);
+}
+
 TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean against the render read "
           "(cells.remove TSan anchor)") {
   // The document's ONE writer identity, bound the way the shipped bootstrap binds it
