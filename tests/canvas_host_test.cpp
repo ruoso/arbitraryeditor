@@ -22,6 +22,7 @@
 #include <ace/scene/cell.hpp>
 #include <ace/writer/writer_thread.hpp>
 
+#include <arbc/base/geometry.hpp> // arbc::Vec2 (brush dab centers)
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/builtin_kinds.hpp>                 // register_builtin_kinds (org.arbc.nested/.solid)
@@ -29,6 +30,8 @@
 #include <arbc/contract/registry.hpp>             // arbc::Registry
 #include <arbc/kind_raster/raster_content.hpp>    // DecodedImage / RasterContent (bounded content)
 #include <arbc/kind_solid/solid_content.hpp>
+#include <arbc/media/pixel_traits.hpp> // arbc::WorkingPixel (brush color)
+#include <arbc/model/journal.hpp>      // Journal::cursor() (the coalesced-entry count)
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp> // KindBridge / load_document / settle_external_loads
 #include <arbc/runtime/interactive.hpp>
@@ -40,6 +43,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath> // std::isfinite (final-pixel finiteness)
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -2862,6 +2866,74 @@ TEST_CASE("canvas_host: a stream of UI-thread cell TRANSFORM commits runs clean 
   }
   CHECK(found);
   CHECK(last_cells >= 1);
+
+  host.stop();
+  handle->join();
+}
+
+TEST_CASE("canvas_host: a stream of UI-thread brush-dab commits under one coalesce key runs clean "
+          "against the render + pin read (paint.brush TSan anchor)") {
+  // Same writer-outlives-host contract as the cells.gizmo anchor above. What this leaf pins is the
+  // editor's first writer-thread MUTATION STREAM (D-brush-3): many small `RasterContent::paint`
+  // commits per gesture, ALL stamped with one coalesce key, run through apply_edit on the writer
+  // thread while the render thread loops AND the UI thread re-reads the pinned pixels each frame —
+  // so both reads genuinely overlap the writes. A FLAT raster paint (no nested render), so the
+  // arbc-nested-render-worker-detach-race inline-pool caveat does not apply and the REAL
+  // interactive pool is correct. No new lock, no new thread.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  // A bounded raster to paint into, seeded on the writer (the write binds identity). Report its id.
+  arbc::ObjectId raster;
+  writer.submit_sync([&] {
+    const auto added = ace::scene::add_cell(*probe.document, registry, "org.arbc.raster", "32x32",
+                                            arbc::Affine::translation(8.0, 8.0));
+    if (added.has_value()) {
+      raster = *added;
+    }
+  });
+  REQUIRE(raster.valid());
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  const std::size_t cursor_before = probe.document->journal().cursor();
+
+  // Stream the dab commits: many per-frame paints, ALL under ONE gesture key (a brush stroke), with
+  // a pinned pixel read interleaved each round (the UI thread's per-frame read).
+  constexpr int k_dabs = 64;
+  const std::uint64_t key = 42;
+  const arbc::WorkingPixel color{0.0F, 0.0F, 0.0F, 1.0F};
+  for (int i = 0; i < k_dabs; ++i) {
+    const std::vector<arbc::Vec2> centers{arbc::Vec2{4.0 + static_cast<double>(i % 24), 16.0}};
+    apply_edit(writer, host, [&] {
+      ace::scene::brush_dab(*probe.document, registry, raster, centers, 2.0, 4.0, color, key);
+    });
+    auto* r = dynamic_cast<arbc::RasterContent*>(probe.document->resolve(raster));
+    if (r != nullptr) {
+      (void)r->store().base_table()->pixel(0, 8, 16); // per-frame pin() read overlapping the writes
+    }
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  // The whole burst folded to ONE coalesced journal entry (D15), and the final pixels are finite.
+  CHECK(probe.document->journal().cursor() == cursor_before + 1);
+  auto* raster_content = dynamic_cast<arbc::RasterContent*>(probe.document->resolve(raster));
+  REQUIRE(raster_content != nullptr);
+  const arbc::WorkingPixel final_px = raster_content->store().base_table()->pixel(0, 8, 16);
+  for (const float ch : final_px) {
+    CHECK(std::isfinite(ch));
+  }
 
   host.stop();
   handle->join();

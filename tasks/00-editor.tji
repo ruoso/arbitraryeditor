@@ -656,8 +656,9 @@ task editor "Editor — host GUI over libarbc" {
     task brush "Brush tool; %-of-view size + ring; dab into org.arbc.raster" {
       effort 3d
       allocate team
+      complete 100
       depends editor.cells.model, editor.canvas.tool_dispatch
-      note "The brush tool: size in % of view (shorter edge, log slider) with an on-canvas ring; strokes dab into an org.arbc.raster cell's editable facet, coalesced into one undo step. Design: D5. Refinement: tasks/refinements/brush.md. Decided (pre-exec 2026-07-19): brush size is SCREEN-locked only — a canvas-locked (composition-units) mode is deliberately NOT offered; it contradicts the model's principle (brush is screen-relative % of view; resolution is cell-owned, detail floor at the cell). No size-lock toggle."
+      note "The brush tool: size in % of view (shorter edge, log slider) with an on-canvas ring; strokes dab into an org.arbc.raster cell's editable facet, coalesced into one undo step. Design: D5. Refinement: tasks/refinements/paint/brush.md. Decided (pre-exec 2026-07-19): brush size is SCREEN-locked only — a canvas-locked (composition-units) mode is deliberately NOT offered; it contradicts the model's principle (brush is screen-relative % of view; resolution is cell-owned, detail floor at the cell). No size-lock toggle."
     }
     task paint_res "Cell-fixed resolution painting; screen->cell mapping; detail-floor readout" {
       effort 2d

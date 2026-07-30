@@ -3,9 +3,10 @@
 #include <ace/project/project.hpp> // scene -> project edge (used across this component)
 
 #include <arbc/base/expected.hpp>
-#include <arbc/base/geometry.hpp>  // arbc::Rect
-#include <arbc/base/ids.hpp>       // arbc::ObjectId
-#include <arbc/base/transform.hpp> // arbc::Affine
+#include <arbc/base/geometry.hpp>      // arbc::Rect, arbc::Vec2
+#include <arbc/base/ids.hpp>           // arbc::ObjectId
+#include <arbc/base/transform.hpp>     // arbc::Affine
+#include <arbc/media/pixel_traits.hpp> // arbc::WorkingPixel (brush_dab color, premultiplied-linear)
 
 #include <array>
 #include <cstddef>
@@ -367,5 +368,23 @@ bool set_cell_opacity(arbc::Document& document, const arbc::Registry& registry, 
 // false (a no-op) for an unresolvable id or a non-cell. WRITER-THREAD ONLY; ONE transaction.
 bool set_cell_visible(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId cell,
                       bool visible);
+
+// Composite a batch of soft round brush dabs into the PAINTED-RASTER cell whose content id is
+// `cell` (editor.paint.brush; D3/§4, the maps table `docs/00-design.md:532`). Each center in
+// `centers` is a level-0 (content) pixel coordinate; every dab is an `arbc::round_dab` of
+// `outer_radius` content px with an `inner_radius` soft core, composited premultiplied-linear
+// source-over in `color` (premultiplied-linear working floats). ALL dabs land in ONE
+// `document.transact` stamped with `coalesce_key`, so a whole stroke of many per-frame calls
+// sharing one key folds to ONE undoable journal entry (D15 / `Transaction::coalesce`).
+//
+// The target is resolved through the GENERIC editable facet (`Content::editable()` non-null ==
+// PaintedRaster, the `classify_detail` test — never a `kind_id` switch, A16); the concrete
+// `arbc::RasterContent` is then reached to drive `paint`. Returns false — mutating nothing,
+// opening NO transaction — for an unknown id, a camera, a non-editable (non-raster) cell, an
+// empty `centers`, or a non-positive/non-finite radius. The dab writes PIXELS ONLY: the cell's
+// placement, `content_bounds` and native resolution are untouched (D8). WRITER-THREAD ONLY.
+bool brush_dab(arbc::Document& document, const arbc::Registry& registry, arbc::ObjectId cell,
+               std::span<const arbc::Vec2> centers, double inner_radius, double outer_radius,
+               const arbc::WorkingPixel& color, std::uint64_t coalesce_key);
 
 } // namespace ace::scene

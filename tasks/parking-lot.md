@@ -284,3 +284,23 @@ The overview ships provisional defaults for the three §5:204-206 open polish it
 **Trigger:** §11 input map settled in `docs/00-design.md`.
 
 The overview ships provisional idiom gestures (double-click-to-enter, zoom-control chord, fit-to-camera click). These bindings are provisional — §11 of `docs/00-design.md` (the input map) is still open, and the input-map owner may want to remap them without touching the navigator seam. The scope model, breadcrumb derivation, and all L1 geometry helpers are independent of the bindings and need no change when they move; only the L4 dispatch in `OverviewPanel` is rebindable. No WBS task — this is a human design call gated on the input map, mirroring the same note for the layers panel bindings.
+
+---
+
+## Authoritative active paint color home and `editor.panels.color` dependency edge
+
+**Source:** `tasks/refinements/paint/brush.md` (editor.paint.brush, 2026-07-30) — Open questions / D-brush-6.
+
+**Trigger:** `editor.panels.color` is refined and the color-panel refinement_writer decides where the active `WorkingPixel` field should live.
+
+`editor.paint.brush` ships an opaque-black default `WorkingPixel` on a brush-owned session field (`Presenter::brush_color`) in `src/app/canvas_view.cpp`. D-brush-6 deferred the structural question: whether `editor.panels.color` writes that field directly (the simplest path — color panel knows the canvas view's Presenter) or the field is hoisted to a shared home (e.g. beside `dockmodel::ToolSelection`) is a call best made when the color panel is refined. Additionally, the `editor.panels.color` task in the WBS (`tasks/00-editor.tji:642`) lists `editor.paint.brush` as a dependency — once the color panel ships, a WBS owner should verify that edge is correct and remove it if the color panel initializes the active-color field independently. No WBS task — this is a structural design call for the color-panel refinement owner.
+
+---
+
+## Cross-cell strokes and advanced brush modes (hardness / eraser / blend / pressure)
+
+**Source:** `tasks/refinements/paint/brush.md` (editor.paint.brush, 2026-07-30) — Open questions / D-brush-7.
+
+**Trigger:** a design row in `docs/00-design.md` demanding one of these features, or a concrete consumer that cannot be served by the current single-cell soft round dab.
+
+`editor.paint.brush` ships a single soft `round_dab` that paints only the selection-primary `org.arbc.raster` cell. D-brush-7 explicitly defers cross-cell stroke distribution and brush hardness/eraser/blend-mode/pressure as parking-lot observations: the arbc dab API supports hard/soft and explicit masks (`raster_content.hpp:99-104`) so each is cheap to add when a consumer asks, but minting controls now is machinery ahead of a requirement. No WBS task — enter the WBS when a design row or concrete product need exists.

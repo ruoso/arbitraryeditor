@@ -4,6 +4,8 @@
 
 #include <arbc/contract/content.hpp>
 #include <arbc/contract/registry.hpp>
+#include <arbc/kind_raster/raster_content.hpp> // RasterContent::paint, round_dab, CoverageSampler
+#include <arbc/media/pixel_traits.hpp>         // arbc::WorkingPixel (premultiplied-linear color)
 #include <arbc/model/model.hpp>
 #include <arbc/model/records.hpp>
 #include <arbc/runtime/document.hpp>
@@ -558,6 +560,48 @@ bool set_cell_visible(arbc::Document& document, const arbc::Registry& /*registry
   }
   auto txn = document.transact("set_cell_visible");
   txn.set_visible(layer, visible);
+  txn.commit();
+  return true;
+}
+
+bool brush_dab(arbc::Document& document, const arbc::Registry& /*registry*/, arbc::ObjectId cell,
+               std::span<const arbc::Vec2> centers, double inner_radius, double outer_radius,
+               const arbc::WorkingPixel& color, std::uint64_t coalesce_key) {
+  // Nothing to paint / a degenerate dab: a no-op that opens NO transaction (the
+  // set_cell_opacity discipline — a false return, never a half-open edit).
+  if (centers.empty() || !(outer_radius > 0.0) || !std::isfinite(outer_radius) ||
+      !std::isfinite(inner_radius)) {
+    return false;
+  }
+  arbc::Content* content = document.resolve(cell);
+  if (content == nullptr) {
+    return false; // unknown id
+  }
+  // Reject a camera up front (the set_cell_opacity mould), then require the GENERIC editable
+  // facet — `editable()` non-null IS the PaintedRaster test `classify_detail` uses (A16), never
+  // a `kind_id` switch. The concrete `RasterContent` is only reached to drive `paint`.
+  if (dynamic_cast<CameraContent*>(content) != nullptr || content->editable() == nullptr) {
+    return false;
+  }
+  auto* raster = dynamic_cast<arbc::RasterContent*>(content);
+  if (raster == nullptr) {
+    return false; // editable but not a raster we can paint
+  }
+  // ONE transaction for every dab in this call, stamped with the gesture key so a stroke of
+  // many per-frame calls sharing one key folds to ONE journal entry (D15). Each dab copies only
+  // its touched tiles (CoW, O(touched tiles)) and adds its damage to `txn` (raster_content.hpp).
+  auto txn = document.transact("brush");
+  txn.coalesce(coalesce_key);
+  const double inner = std::clamp(inner_radius, 0.0, outer_radius);
+  for (const arbc::Vec2& c : centers) {
+    if (!std::isfinite(c.x) || !std::isfinite(c.y)) {
+      continue; // skip a non-finite center rather than write a NaN region
+    }
+    const arbc::Rect region{c.x - outer_radius, c.y - outer_radius, c.x + outer_radius,
+                            c.y + outer_radius};
+    const arbc::CoverageSampler coverage = arbc::round_dab(c.x, c.y, inner, outer_radius, 1.0F);
+    raster->paint(txn, cell, region, color, coverage);
+  }
   txn.commit();
   return true;
 }

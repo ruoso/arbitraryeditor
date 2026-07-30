@@ -20,6 +20,64 @@ const char* name();
 // units.
 double brush_units(double view_fraction, double view_short_edge_units);
 
+// --- Brush size log slider + stroke footprint (editor.paint.brush; D5/§4) -----
+// The brush size is a SCREEN fraction (D5, screen-locked): `% of the shorter view
+// edge`, driven by a LOGARITHMIC slider so the working range (~0.3-15%) occupies
+// the slider's mid band, capped at 100%. `brush_units` (above) maps the fraction
+// to composition units; these helpers map the slider and stamp the stroke. All
+// pure, UI-agnostic — no `scene`/ImGui type crosses the seam (Constraint 2).
+
+// The log-slider range for the screen brush diameter as a fraction of the shorter
+// view edge: `[k_brush_min_fraction, k_brush_max_fraction]`, the `100%` cap (D5).
+inline constexpr double k_brush_min_fraction = 0.001; // 0.1% of the shorter edge
+inline constexpr double k_brush_max_fraction = 1.0;   // 100% cap (D5)
+
+// The log-slider mapping and its inverse (D5). `brush_fraction_from_slider` clamps
+// `slider_t` to [0,1] and returns a view-fraction in [min,max], LOG-linearly and
+// MONOTONICALLY increasing (fraction == min·(max/min)^t); `brush_slider_from_fraction`
+// is its exact inverse, clamping the fraction to [min,max] first so a 100%-capped
+// value round-trips to t==1.
+double brush_fraction_from_slider(double slider_t);
+double brush_slider_from_fraction(double view_fraction);
+
+// The default soft-dab inner-radius fraction: `inner_radius == k_brush_softness ·
+// outer_radius`, so the dab has a soft round falloff (D-brush-7, one default dab).
+inline constexpr double k_brush_softness = 0.5;
+
+// The default dab spacing as a fraction of the brush RADIUS (D-brush-3): dab centers
+// along a drag are spaced no more than this × radius apart, so a fast drag leaves no
+// gaps in the stroke.
+inline constexpr double k_brush_dab_spacing = 0.25;
+
+// A defensive upper bound on the dabs one segment may emit (mirrors the hatch
+// `k_max_hatch_lines` self-limit) — a degenerate tiny-radius/huge-drag pair can never
+// blow up the per-frame work.
+inline constexpr int k_max_stroke_dabs = 4096;
+
+// Interpolate dab centers along the drag segment `from`→`to` (any 2D space; the caller
+// supplies content-pixel endpoints and a content-pixel `radius`). Centers are spaced
+// ≤ `spacing_fraction × radius` apart with BOTH endpoints included, so a fast drag
+// leaves no gaps. A zero-length segment (a single click) yields exactly ONE dab at the
+// point; a non-finite endpoint or a non-positive/non-finite radius/spacing yields an
+// EMPTY set — a safe no-op, never a NaN.
+std::vector<arbc::Vec2> stroke_dabs(arbc::Vec2 from, arbc::Vec2 to, double radius,
+                                    double spacing_fraction = k_brush_dab_spacing);
+
+// The content-pixel footprint of the screen brush at `device_point` (D-brush-5): the
+// device-pixel cursor mapped device → composition (`camera.inverse()`) → content px
+// (`placement.inverse()`), with the composition-unit radius `comp_radius` scaled to
+// content px by the placement scale (1 content px = 1 native unit, D-resolution-1, so
+// `radius == comp_radius / placement.max_scale()`). `valid` is false — a safe no-op,
+// never a NaN — for a non-invertible camera or placement, a non-positive/non-finite
+// placement scale, a non-positive/non-finite radius, or a non-finite cursor.
+struct BrushFootprint {
+  arbc::Vec2 center;   // content-pixel dab center (level-0 coords)
+  double radius = 0.0; // content-pixel dab radius (outer)
+  bool valid = false;
+};
+BrushFootprint brush_footprint(const arbc::Affine& camera, const arbc::Affine& placement,
+                               arbc::Vec2 device_point, double comp_radius);
+
 // --- Viewport camera navigation (editor.canvas.nav; D2/D9) -------------------
 // The camera is an `arbc::Affine` mapping composition units -> device pixels (the
 // same seam `HostViewport::set_camera` drives). All three take/return a camera by

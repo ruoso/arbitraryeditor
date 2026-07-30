@@ -13,6 +13,80 @@ double brush_units(double view_fraction, double view_short_edge_units) {
   return view_fraction * view_short_edge_units;
 }
 
+double brush_fraction_from_slider(double slider_t) {
+  const double t = std::clamp(slider_t, 0.0, 1.0);
+  // Geometric interpolation min·(max/min)^t: log-linear in the slider, so equal
+  // slider travel is equal RATIO travel (D5 log slider). Monotonic increasing.
+  const double ratio = k_brush_max_fraction / k_brush_min_fraction;
+  return k_brush_min_fraction * std::pow(ratio, t);
+}
+
+double brush_slider_from_fraction(double view_fraction) {
+  // Clamp into range first so a 100%-capped value round-trips to t==1 (never > 1).
+  const double frac = std::clamp(view_fraction, k_brush_min_fraction, k_brush_max_fraction);
+  const double ratio = k_brush_max_fraction / k_brush_min_fraction;
+  return std::log(frac / k_brush_min_fraction) / std::log(ratio);
+}
+
+std::vector<arbc::Vec2> stroke_dabs(arbc::Vec2 from, arbc::Vec2 to, double radius,
+                                    double spacing_fraction) {
+  std::vector<arbc::Vec2> dabs;
+  // Refuse rather than guess (D-fit_bounds-3): a non-finite endpoint or a degenerate
+  // radius/spacing emits nothing, so no NaN reaches the document.
+  if (!std::isfinite(from.x) || !std::isfinite(from.y) || !std::isfinite(to.x) ||
+      !std::isfinite(to.y) || !(radius > 0.0) || !std::isfinite(radius) ||
+      !(spacing_fraction > 0.0) || !std::isfinite(spacing_fraction)) {
+    return dabs;
+  }
+  const double dx = to.x - from.x;
+  const double dy = to.y - from.y;
+  const double len = std::hypot(dx, dy);
+  if (!(len > 0.0)) {
+    dabs.push_back(from); // zero-length segment (a single click): exactly one dab
+    return dabs;
+  }
+  const double spacing = spacing_fraction * radius;
+  // steps ≥ len/spacing, so consecutive centers (len/steps apart) never exceed spacing —
+  // no gaps. Clamp to the self-limit so a pathological input cannot explode the frame.
+  int steps = static_cast<int>(std::ceil(len / spacing));
+  steps = std::clamp(steps, 1, k_max_stroke_dabs);
+  dabs.reserve(static_cast<std::size_t>(steps) + 1);
+  for (int i = 0; i <= steps; ++i) {
+    const double f = static_cast<double>(i) / static_cast<double>(steps); // 0..1 inclusive
+    dabs.push_back(arbc::Vec2{from.x + dx * f, from.y + dy * f});         // endpoints included
+  }
+  return dabs;
+}
+
+BrushFootprint brush_footprint(const arbc::Affine& camera, const arbc::Affine& placement,
+                               arbc::Vec2 device_point, double comp_radius) {
+  BrushFootprint fp;
+  if (!std::isfinite(device_point.x) || !std::isfinite(device_point.y) ||
+      !std::isfinite(comp_radius) || !(comp_radius > 0.0)) {
+    return fp; // non-finite cursor / non-positive radius: safe no-op
+  }
+  const std::optional<arbc::Affine> cam_inv = camera.inverse();
+  const std::optional<arbc::Affine> place_inv = placement.inverse();
+  if (!cam_inv || !place_inv) {
+    return fp; // non-invertible camera or placement: safe no-op
+  }
+  const double place_scale = placement.max_scale(); // composition units per content px
+  if (!(place_scale > 0.0) || !std::isfinite(place_scale)) {
+    return fp; // zero-area / non-finite placement: safe no-op
+  }
+  const arbc::Vec2 comp = cam_inv->apply(device_point); // device -> composition
+  const arbc::Vec2 center = place_inv->apply(comp);     // composition -> content px
+  const double radius = comp_radius / place_scale;      // comp units -> content px
+  if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(radius) ||
+      !(radius > 0.0)) {
+    return fp; // any residual non-finite: safe no-op
+  }
+  fp.center = center;
+  fp.radius = radius;
+  fp.valid = true;
+  return fp;
+}
+
 arbc::Affine pan(const arbc::Affine& camera, double device_dx, double device_dy) {
   // Post-translate in device space: compose(translation(dx,dy), camera).apply(p)
   // == camera.apply(p) + (dx,dy). The linear part is untouched, so only the

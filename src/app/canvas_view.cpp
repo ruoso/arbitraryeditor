@@ -10,6 +10,7 @@
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
 #include <ace/scene/camera.hpp>
+#include <ace/scene/cell.hpp> // scene::cells / Cell / DetailSource / active_composition / brush_dab
 #include <ace/views/views.hpp>
 
 #include <arbc/base/geometry.hpp>
@@ -24,6 +25,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdio> // std::snprintf (brush size label)
 #include <optional>
 #include <string>
 #include <string_view>
@@ -106,6 +108,9 @@ CanvasView::CanvasView(commands::AppState& state, writer::WriterThread& writer,
 }
 
 void CanvasView::init() {
+  // Seed the brush size to a sensible default within the ~0.3-15% working band (D5): 5% of the
+  // shorter view edge, stored as the log-slider position so the slider opens there.
+  brush_slider_t_ = interact::brush_slider_from_fraction(0.05);
   // Bind the document's writer thread BEFORE the render thread exists: the host posts its own
   // WRITER-THREAD-ONLY work there (the per-document DamageRouter, every HostViewport ctor/dtor —
   // D-writer_thread-8), and the first of those happens on the render thread's first iteration.
@@ -377,8 +382,9 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
         dispatch_pan(p, in);
         break;
       case DispatchArm::Brush:
-        // Inert seam filled by editor.paint.brush (D-tool_dispatch-3).
-        dispatch_brush(p, in);
+        // editor.paint.brush (D-brush-1): a plain drag over the selected raster paints dabs into
+        // its editable facet; the size ring + numeric field are drawn over the pane.
+        dispatch_brush(p, in, pane_width, pane_height, pane_origin.x, pane_origin.y);
         break;
       case DispatchArm::Eyedropper:
         // Inert seam filled by editor.color.color (D-tool_dispatch-3).
@@ -487,13 +493,131 @@ void CanvasView::dispatch_pan(Presenter& p, const views::CanvasInput& in) {
   }
 }
 
-void CanvasView::dispatch_brush(Presenter& p, const views::CanvasInput& in) {
-  // An INERT seam (editor.canvas.tool_dispatch, D-tool_dispatch-3): editor.paint.brush fills this
-  // arm with the raster-dab stroke math. A plain Brush drag does nothing beyond the always-on
-  // viewport gestures, and deliberately does NOT fall back to selection (D20: the tool decides the
-  // drag). No state is touched until the paint leaf lands.
-  (void)p;
-  (void)in;
+void CanvasView::dispatch_brush(Presenter& p, const views::CanvasInput& in, int pane_w, int pane_h,
+                                float origin_x, float origin_y) {
+  // editor.paint.brush (D-brush-1/-3/-4). The always-on viewport gestures (wheel-zoom, Space-pan,
+  // grid, scale bar) have already run this frame; this arm owns only the plain-drag paint plus the
+  // size ring + field. All footprint/stroke math is pure L1 `interact`; the mutation is one
+  // `scene::brush_dab` through `apply_edit` (A4.1). The ring, slider and field are ImGui overlay
+  // only — they never composite into the Document (Constraint 7).
+
+  // The size log-slider + numeric field (D5): screen-locked, `% of the shorter view edge`, capped
+  // at 100%. A compact HUD at the pane's top-left; the ring is the source of truth, the number a
+  // handle. Stable ids so the e2e can drive it.
+  const double view_fraction = interact::brush_fraction_from_slider(brush_slider_t_);
+  {
+    // The slider's own value is the log position t (0..1); its readout is the RESULTING percentage
+    // (a literal — no printf conversion — so ImGui renders it verbatim). The DragFloat beside it is
+    // the editable numeric `%` field.
+    char size_label[16];
+    std::snprintf(size_label, sizeof(size_label), "%.1f", view_fraction * 100.0);
+    ImGui::SetCursorScreenPos(ImVec2(origin_x + 8.0F, origin_y + 8.0F));
+    ImGui::BeginGroup();
+    ImGui::PushItemWidth(140.0F);
+    float slider = static_cast<float>(brush_slider_t_);
+    if (ImGui::SliderFloat("##brush_size", &slider, 0.0F, 1.0F, size_label)) {
+      brush_slider_t_ = std::clamp(static_cast<double>(slider), 0.0, 1.0);
+    }
+    ImGui::SameLine();
+    float pct = static_cast<float>(view_fraction * 100.0);
+    if (ImGui::DragFloat("##brush_size_pct", &pct, 0.1F, 0.1F, 100.0F, "%.1f%%")) {
+      brush_slider_t_ = interact::brush_slider_from_fraction(static_cast<double>(pct) / 100.0);
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndGroup();
+  }
+
+  // The live outline ring at the cursor (D5, the source of truth). Screen-locked: its radius in
+  // device px is HALF the brush diameter = 0.5 · fraction · shorter-pane-edge, independent of zoom
+  // (so it holds its on-screen size across a wheel-zoom). Drawn whenever the pointer is over the
+  // pane, target or not (Constraint 4/7).
+  const double short_edge_px = static_cast<double>(std::min(pane_w, pane_h));
+  const float ring_radius_px = static_cast<float>(0.5 * view_fraction * short_edge_px);
+  if (in.hovered && ring_radius_px > 0.5F) {
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    const ImVec2 center(origin_x + in.focus_x, origin_y + in.focus_y);
+    draw_list->AddCircle(center, ring_radius_px, accent(220), 0, 1.5F);
+  }
+
+  // The paint stroke. Space-held hands the drag to the always-on pan (Constraint 1): never open or
+  // continue a stroke while Space is down. The composition-space brush radius (for the footprint)
+  // is the screen radius pulled back through the camera scale — brush_units maps the fraction over
+  // the view's shorter edge in COMPOSITION units.
+  const bool space = ImGui::IsKeyDown(ImGuiKey_Space);
+  const double cam_scale = p.camera.max_scale(); // device px per composition unit
+  const double short_edge_units =
+      (cam_scale > 0.0 && std::isfinite(cam_scale)) ? short_edge_px / cam_scale : 0.0;
+  const double comp_radius = 0.5 * interact::brush_units(view_fraction, short_edge_units);
+
+  if (space) {
+    // A Space-pan claimed the pointer: abandon any in-flight stroke so a released-elsewhere button
+    // cannot resume it, and deposit nothing.
+    p.brush_stroke_active = false;
+    p.brush_have_last = false;
+    return;
+  }
+
+  // Open the stroke on the press edge over the pane: resolve the selection-primary raster (through
+  // the generic PaintedRaster classification), capture its placement, and mint ONE gesture key for
+  // the whole stroke (D15). No writable target ⇒ no stroke (the ring above is still shown).
+  if (in.pressed && in.hovered) {
+    p.brush_stroke_active = false;
+    p.brush_have_last = false;
+    const commands::Selection& selection = state_.selection();
+    const arbc::ObjectId primary = selection.primary();
+    if (primary.valid()) {
+      const arbc::ObjectId comp =
+          scene::active_composition(state_.document(), state_.entered_composition());
+      for (const scene::Cell& cell : scene::cells(state_.document(), state_.registry(), comp)) {
+        if (cell.id == primary && cell.detail.source == scene::DetailSource::PaintedRaster) {
+          p.brush_stroke_active = true;
+          p.brush_stroke_cell = cell.id;
+          p.brush_stroke_placement = cell.placement;
+          p.brush_stroke_key = state_.next_gesture_key();
+          break;
+        }
+      }
+    }
+  }
+
+  // Nothing to paint into (or the stroke never opened): the ring is feedback, the drag is inert.
+  if (!p.brush_stroke_active) {
+    return;
+  }
+
+  // A held/released button drives the dabs this frame. Map the cursor device point to content px
+  // through the composed affine; a degenerate camera/placement yields an invalid footprint — a safe
+  // no-op, no NaN written (Constraint 5). `in.down` is true while the drag is held; `in.released`
+  // is the final edge (a click with no motion still deposits the press dab).
+  if (in.down || in.released) {
+    const interact::BrushFootprint fp = interact::brush_footprint(
+        p.camera, p.brush_stroke_placement, arbc::Vec2{in.focus_x, in.focus_y}, comp_radius);
+    if (fp.valid) {
+      const arbc::Vec2 from = p.brush_have_last ? p.brush_last_content : fp.center;
+      const std::vector<arbc::Vec2> centers = interact::stroke_dabs(from, fp.center, fp.radius);
+      if (!centers.empty()) {
+        const double inner = fp.radius * interact::k_brush_softness;
+        const double outer = fp.radius;
+        const arbc::WorkingPixel color = brush_color_;
+        const arbc::ObjectId cell = p.brush_stroke_cell;
+        const std::uint64_t key = p.brush_stroke_key;
+        // ONE writer-thread commit for this frame's dabs, coalesced under the stroke key (A4.1 /
+        // D-brush-3). Every frame of the stroke shares the key, so the whole stroke is one entry.
+        apply_edit([this, cell, centers, inner, outer, color, key] {
+          scene::brush_dab(state_.document(), state_.registry(), cell, centers, inner, outer, color,
+                           key);
+        });
+        p.brush_last_content = fp.center;
+        p.brush_have_last = true;
+      }
+    }
+  }
+
+  // Close the stroke on the release edge: the next press mints a fresh key (a new undo step).
+  if (in.released) {
+    p.brush_stroke_active = false;
+    p.brush_have_last = false;
+  }
 }
 
 void CanvasView::dispatch_eyedropper(Presenter& p, const views::CanvasInput& in) {

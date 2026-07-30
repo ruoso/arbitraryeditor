@@ -13,6 +13,7 @@
 #include <arbc/base/geometry.hpp>
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
+#include <arbc/media/pixel_traits.hpp> // arbc::WorkingPixel (active brush color)
 
 #include <chrono>
 #include <cstddef>
@@ -315,6 +316,20 @@ private:
     // release / lost activation.
     bool marquee_active = false;
     arbc::Vec2 marquee_anchor{}; // the press anchor in COMPOSITION units
+    // --- brush stroke gesture (editor.paint.brush; D-brush-3) --------------------
+    // The in-flight brush stroke, if any: a press-drag-release that composites dabs into ONE
+    // raster cell, every per-frame commit stamped with the SAME `brush_stroke_key` so libarbc
+    // folds the whole stroke into one journal entry (D15). `brush_stroke_active` is false when no
+    // stroke is in flight; `brush_stroke_cell` is the resolved raster content painted this stroke
+    // (captured at press, so a mid-stroke selection change cannot redirect it);
+    // `brush_last_content` is the previous dab center in content px (this frame's segment start),
+    // valid only once `brush_have_last` is set.
+    bool brush_stroke_active = false;
+    std::uint64_t brush_stroke_key = 0;
+    arbc::ObjectId brush_stroke_cell;
+    arbc::Affine brush_stroke_placement = arbc::Affine::identity(); // captured at press
+    arbc::Vec2 brush_last_content{};
+    bool brush_have_last = false;
   };
 
   // Draw THIS canvas's camera picker (Viewport | shots from scene::cameras) as a compact
@@ -383,12 +398,18 @@ private:
   // double-applied. No-op when no drag is in flight.
   void dispatch_pan(Presenter& p, const views::CanvasInput& in);
 
-  // The Brush-tool arm (editor.canvas.tool_dispatch, D-tool_dispatch-3): an INERT named seam the
-  // downstream `editor.paint.brush` fills (a dab into `org.arbc.raster`). A plain drag does nothing
-  // beyond the always-on viewport gestures — deliberately NOT a selection fallback, because D20
-  // makes the active tool decide the drag (a silent select-fallback would make "Brush is active"
-  // indistinguishable from Select until the paint leaf lands).
-  void dispatch_brush(Presenter& p, const views::CanvasInput& in);
+  // The Brush-tool arm (editor.paint.brush; D-brush-1/-3): a plain left-button drag paints soft
+  // round dabs into the selection-primary `org.arbc.raster` cell's editable facet, coalesced into
+  // ONE undo step, while a live size ring + a log-slider/numeric size field are drawn over the
+  // pane. Screen-locked size (D5): the value is `% of the shorter view edge`. The cursor path is
+  // mapped device → composition (`p.camera`) → content px (the cell placement) by pure L1
+  // `interact` math; the dab is committed through `scene::brush_dab` inside `apply_edit` (A4.1).
+  // With no writable raster selected the ring is still shown but the drag paints nothing
+  // (Constraint 4). Deliberately NOT a selection fallback (D20: the tool decides the drag).
+  // `pane_w`/`pane_h` are the pane's device size (the screen-lock basis); `origin_x`/`origin_y` are
+  // its top-left in screen pixels.
+  void dispatch_brush(Presenter& p, const views::CanvasInput& in, int pane_w, int pane_h,
+                      float origin_x, float origin_y);
 
   // The Eyedropper-tool arm (editor.canvas.tool_dispatch, D-tool_dispatch-3): the inert twin of
   // `dispatch_brush`, filled by `editor.color.color` (sample sRGB through the active camera). Inert
@@ -421,6 +442,14 @@ private:
   // presenter is dropped. Never serialized, never a transaction, never read by
   // `commands`/`scene`/`project` (D15/D19).
   std::string focused_view_id_;
+  // --- brush size + color (editor.paint.brush; D5 / D-brush-4/-6) ---------------
+  // Session state SHARED across this view's panes (a brush is a global tool, not per-canvas): the
+  // size log-slider position (0..1, mapped to a `% of the shorter view edge` view-fraction by
+  // `interact::brush_fraction_from_slider`, screen-locked D5) and the active paint color
+  // (premultiplied-linear working floats, defaulting to OPAQUE BLACK — editor.panels.color writes
+  // this field within its own charter, D-brush-6). Never serialized, never a transaction.
+  double brush_slider_t_ = 0.0; // seeded in the ctor from a default fraction
+  arbc::WorkingPixel brush_color_ = {0.0F, 0.0F, 0.0F, 1.0F};
 };
 
 } // namespace ace::app
