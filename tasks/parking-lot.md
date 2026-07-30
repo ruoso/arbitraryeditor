@@ -148,7 +148,11 @@ confirmed by `tasks/refinements/canvas/arbc_router_split_pin.md` (re-defer 2026-
 successor tag exists, `DamageRouter::register_sink` still welded to ctor at v0.4.0);
 re-confirmed by `tasks/refinements/editor.canvas/arbc_router_split_pin.md` (re-defer
 2026-07-29 — second independent verification: latest tag still `v0.4.0`, no
-`install_router` flag and no `attach_router`/`detach_router` pair on any branch).
+`install_router` flag and no `attach_router`/`detach_router` pair on any branch);
+re-confirmed again by `tasks/refinements/editor.canvas/arbc_router_split_pin.md` (re-defer
+2026-07-30 — third independent verification: `git fetch --all --tags` pulled nothing newer,
+latest tag still `v0.4.0`, no `attach_router`/`detach_router`/`install_router` symbol on any
+branch or in any commit in history, all refs grepped).
 
 **Trigger:** a new libarbc release that moves `DamageRouter::register_sink` (and `Document::set_damage_sink`) out of `HostViewport` ctor/dtor into the `attach_settler()`/`detach_settler()` pair (or a dedicated `attach_router`/`detach_router()` pair), gated by an `install_settler`-style flag.
 

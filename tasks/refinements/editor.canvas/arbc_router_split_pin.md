@@ -370,3 +370,11 @@ summary rather than encoded as a WBS task.
 - Parking-lot entry "DamageRouter registrant split — libarbc arbc#25 successor needed" updated to record this second re-defer (2026-07-29).
 - CI flake fixed in same commit: `tests/multi_canvas_e2e_test.cpp` snapshot-timing race (pre-existing, unrelated to this task) repaired by the fixer sub-agent — `grab_frame` now refreshes the both-open snapshot to the latest frame rather than racing the first post-focus frame.
 - This leaf stays uncompleted (no `complete 100`) until the upstream successor tag ships.
+
+**Re-deferred again** — 2026-07-30.
+
+- Third independent verification of upstream precondition (Constraint 1): latest tag on `ruoso/arbitrarycomposer` remains `v0.4.0`; `git fetch --all --tags` pulled nothing newer; no `attach_router`/`detach_router`/`install_router` symbol on any branch or in any commit in history (all refs grepped).
+- `DamageRouter::register_sink` / `Document::set_damage_sink` remain unconditionally ctor-welded (`host_viewport.cpp:66-71`), gated only on `config.router != nullptr` — no `install_settler`-style flag for the router registrant.
+- No edits landed: pin bump and `arbc_pin_test.cpp` router-registrant witnesses cannot be written against v0.4.0; a `static_assert` naming the non-existent deferral API would fail to compile (Constraint 4 / Acceptance).
+- Parking-lot entry updated to record this third re-defer (2026-07-30).
+- This leaf stays uncompleted (no `complete 100`) until the upstream successor tag ships.
