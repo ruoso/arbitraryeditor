@@ -639,8 +639,15 @@ task editor "Editor — host GUI over libarbc" {
     task color "sRGB picker; eyedropper (through camera); linear boundary" {
       effort 2d
       allocate team
+      complete 100
       depends editor.dock.view_registry, editor.paint.brush, editor.canvas.tool_dispatch
-      note "A conventional sRGB/HSV/hex picker + straight-alpha opacity; the editor is the invisible translator to/from the library's premultiplied-linear working space. Eyedropper samples the displayed sRGB through the active camera. Design: D10. Refinement: tasks/refinements/color.md"
+      note "A conventional sRGB/HSV/hex picker + straight-alpha opacity; the editor is the invisible translator to/from the library's premultiplied-linear working space. Eyedropper samples the displayed sRGB through the active camera. Design: D10. Refinement: tasks/refinements/panels/color.md"
+    }
+    task color_eyedrop_cell "Eyedropper modifier: active-cell own straight color via isolated render" {
+      effort 1d
+      allocate team
+      depends editor.panels.color
+      note "D10 eyedropper modifier that samples the active cell's own straight color (not the composite): render only the selected cell in isolation through the active camera at the sample point, unpremultiply → linear_to_srgb8 → set_active_color, bound to the eyedropper modifier (e.g. Alt-click). Separable from the base composited eyedropper (editor.panels.color) because it needs isolated single-cell rendering (siblings hidden). Design: D10 (docs/00-design.md:477). Source-of-debt: tasks/refinements/panels/color.md"
     }
     task history "History view/panel: journal entry list + click-to-jump" {
       effort 2.5d

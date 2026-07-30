@@ -2,6 +2,7 @@
 #include <ace/app/canvas_view.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/commands/cells.hpp>
+#include <ace/commands/color.hpp>
 #include <ace/dockmodel/view_registry.hpp>
 #include <ace/gl/gl.hpp>
 #include <ace/interact/interact.hpp>
@@ -598,7 +599,12 @@ void CanvasView::dispatch_brush(Presenter& p, const views::CanvasInput& in, int 
       if (!centers.empty()) {
         const double inner = fp.radius * interact::k_brush_softness;
         const double outer = fp.radius;
-        const arbc::WorkingPixel color = brush_color_;
+        // The canonical active color, derived to premultiplied-linear at the D10 boundary
+        // (editor.panels.color / D-color-5): the placeholder `brush_color_` read is retired for the
+        // one project-level seam every paint consumer shares. Read into a local so the writer
+        // closure below captures a COPY — the `WorkingPixel` crosses to the writer thread by value,
+        // no shared mutable color state (Constraint 6).
+        const arbc::WorkingPixel color = state_.active_working_color();
         const arbc::ObjectId cell = p.brush_stroke_cell;
         const std::uint64_t key = p.brush_stroke_key;
         // ONE writer-thread commit for this frame's dabs, coalesced under the stroke key (A4.1 /
@@ -621,11 +627,21 @@ void CanvasView::dispatch_brush(Presenter& p, const views::CanvasInput& in, int 
 }
 
 void CanvasView::dispatch_eyedropper(Presenter& p, const views::CanvasInput& in) {
-  // An INERT seam (editor.canvas.tool_dispatch, D-tool_dispatch-3): editor.color.color fills this
-  // arm with the sRGB-through-the-active-camera sample. Inert twin of `dispatch_brush` — the tool,
-  // not a fallback, decides the drag (D20).
-  (void)p;
-  (void)in;
+  // The Eyedropper tool (editor.panels.color / D-color-4, D10 :287-290): on a canvas press/drag,
+  // sample the COMPOSITED result as displayed through this pane's active viewport camera at the
+  // cursor, decode that premultiplied-linear sample back to sRGB, and set the canonical active
+  // color. D10 is explicit that this is "a render through a camera, not a lookup", so the sampler
+  // is the L1 byte-exact `commands::sample_composited_color` over `arbc::render_offline` — this L4
+  // arm only supplies `Presenter::camera` + the click point. Sampling on the held/released edges
+  // (like `dispatch_brush`'s dab edges) makes a click sample the pixel under it; the drag is the
+  // tool's own (D20), never a Select fallback. The active-cell own-straight-color modifier is
+  // deferred to `editor.panels.color_eyedrop_cell`.
+  if (!(in.down || in.released)) {
+    return;
+  }
+  const arbc::WorkingPixel sampled =
+      commands::sample_composited_color(state_.document(), p.camera, in.focus_x, in.focus_y);
+  state_.set_active_color(commands::working_to_srgb(sampled));
 }
 
 void CanvasView::draw_frame_gizmos(std::string_view view_id, Presenter& p,

@@ -9,7 +9,9 @@
 // to the offline reference + the committed golden. The final case drives the REAL shared
 // WorkerPool (worker threads) through the full add->render->edit->remove->teardown
 // lifecycle on a spawned render thread — the escalated ASan/TSan concurrency target.
+#include <ace/commands/app_state.hpp>
 #include <ace/commands/cells.hpp>
+#include <ace/commands/color.hpp>
 #include <ace/commands/export.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/interact/pick.hpp>
@@ -2937,4 +2939,93 @@ TEST_CASE("canvas_host: a stream of UI-thread brush-dab commits under one coales
 
   host.stop();
   handle->join();
+}
+
+TEST_CASE("canvas_host: a stream of active-color paints runs clean against the render read "
+          "(panels.color TSan anchor)") {
+  // editor.panels.color (D-color-1/-6): the UI thread drives `AppState::set_active_color` +
+  // `active_working_color()` — the picker→paint path — and feeds the DERIVED `WorkingPixel` into
+  // `apply_edit(brush_dab)` on the writer thread while the render thread walks the same document.
+  // The color crosses to the writer as a COPIED value (the closure captures `color` by value), so
+  // there is no shared mutable color state across threads: the UI thread alone touches
+  // `active_color_` (it is blocked inside `submit_sync` while the writer runs), and the
+  // writer/render threads never read it. A FLAT raster paint (no nested render), so — exactly like
+  // the brush-dab anchor above — the arbc-nested-render-worker-detach-race inline-pool caveat does
+  // not apply and the REAL interactive pool is correct. No new lane, no new suppression.
+  //
+  // The AppState is BUILT ON the writer thread (the first write binds the document's writer
+  // identity for life, D-writer_thread-6), held in an `optional` so the move ctor — not the deleted
+  // move assignment — places it, and it is destroyed while the writer still lives (declared before
+  // it).
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+
+  std::optional<ace::commands::AppState> state_opt;
+  arbc::ObjectId raster;
+  writer.submit_sync([&] {
+    auto created = ace::project::create_project(fs, scratch.root / "color");
+    if (!created.has_value()) {
+      return; // asserted on the main thread below (Catch2 is not thread-safe here)
+    }
+    state_opt.emplace(std::move(*created));
+    ace::commands::AppState& state = *state_opt;
+    state.document().add_composition(static_cast<double>(k_w), static_cast<double>(k_h));
+    // An opaque backdrop so the pane composites NON-blank content and publishes its first frame.
+    ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid", "0.15,0.2,0.25,1",
+                         arbc::Affine::identity());
+    const auto added = ace::scene::add_cell(state.document(), state.registry(), "org.arbc.raster",
+                                            "32x32", arbc::Affine::translation(8.0, 8.0));
+    if (added.has_value()) {
+      raster = *added;
+    }
+  });
+  REQUIRE(state_opt.has_value());
+  REQUIRE(raster.valid());
+  ace::commands::AppState& state = *state_opt;
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", state.document());
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  const std::size_t cursor_before = state.document().journal().cursor();
+
+  // Stream the paints: each round the UI thread picks a fresh active color and derives the working
+  // pixel, then posts one dab under ONE gesture key (a stroke). The derived color is captured BY
+  // VALUE into the writer closure — the cross-thread copy the boundary relies on.
+  constexpr int k_dabs = 64;
+  const std::uint64_t key = 77;
+  for (int i = 0; i < k_dabs; ++i) {
+    state.set_active_color(ace::commands::SrgbColor{static_cast<std::uint8_t>(10 + i),
+                                                    static_cast<std::uint8_t>(20 + i),
+                                                    static_cast<std::uint8_t>(30 + i), 255});
+    const arbc::WorkingPixel color = state.active_working_color(); // UI-thread read; copied below
+    const std::vector<arbc::Vec2> centers{arbc::Vec2{4.0 + static_cast<double>(i % 24), 16.0}};
+    apply_edit(writer, host, [&, color] {
+      ace::scene::brush_dab(state.document(), state.registry(), raster, centers, 2.0, 4.0, color,
+                            key);
+    });
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  // The whole burst folded to ONE coalesced journal entry (D15), and the final pixels are finite.
+  CHECK(state.document().journal().cursor() == cursor_before + 1);
+  auto* raster_content = dynamic_cast<arbc::RasterContent*>(state.document().resolve(raster));
+  REQUIRE(raster_content != nullptr);
+  const arbc::WorkingPixel final_px = raster_content->store().base_table()->pixel(0, 8, 16);
+  for (const float ch : final_px) {
+    CHECK(std::isfinite(ch));
+  }
+
+  host.stop();
+  handle->join();
+  // `host` is declared AFTER `state_opt`, so it tears down FIRST (before the document it borrows
+  // and the writer identity that document is bound to) — the writer-outlives-host /
+  // host-before-document order the sibling anchors rely on.
 }

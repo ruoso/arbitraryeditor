@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ace/commands/color.hpp>
 #include <ace/commands/selection.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/process_launcher.hpp>
@@ -162,6 +163,26 @@ public:
   const std::optional<arbc::ObjectId>& hovered_object() const { return hovered_object_; }
   void set_hovered(std::optional<arbc::ObjectId> id) { hovered_object_ = id; }
 
+  // The canonical active PAINT color (editor.panels.color / D-color-1): the ONE project-level
+  // foreground color every paint consumer reads (editor.paint.brush now; paint_res/retouch_stack
+  // later) and the Color picker edits. Stored as sRGB straight-alpha — the user-space truth (D10 /
+  // D-color-2), never premultiplied/linear (D10 :279) — exactly the shape of `selection_` /
+  // `entered_composition_` / `hovered_object_` above: PROJECT-LEVEL transient UI-thread-only
+  // session state, never persisted, never journaled (D15), never a transaction, moving cleanly with
+  // the defaulted move-construction. Defaults to opaque black, byte-identical to the brush's
+  // shipped placeholder, so boot behaviour is unchanged until the user picks a color (Constraint
+  // 3). The writer thread never touches it: `active_working_color()` derives a `WorkingPixel` the
+  // paint call COPIES by value across the writer boundary, so no shared mutable color state crosses
+  // threads (Constraint 6 / D-color-2).
+  const SrgbColor& active_color() const { return active_color_; }
+  void set_active_color(SrgbColor color) { active_color_ = color; }
+
+  // The active color DERIVED into a premultiplied-linear `arbc::WorkingPixel` at the boundary
+  // (D-color-2): the value paint consumers read (never the stored sRGB). Wraps the `commands`
+  // conversion pair over the library primitives — no hand-rolled transfer function. A pure read;
+  // the default is `{0,0,0,1}` (opaque black), matching the brush placeholder it replaces.
+  arbc::WorkingPixel active_working_color() const;
+
   // The History panel's whole per-frame model, read ANY-THREAD from the library's published
   // history projection (arch A18, as amended by editor.canvas.history_snapshot_adopt). Retires
   // the host-side publisher mirror: `journal().history()` is the library's any-thread immutable
@@ -267,6 +288,10 @@ private:
   // `entered_composition_`: never persisted, never journaled, moves cleanly with the defaulted
   // move-construction, UI-thread-only. `nullopt` = the pointer is over no object.
   std::optional<arbc::ObjectId> hovered_object_;
+  // The canonical active paint color (D-color-1). Transient session state like `selection_` /
+  // `hovered_object_`: never persisted, never journaled, UI-thread-only, moves cleanly with the
+  // defaulted move-construction. Defaults to opaque black (the `SrgbColor` default).
+  SrgbColor active_color_;
   bool rebuilt_from_canonical_ = false;
   // The D28 sidecar verdict, ferried off the bootstrap `OpenedProject` (never recomputed): true
   // when a mapped reopen recovered a document the `workspace/published.rev` sidecar proved in

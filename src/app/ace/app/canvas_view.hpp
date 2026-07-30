@@ -442,14 +442,17 @@ private:
   // presenter is dropped. Never serialized, never a transaction, never read by
   // `commands`/`scene`/`project` (D15/D19).
   std::string focused_view_id_;
-  // --- brush size + color (editor.paint.brush; D5 / D-brush-4/-6) ---------------
+  // --- brush size (editor.paint.brush; D5 / D-brush-4) --------------------------
   // Session state SHARED across this view's panes (a brush is a global tool, not per-canvas): the
   // size log-slider position (0..1, mapped to a `% of the shorter view edge` view-fraction by
-  // `interact::brush_fraction_from_slider`, screen-locked D5) and the active paint color
-  // (premultiplied-linear working floats, defaulting to OPAQUE BLACK — editor.panels.color writes
-  // this field within its own charter, D-brush-6). Never serialized, never a transaction.
+  // `interact::brush_fraction_from_slider`, screen-locked D5). Never serialized, never a
+  // transaction.
+  //
+  // The active paint color is NO LONGER a private field here (editor.panels.color / D-color-1/-5):
+  // the placeholder `brush_color_` D-brush-6 reserved has been retired for the canonical
+  // `commands::AppState` active color, which `dispatch_brush` reads through
+  // `state_.active_working_color()` — the one project-level seam every paint consumer shares.
   double brush_slider_t_ = 0.0; // seeded in the ctor from a default fraction
-  arbc::WorkingPixel brush_color_ = {0.0F, 0.0F, 0.0F, 1.0F};
 };
 
 } // namespace ace::app

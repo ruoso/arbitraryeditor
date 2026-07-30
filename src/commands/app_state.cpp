@@ -98,6 +98,12 @@ AppState::AppState(project::OpenedProject opened)
   // for a journal with no entries, so the History panel already loads a valid pointer on frame 0.
 }
 
+arbc::WorkingPixel AppState::active_working_color() const {
+  // The premultiplied-linear derivation of the stored sRGB truth, at exactly the D10 boundary
+  // (D-color-2): a pure read wrapping the `commands` conversion over the library primitives.
+  return srgb_to_working(active_color_);
+}
+
 DispatchOutcome dispatch(AppState& state, const Command& command) {
   arbc::Document& doc = state.document();
   const std::size_t before = doc.journal().depth();

@@ -1,4 +1,5 @@
 #include <ace/app/canvas_view.hpp>
+#include <ace/app/color_panel.hpp>
 #include <ace/app/export_wiring.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/inspector_panel.hpp>
@@ -384,6 +385,15 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::views::register_view_body(
         ace::dockmodel::ViewType::Overview,
         [&overview](std::string_view view_id) { overview.draw(view_id); });
+    // The Color view body is the conventional sRGB picker (editor.panels.color; D10/§7): an
+    // `ImGui::ColorPicker4` editing the canonical `AppState` active paint color at the D10 sRGB↔
+    // premultiplied-linear boundary, so the brush (and future paint tools) paint the picked color.
+    // It captures the one AppState& and is cleared on exit like the other bodies (the seam is
+    // process-global).
+    ace::app::ColorPanel color_panel(app_state);
+    ace::views::register_view_body(
+        ace::dockmodel::ViewType::Color,
+        [&color_panel](std::string_view view_id) { color_panel.draw(view_id); });
     // The dockspace host (editor.dock.view_registry) owns the shell's whole draw:
     // it renders each open view by its instance id and syncs the tab ✕ back into
     // the authoritative DockLayout.
@@ -535,6 +545,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::views::register_view_body(ace::dockmodel::ViewType::Inspector, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Layers, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Overview, {});
+    ace::views::register_view_body(ace::dockmodel::ViewType::Color, {});
     ace::views::register_view_body(ace::dockmodel::ViewType::Export, {});
     // The export job reads the one owned `Document`, so it must be off the road before
     // anything below runs (Constraint 8): cancel between items, then JOIN — never

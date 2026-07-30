@@ -287,13 +287,13 @@ The overview ships provisional idiom gestures (double-click-to-enter, zoom-contr
 
 ---
 
-## Authoritative active paint color home and `editor.panels.color` dependency edge
+## Active color foreground/background slot + fg↔bg swap
 
-**Source:** `tasks/refinements/paint/brush.md` (editor.paint.brush, 2026-07-30) — Open questions / D-brush-6.
+**Source:** `tasks/refinements/panels/color.md` (editor.panels.color, 2026-07-30) — D-color-5.
 
-**Trigger:** `editor.panels.color` is refined and the color-panel refinement_writer decides where the active `WorkingPixel` field should live.
+**Trigger:** a paint tool that reads a background color is scheduled (e.g. an eraser or fill tool that needs a distinct background value), or a design row in `docs/00-design.md` explicitly materalizes the foreground/background pair.
 
-`editor.paint.brush` ships an opaque-black default `WorkingPixel` on a brush-owned session field (`Presenter::brush_color`) in `src/app/canvas_view.cpp`. D-brush-6 deferred the structural question: whether `editor.panels.color` writes that field directly (the simplest path — color panel knows the canvas view's Presenter) or the field is hoisted to a shared home (e.g. beside `dockmodel::ToolSelection`) is a call best made when the color panel is refined. Additionally, the `editor.panels.color` task in the WBS (`tasks/00-editor.tji:642`) lists `editor.paint.brush` as a dependency — once the color panel ships, a WBS owner should verify that edge is correct and remove it if the color panel initializes the active-color field independently. No WBS task — this is a structural design call for the color-panel refinement owner.
+`editor.panels.color` ships a single foreground active color on `commands::AppState`. D-color-5 explicitly defers a foreground/background pair + swap: the v1 modal set is closed (`{Select, Brush, Eyedropper, Pan}`) with no eraser or fill that reads a background, so materializing the pair now is machinery ahead of a requirement. When a consumer exists, adding a background slot is a small, edge-free extension. No WBS task — enter the WBS when a concrete product need exists.
 
 ---
 
