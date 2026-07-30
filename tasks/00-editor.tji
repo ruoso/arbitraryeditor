@@ -632,8 +632,9 @@ task editor "Editor — host GUI over libarbc" {
     task overview_gizmo "Full scale/rotate/shear gizmo on schematic overview boxes" {
       effort 2d
       allocate team
+      complete 100
       depends !overview, editor.cells.gizmo
-      note "Full 8-handle scale/rotate/shear transform gizmo on schematic boxes in the overview, reusing the shipped interact cell-gizmo handle math (editor.cells.gizmo) fed through the overview transform. §6 makes the overview the coarse-arrangement surface (move + z-order shipped in editor.panels.overview); the full gizmo-in-overview is real, separable draw+dispatch work. Source-of-debt: tasks/refinements/editor/overview.md. Design: docs/00-design.md D7/D8/§6."
+      note "Full 8-handle scale/rotate/shear transform gizmo on schematic boxes in the overview, reusing the shipped interact cell-gizmo handle math (editor.cells.gizmo) fed through the overview transform. §6 makes the overview the coarse-arrangement surface (move + z-order shipped in editor.panels.overview); the full gizmo-in-overview is real, separable draw+dispatch work. Source-of-debt: tasks/refinements/editor/overview.md. Design: docs/00-design.md D7/D8/§6. Refinement: tasks/refinements/editor.panels/overview_gizmo.md"
     }
     task color "sRGB picker; eyedropper (through camera); linear boundary" {
       effort 2d

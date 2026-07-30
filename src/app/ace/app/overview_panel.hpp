@@ -1,11 +1,15 @@
 #pragma once
 
+#include <ace/interact/interact.hpp> // interact::CellHandle (the gizmo handle vocabulary)
+
 #include <arbc/base/geometry.hpp>
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 
 #include <optional>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace ace::commands {
 class AppState;
@@ -66,6 +70,37 @@ private:
     arbc::Vec2 anchor_comp;
   };
   MarqueeGesture marquee_;
+
+  // The in-progress transform-gizmo handle-drag (editor.panels.overview_gizmo; D-overview_gizmo-5):
+  // a sibling of MoveGesture/MarqueeGesture — UI-thread-only session state (Constraint 10), never
+  // journaled. Armed when a press over the selected box's gizmo hits a handle; the drag previews
+  // the shipped-verb transform UI-only and commits ONE `transform_cells_command` on release (D8,
+  // one undo per gesture). `group` selects the single-cell path vs the >=2-selection union-box
+  // path. No transform arithmetic lives here — every handle/transform verb is the shipped L1
+  // `interact` (D-overview_gizmo-1).
+  struct GizmoGesture {
+    bool active = false;
+    bool group = false;
+    bool moved = false; // a genuine drag happened (else the release is a click)
+    interact::CellHandle handle = interact::CellHandle::None;
+    arbc::Vec2 grab_comp{}; // the pointer in composition units at grab
+    arbc::Vec2 pivot{};     // the transform pivot in composition units at grab
+    // Single-cell path:
+    arbc::ObjectId content;                        // the selection key
+    arbc::ObjectId layer;                          // the placing layer (the transform target)
+    arbc::Affine start = arbc::Affine::identity(); // the placement at grab (the preview base)
+    arbc::Rect extent{};                           // the cell's content extent at grab
+    // Group path: every selected member's (layer, start placement) at grab + the union box.
+    std::vector<std::pair<arbc::ObjectId, arbc::Affine>> group_start;
+    arbc::Rect group_extent{};
+  };
+  GizmoGesture gizmo_;
+
+  // The persistent draggable gizmo pivot (UI session state): seeded to the box/union center, moved
+  // by a Pivot-handle drag, reset when the gizmo target changes (mirrors CanvasView's cell pivot).
+  std::optional<arbc::Vec2> gizmo_pivot_;
+  std::optional<arbc::ObjectId> gizmo_pivot_for_;   // the single-cell key it was seeded for
+  std::optional<arbc::Rect> gizmo_group_pivot_for_; // the union box it was seeded for
 };
 
 } // namespace ace::app

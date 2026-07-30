@@ -20,7 +20,9 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ace::app {
@@ -294,6 +296,152 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
   // degenerate (already guarded, but keep the total contract).
   const std::optional<arbc::Vec2> mouse_comp = x.to_comp(ImGui::GetIO().MousePos);
 
+  // --- Transform gizmo target resolution (editor.panels.overview_gizmo; D-overview_gizmo-5) ------
+  // The scope-confined pick set the gizmo hit-tests over — the SAME set the overview's
+  // click/marquee use — so scope confinement + camera-lock-while-entered fall out for free (D29).
+  // The gizmo shows for exactly ONE selected bounded CELL (single path) or a >=2 selection with a
+  // bounded union (group path); cameras keep shipped move-only (D-overview_gizmo-4/7), an unbounded
+  // cell has no box. Every handle/transform/snap verb below is the shipped L1 `interact`
+  // (D-overview_gizmo-1) — no transform arithmetic lives in this panel.
+  const std::vector<interact::PickTarget> gizmo_targets =
+      interact::pick_targets(document, registry, entered);
+  const commands::Selection& sel = state_.selection();
+  const interact::PickTarget* gizmo_cell = nullptr;
+  std::optional<arbc::Rect> gizmo_union;
+  if (sel.size() == 1) {
+    for (const interact::PickTarget& t : gizmo_targets) {
+      if (t.id == sel.primary() && t.kind == interact::PickKind::Cell && t.extent) {
+        gizmo_cell = &t;
+        break;
+      }
+    }
+  } else if (sel.size() >= 2) {
+    gizmo_union = interact::selected_extent(gizmo_targets, sel.items());
+    if (gizmo_union && gizmo_union->empty()) {
+      gizmo_union.reset();
+    }
+  }
+
+  // The persistent draggable pivot (UI session state): seeded to the box/union center, reset when
+  // the gizmo target changes; a Pivot-handle drag moves it in pass 2 (mirrors CanvasView).
+  std::optional<arbc::Vec2> gizmo_pivot;
+  if (gizmo_cell != nullptr) {
+    if (!gizmo_pivot_ || gizmo_pivot_for_ != sel.primary()) {
+      gizmo_pivot_ = interact::cell_pivot(gizmo_cell->placement, *gizmo_cell->extent);
+      gizmo_pivot_for_ = sel.primary();
+      gizmo_group_pivot_for_.reset();
+    }
+    gizmo_pivot = gizmo_pivot_;
+  } else if (gizmo_union) {
+    if (!gizmo_pivot_ || gizmo_group_pivot_for_ != *gizmo_union) {
+      gizmo_pivot_ = interact::cell_pivot(arbc::Affine::identity(), *gizmo_union);
+      gizmo_group_pivot_for_ = *gizmo_union;
+      gizmo_pivot_for_.reset();
+    }
+    gizmo_pivot = gizmo_pivot_;
+  } else {
+    gizmo_pivot_.reset();
+    gizmo_pivot_for_.reset();
+    gizmo_group_pivot_for_.reset();
+  }
+
+  // The shipped scale/rotate/shear composers, driven verbatim (Body/Pivot handled inline where the
+  // snap-guides / pivot-follow live). `pv` is the gesture pivot, `ptr` the composition-space
+  // pointer.
+  const auto compose_srs = [&](interact::CellHandle handle, const arbc::Affine& start,
+                               const arbc::Rect& ext, arbc::Vec2 pv, arbc::Vec2 ptr, bool shift,
+                               bool alt, bool cmd) -> arbc::Affine {
+    if (handle == interact::CellHandle::Rotate) {
+      return interact::rotate_cell(start, pv, interact::drag_angle(pv, gizmo_.grab_comp, ptr),
+                                   shift);
+    }
+    if (interact::is_cell_edge(handle) && cmd) {
+      return interact::shear_cell(start, ext, handle, ptr, pv); // Cmd/Ctrl + edge = shear (§6)
+    }
+    if (interact::is_cell_scale_handle(handle)) {
+      return interact::scale_cell(start, ext, handle, ptr, pv, shift, alt);
+    }
+    return start;
+  };
+  // The Body move, snapped to the OTHER placed objects (object-only — the overview draws no grid,
+  // D-grid-3); Cmd/Ctrl bypasses (§6:258).
+  const auto compose_body = [&](const arbc::Affine& start, const arbc::Rect& ext, arbc::Vec2 ptr,
+                                bool cmd, std::span<const interact::PickTarget> others) {
+    const arbc::Affine moved =
+        interact::move_cell(start, ptr.x - gizmo_.grab_comp.x, ptr.y - gizmo_.grab_comp.y);
+    return interact::snap_placement(moved, ext, others, corner_tol, cmd);
+  };
+  // The gesture result at composition-space `ptr`: the (layer, placement) batch to preview/commit.
+  // Empty for a pivot-move or an identity gesture (Constraint 5). `guides_out`/`union_out` are
+  // optional pass-2 draw outputs. Single-cell yields a 0/1-entry batch; group composes the ONE
+  // union delta onto every captured member via `group_transform` (D-overview_gizmo-6).
+  const auto gesture_batch = [&](arbc::Vec2 ptr, bool shift, bool alt, bool cmd,
+                                 std::vector<interact::SnapGuide>* guides_out,
+                                 arbc::Affine* union_out) -> std::vector<commands::LayerTransform> {
+    std::vector<commands::LayerTransform> batch;
+    if (gizmo_.handle == interact::CellHandle::Pivot) {
+      return batch;
+    }
+    if (!gizmo_.group) {
+      std::vector<interact::PickTarget> others;
+      for (const interact::PickTarget& t : gizmo_targets) {
+        if (t.id != gizmo_.content) {
+          others.push_back(t);
+        }
+      }
+      arbc::Affine result = gizmo_.start;
+      if (gizmo_.handle == interact::CellHandle::Body) {
+        const interact::SnapResult snap =
+            compose_body(gizmo_.start, gizmo_.extent, ptr, cmd, others);
+        result = snap.placement;
+        if (guides_out != nullptr) {
+          *guides_out = snap.guides;
+        }
+      } else {
+        result = compose_srs(gizmo_.handle, gizmo_.start, gizmo_.extent, gizmo_.pivot, ptr, shift,
+                             alt, cmd);
+      }
+      if (!(result == gizmo_.start)) {
+        batch.push_back(commands::LayerTransform{gizmo_.layer, result});
+      }
+      return batch;
+    }
+    std::vector<interact::PickTarget> others;
+    for (const interact::PickTarget& t : gizmo_targets) {
+      if (!sel.contains(t.id)) {
+        others.push_back(t);
+      }
+    }
+    arbc::Affine new_union = arbc::Affine::identity();
+    if (gizmo_.handle == interact::CellHandle::Body) {
+      const interact::SnapResult snap =
+          compose_body(arbc::Affine::identity(), gizmo_.group_extent, ptr, cmd, others);
+      new_union = snap.placement;
+      if (guides_out != nullptr) {
+        *guides_out = snap.guides;
+      }
+    } else {
+      new_union = compose_srs(gizmo_.handle, arbc::Affine::identity(), gizmo_.group_extent,
+                              gizmo_.pivot, ptr, shift, alt, cmd);
+    }
+    if (union_out != nullptr) {
+      *union_out = new_union;
+    }
+    std::vector<arbc::Affine> starts;
+    starts.reserve(gizmo_.group_start.size());
+    for (const std::pair<arbc::ObjectId, arbc::Affine>& m : gizmo_.group_start) {
+      starts.push_back(m.second);
+    }
+    const std::vector<arbc::Affine> previews =
+        interact::group_transform(arbc::Affine::identity(), new_union, starts);
+    for (std::size_t i = 0; i < gizmo_.group_start.size() && i < previews.size(); ++i) {
+      if (!(previews[i] == gizmo_.group_start[i].second)) {
+        batch.push_back(commands::LayerTransform{gizmo_.group_start[i].first, previews[i]});
+      }
+    }
+    return batch;
+  };
+
   // The cross-panel hover target this frame (editor.panels.hatch_swatch / D-hatch_swatch-2/5). A
   // CELL box is a draw-list quad with a click-through interior, so its hover resolves through the
   // SAME L1 hit-test a click uses (`interact::pick`) rather than the AABB InvisibleButton — the
@@ -303,41 +451,101 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
   // when this panel's window holds the pointer (single-writer, D-hatch_swatch-2).
   std::optional<arbc::ObjectId> hover_target;
   if (mouse_comp) {
-    const std::vector<interact::PickTarget> targets =
-        interact::pick_targets(document, registry, entered);
-    const interact::PickHit hit = interact::pick(targets, *mouse_comp, edge_tol, corner_tol);
+    const interact::PickHit hit = interact::pick(gizmo_targets, *mouse_comp, edge_tol, corner_tol);
     if (hit.hit && hit.kind == interact::PickKind::Cell) {
       hover_target = hit.id;
     }
   }
 
   // ============================ PASS 1: interaction (ImGui items) ==============================
-  // Background item — marquee + empty-space clicks (submitted first, lowest priority).
+  // A completed box/frame move (Constraint 8) and a completed gizmo gesture (Constraint 5), each
+  // committed as ONE transaction at end-of-pass. Declared up here so the background item's group
+  // gizmo release and the per-cell gizmo release both fill them.
+  std::optional<std::pair<arbc::ObjectId, arbc::Affine>> pending_transform;
+  std::optional<std::vector<commands::LayerTransform>> pending_gizmo_batch;
+
+  // Background item — marquee + empty-space clicks (submitted first, lowest priority). It also
+  // hosts the GROUP transform gizmo's SCALE-HANDLE grab (>=2 selection, D-overview_gizmo-6): the
+  // union's 8 scale handles sit on the union box boundary over empty schematic space, so resolving
+  // the grab here (through `interact::hit_cell` over the union treated as one virtual cell) makes
+  // them reachable WITHOUT a full-rect group button that would swallow the marquee. The union
+  // INTERIOR stays marquee/click-through — the overview's click-through model (D-overview_gizmo-5)
+  // — so a group can be scaled while empty space inside its bounds still marquees. Only the scale
+  // handles are hosted here: the rotate ring's wide off-box halo would shadow marquee starts near
+  // the union corners, so group ROTATE stays a canvas capability (the single-cell overview rotate
+  // ring is owned by that cell's widened button, where no such ambiguity exists). Pivot/Body are
+  // excluded so the interior stays marquee/click-through.
+  interact::CellHandle bg_group_handle = interact::CellHandle::None;
+  if (mouse_comp && gizmo_union && gizmo_pivot) {
+    interact::PickTarget vcell;
+    vcell.kind = interact::PickKind::Cell;
+    vcell.placement = arbc::Affine::identity();
+    vcell.extent = *gizmo_union;
+    const interact::CellHandle h =
+        interact::hit_cell(vcell, *gizmo_pivot, *mouse_comp, edge_tol, corner_tol);
+    if (interact::is_cell_scale_handle(h)) {
+      bg_group_handle = h; // scale handles only — the interior + rotate halo stay marquee-able
+    }
+  }
   ImGui::SetNextItemAllowOverlap();
   ImGui::SetCursorScreenPos(x.origin);
   ImGui::InvisibleButton("###ov_bg", ImVec2{inner_w, inner_h});
   if (ImGui::IsItemActivated() && mouse_comp) {
-    marquee_ = MarqueeGesture{true, false, *mouse_comp};
-  }
-  if (marquee_.active && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-    marquee_.moved = true;
-  }
-  if (ImGui::IsItemDeactivated() && marquee_.active) {
-    const std::vector<interact::PickTarget> targets =
-        interact::pick_targets(document, registry, entered);
-    if (mouse_comp && marquee_.moved) {
-      const arbc::Rect rect{std::min(marquee_.anchor_comp.x, mouse_comp->x),
-                            std::min(marquee_.anchor_comp.y, mouse_comp->y),
-                            std::max(marquee_.anchor_comp.x, mouse_comp->x),
-                            std::max(marquee_.anchor_comp.y, mouse_comp->y)};
-      apply_change(state_.selection(),
-                   interact::marquee_selection(targets, rect, ImGui::GetIO().KeyShift));
+    if (bg_group_handle != interact::CellHandle::None) {
+      gizmo_ = GizmoGesture{};
+      gizmo_.active = true;
+      gizmo_.group = true;
+      gizmo_.handle = bg_group_handle;
+      gizmo_.grab_comp = *mouse_comp;
+      gizmo_.pivot = *gizmo_pivot;
+      gizmo_.group_extent = *gizmo_union;
+      for (const interact::PickTarget& t : gizmo_targets) {
+        if (sel.contains(t.id)) {
+          gizmo_.group_start.emplace_back(t.layer, t.placement);
+        }
+      }
+      marquee_.active = false;
     } else {
-      apply_change(state_.selection(),
-                   interact::click_selection(targets, marquee_.anchor_comp, edge_tol, corner_tol,
-                                             read_mods(), state_.selection().primary()));
+      marquee_ = MarqueeGesture{true, false, *mouse_comp};
     }
-    marquee_.active = false;
+  }
+  if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    if (gizmo_.active && gizmo_.group) {
+      gizmo_.moved = true;
+    } else if (marquee_.active) {
+      marquee_.moved = true;
+    }
+  }
+  if (ImGui::IsItemDeactivated()) {
+    if (gizmo_.active && gizmo_.group) {
+      // Commit the group transform as ONE `transform_cells_command` (an identity/zero-travel
+      // gesture yields an empty batch and nothing commits).
+      if (gizmo_.moved && mouse_comp) {
+        const ImGuiIO& io = ImGui::GetIO();
+        std::vector<commands::LayerTransform> batch = gesture_batch(
+            *mouse_comp, io.KeyShift, io.KeyAlt, io.KeyCtrl || io.KeySuper, nullptr, nullptr);
+        if (!batch.empty()) {
+          pending_gizmo_batch = std::move(batch);
+        }
+      }
+      gizmo_.active = false;
+    } else if (marquee_.active) {
+      const std::vector<interact::PickTarget> targets =
+          interact::pick_targets(document, registry, entered);
+      if (mouse_comp && marquee_.moved) {
+        const arbc::Rect rect{std::min(marquee_.anchor_comp.x, mouse_comp->x),
+                              std::min(marquee_.anchor_comp.y, mouse_comp->y),
+                              std::max(marquee_.anchor_comp.x, mouse_comp->x),
+                              std::max(marquee_.anchor_comp.y, mouse_comp->y)};
+        apply_change(state_.selection(),
+                     interact::marquee_selection(targets, rect, ImGui::GetIO().KeyShift));
+      } else {
+        apply_change(state_.selection(),
+                     interact::click_selection(targets, marquee_.anchor_comp, edge_tol, corner_tol,
+                                               read_mods(), state_.selection().primary()));
+      }
+      marquee_.active = false;
+    }
   }
 
   // The live-viewport visible-composition quad (Constraint 7): stroked below, and its centre is the
@@ -353,9 +561,16 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     }
   }
 
+  // The screen radius of the gizmo handle envelope beyond a box AABB: the rotate ring sits at
+  // `corner_tol * 3` OUTSIDE a corner (pick.cpp hit_cell), so pad by that (in px) plus a little
+  // slop — the widened `###ov_cell_<id>` hit area the selected box needs to catch its outside
+  // handles (D-overview_gizmo-5), regardless of the whole-composition fit zoom (Constraint 3).
+  const float handle_pad = static_cast<float>(corner_tol * 3.0 * x.scale()) + 4.0F;
+
   // Per-cell items, BOTTOM→TOP so the front box wins an overlap (Constraint 4). A drag moves;
-  // a plain release selects through the pick core.
-  std::optional<std::pair<arbc::ObjectId, arbc::Affine>> pending_transform;
+  // a plain release selects through the pick core. The SELECTED single cell also drives the
+  // transform gizmo: its hit area is widened to the handle envelope and its press is routed
+  // through `interact::hit_cell` (D-overview_gizmo-5).
   for (const scene::Cell& cell : cells) {
     if (!cell.content_bounds.has_value()) {
       continue; // an unbounded fill has no box; it stays selectable through the background pick
@@ -365,40 +580,97 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     if (!aabb) {
       continue;
     }
+    const bool is_gizmo_cell = gizmo_cell != nullptr && gizmo_cell->id == cell.id;
+    ImVec2 btn_min = aabb->first;
+    ImVec2 btn_size = aabb->second;
+    if (is_gizmo_cell) {
+      btn_min = ImVec2{btn_min.x - handle_pad, btn_min.y - handle_pad};
+      btn_size = ImVec2{btn_size.x + 2.0F * handle_pad, btn_size.y + 2.0F * handle_pad};
+    }
     // AllowOverlap so a FRONT box (submitted later, bottom→top) wins a click over the one behind it
     // — front-occludes-back for hit-testing too, not just the fill (§5:183-189).
     ImGui::SetNextItemAllowOverlap();
-    ImGui::SetCursorScreenPos(aabb->first);
+    ImGui::SetCursorScreenPos(btn_min);
     const std::string id = "###ov_cell_" + std::to_string(cell.id.value);
-    ImGui::InvisibleButton(id.c_str(), aabb->second);
+    ImGui::InvisibleButton(id.c_str(), btn_size);
     if (ImGui::IsItemActivated() && mouse_comp) {
       // Double-click a NESTED box to ENTER its composition (D17, Select ≠ enter): set the
-      // project-level scope; the schematic re-roots next frame. Not a move gesture.
+      // project-level scope; the schematic re-roots next frame. Not a move/gizmo gesture.
       const std::optional<arbc::ObjectId> child = scene::nested_composition_of(document, cell.id);
       if (child.has_value() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         entered = child;
         move_.active = false;
+        gizmo_.active = false;
+      } else if (is_gizmo_cell && gizmo_pivot) {
+        // The selected cell's gizmo: resolve the grabbed handle through the shipped L1 hit-test
+        // over the exact placed quad. A handle hit arms the gizmo drag; a miss (in the widened
+        // margin, off the box + ring) falls back to the plain move/click. The overview does NOT
+        // offer a draggable pivot (a canvas-only nicety on this coarse surface): a Pivot hit — the
+        // dot sits at the box center, so a center-drag would otherwise grab it instead of moving —
+        // is treated as a Body move, and the pivot dot is drawn as a non-grabbable center marker.
+        interact::CellHandle handle =
+            interact::hit_cell(*gizmo_cell, *gizmo_pivot, *mouse_comp, edge_tol, corner_tol);
+        if (handle == interact::CellHandle::Pivot) {
+          handle = interact::CellHandle::Body;
+        }
+        if (handle != interact::CellHandle::None) {
+          gizmo_ = GizmoGesture{};
+          gizmo_.active = true;
+          gizmo_.group = false;
+          gizmo_.handle = handle;
+          gizmo_.grab_comp = *mouse_comp;
+          gizmo_.pivot = *gizmo_pivot;
+          gizmo_.content = cell.id;
+          gizmo_.layer = cell.layer;
+          gizmo_.start = gizmo_cell->placement;
+          gizmo_.extent = *gizmo_cell->extent;
+          move_.active = false;
+        } else {
+          move_ = MoveGesture{true, cell.id, cell.layer, cell.placement, *mouse_comp, false};
+        }
       } else {
         move_ = MoveGesture{true, cell.id, cell.layer, cell.placement, *mouse_comp, false};
       }
     }
-    if (move_.active && move_.content == cell.id && ImGui::IsItemActive() &&
-        ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-      move_.moved = true;
-    }
-    if (ImGui::IsItemDeactivated() && move_.active && move_.content == cell.id) {
-      if (move_.moved && mouse_comp) {
-        pending_transform = std::make_pair(
-            move_.layer, interact::move_cell(move_.start, mouse_comp->x - move_.grab_comp.x,
-                                             mouse_comp->y - move_.grab_comp.y));
-      } else {
-        const std::vector<interact::PickTarget> targets =
-            interact::pick_targets(document, registry, entered);
-        apply_change(state_.selection(),
-                     interact::click_selection(targets, move_.grab_comp, edge_tol, corner_tol,
-                                               read_mods(), state_.selection().primary()));
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+      if (gizmo_.active && !gizmo_.group && gizmo_.content == cell.id) {
+        gizmo_.moved = true;
+      } else if (move_.active && move_.content == cell.id) {
+        move_.moved = true;
       }
-      move_.active = false;
+    }
+    if (ImGui::IsItemDeactivated()) {
+      if (gizmo_.active && !gizmo_.group && gizmo_.content == cell.id) {
+        // Commit ONE `transform_cells_command` (Constraint 5): a real drag on a transform handle;
+        // a pivot-move / identity gesture yields an empty batch and nothing commits, and a
+        // non-drag body press is handed back to the pick policy (the gizmo must not swallow a
+        // click — D7).
+        if (gizmo_.moved && mouse_comp && gizmo_.handle != interact::CellHandle::Pivot) {
+          const ImGuiIO& io = ImGui::GetIO();
+          std::vector<commands::LayerTransform> batch = gesture_batch(
+              *mouse_comp, io.KeyShift, io.KeyAlt, io.KeyCtrl || io.KeySuper, nullptr, nullptr);
+          if (!batch.empty()) {
+            pending_gizmo_batch = std::move(batch);
+          }
+        } else if (!gizmo_.moved && gizmo_.handle == interact::CellHandle::Body) {
+          apply_change(state_.selection(),
+                       interact::click_selection(gizmo_targets, gizmo_.grab_comp, edge_tol,
+                                                 corner_tol, read_mods(),
+                                                 state_.selection().primary()));
+        }
+        gizmo_.active = false;
+      } else if (move_.active && move_.content == cell.id) {
+        if (move_.moved && mouse_comp) {
+          pending_transform = std::make_pair(
+              move_.layer, interact::move_cell(move_.start, mouse_comp->x - move_.grab_comp.x,
+                                               mouse_comp->y - move_.grab_comp.y));
+        } else {
+          apply_change(state_.selection(), interact::click_selection(
+                                               gizmo_targets, move_.grab_comp, edge_tol, corner_tol,
+                                               read_mods(), state_.selection().primary()));
+        }
+        move_.active = false;
+      }
     }
   }
 
@@ -509,11 +781,53 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
         {commands::LayerTransform{pending_transform->first, pending_transform->second}});
     canvas_.apply_edit([this, command] { command.apply(state_.document()); });
   }
+  // Commit a completed gizmo gesture as ONE transaction (Constraint 5): placement only (D8), the
+  // whole single/group batch in one undoable step through the same funnel (D-overview_gizmo-2).
+  if (pending_gizmo_batch.has_value() && !pending_gizmo_batch->empty()) {
+    const commands::Command command = commands::transform_cells_command(*pending_gizmo_batch);
+    canvas_.apply_edit([this, command] { command.apply(state_.document()); });
+  }
 
   // ============================ PASS 2: draw (draw list, on top) ===============================
   // Reserve the schematic area so the window sizes correctly.
   ImGui::SetCursorScreenPos(area_origin);
   ImGui::Dummy(avail);
+
+  // The live gesture preview (Constraint 5): the placement(s) to DRAW while a gizmo drag is in
+  // flight — UI-only, the document is untouched until release. A Pivot-handle drag moves the pivot
+  // only. Keyed by placing LAYER so a group can override cells AND cameras uniformly.
+  std::vector<commands::LayerTransform> gizmo_preview_batch;
+  arbc::Affine gizmo_preview_union = arbc::Affine::identity();
+  std::vector<interact::SnapGuide> gizmo_preview_guides;
+  if (gizmo_.active && gizmo_.moved && mouse_comp) {
+    if (gizmo_.handle == interact::CellHandle::Pivot) {
+      gizmo_pivot_ = *mouse_comp; // pivot-follow — UI session state, no document change / no commit
+      gizmo_pivot = gizmo_pivot_;
+    } else {
+      const ImGuiIO& io = ImGui::GetIO();
+      gizmo_preview_batch =
+          gesture_batch(*mouse_comp, io.KeyShift, io.KeyAlt, io.KeyCtrl || io.KeySuper,
+                        &gizmo_preview_guides, &gizmo_preview_union);
+    }
+  }
+  const auto preview_placement = [&](arbc::ObjectId layer, const arbc::Affine& fallback) {
+    for (const commands::LayerTransform& lt : gizmo_preview_batch) {
+      if (lt.layer == layer) {
+        return lt.placement;
+      }
+    }
+    return fallback;
+  };
+  // The placement to DRAW an object at this frame: its live move preview, else its gizmo preview,
+  // else its stored placement.
+  const auto draw_placement = [&](arbc::ObjectId content, arbc::ObjectId layer,
+                                  const arbc::Affine& base) -> arbc::Affine {
+    if (move_.active && move_.moved && move_.content == content && mouse_comp) {
+      return interact::move_cell(move_.start, mouse_comp->x - move_.grab_comp.x,
+                                 mouse_comp->y - move_.grab_comp.y);
+    }
+    return preview_placement(layer, base);
+  };
 
   // A subtle isolation scrim when entered (Constraint 10): the "everything outside is dimmed" cue,
   // an ImGui draw (never a libarbc render), matching `editor.canvas.isolation_scope`'s intent.
@@ -535,11 +849,7 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     if (!cell.content_bounds.has_value()) {
       continue;
     }
-    arbc::Affine placement = cell.placement;
-    if (move_.active && move_.moved && move_.content == cell.id && mouse_comp) {
-      placement = interact::move_cell(move_.start, mouse_comp->x - move_.grab_comp.x,
-                                      mouse_comp->y - move_.grab_comp.y);
-    }
+    const arbc::Affine placement = draw_placement(cell.id, cell.layer, cell.placement);
     const arbc::Rect& e = *cell.content_bounds;
     const bool selected = selection.contains(cell.id);
     const interact::OverviewPattern pat = interact::overview_pattern(this_ordinal, cell_count);
@@ -566,11 +876,7 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     if (!cell.content_bounds.has_value()) {
       continue;
     }
-    arbc::Affine placement = cell.placement;
-    if (move_.active && move_.moved && move_.content == cell.id && mouse_comp) {
-      placement = interact::move_cell(move_.start, mouse_comp->x - move_.grab_comp.x,
-                                      mouse_comp->y - move_.grab_comp.y);
-    }
+    const arbc::Affine placement = draw_placement(cell.id, cell.layer, cell.placement);
     const arbc::Rect& e = *cell.content_bounds;
     const bool selected = selection.contains(cell.id);
     const ImVec2 tl = x.to_screen(placement.apply({e.x0, e.y0}));
@@ -590,15 +896,54 @@ void OverviewPanel::draw(std::string_view /*view_id*/) {
     }
   }
 
+  // The transform gizmo overlay (editor.panels.overview_gizmo): the placed outline + 8 scale
+  // handles + pivot dot, anchored to `placed_quad` mapped through `OverviewXform::to_screen`
+  // (D-overview_gizmo-5). Drawn AT the previewed placement/union while a drag is in flight; the box
+  // fills/borders above already preview the same transform (single moves the one box, group moves
+  // every member), so the group needs no separate per-member outlines here.
+  if (gizmo_pivot && (gizmo_cell != nullptr || gizmo_union)) {
+    const bool group = gizmo_cell == nullptr;
+    const bool dragging =
+        gizmo_.active && gizmo_.moved && mouse_comp && gizmo_.handle != interact::CellHandle::Pivot;
+    arbc::Affine gp = group ? arbc::Affine::identity() : gizmo_cell->placement;
+    const arbc::Rect ext = group ? *gizmo_union : *gizmo_cell->extent;
+    if (dragging) {
+      gp =
+          group ? gizmo_preview_union : preview_placement(gizmo_cell->layer, gizmo_cell->placement);
+    }
+    const arbc::Vec2 c_tl = gp.apply({ext.x0, ext.y0});
+    const arbc::Vec2 c_tr = gp.apply({ext.x1, ext.y0});
+    const arbc::Vec2 c_br = gp.apply({ext.x1, ext.y1});
+    const arbc::Vec2 c_bl = gp.apply({ext.x0, ext.y1});
+    const ImU32 col = accent(255);
+    dl->AddQuad(x.to_screen(c_tl), x.to_screen(c_tr), x.to_screen(c_br), x.to_screen(c_bl), col,
+                2.0F);
+    const arbc::Vec2 handles[8] = {c_tl,
+                                   c_tr,
+                                   c_br,
+                                   c_bl,
+                                   {(c_tl.x + c_tr.x) * 0.5, (c_tl.y + c_tr.y) * 0.5},
+                                   {(c_tr.x + c_br.x) * 0.5, (c_tr.y + c_br.y) * 0.5},
+                                   {(c_br.x + c_bl.x) * 0.5, (c_br.y + c_bl.y) * 0.5},
+                                   {(c_bl.x + c_tl.x) * 0.5, (c_bl.y + c_tl.y) * 0.5}};
+    constexpr float hs = 3.0F;
+    for (const arbc::Vec2& q : handles) {
+      const ImVec2 s = x.to_screen(q);
+      dl->AddRectFilled(ImVec2{s.x - hs, s.y - hs}, ImVec2{s.x + hs, s.y + hs}, col);
+    }
+    const ImVec2 sp = x.to_screen(*gizmo_pivot);
+    dl->AddCircleFilled(sp, 4.0F, IM_COL32(255, 210, 120, 255));
+    dl->AddCircle(sp, 4.0F, IM_COL32(0, 0, 0, 180));
+    for (const interact::SnapGuide& g : gizmo_preview_guides) {
+      dl->AddLine(x.to_screen(g.a), x.to_screen(g.b), IM_COL32(255, 90, 200, 230), 1.0F);
+    }
+  }
+
   // Cameras as distinct SOLID frames (never a hatch box, §5:173) + a label — always-on-top chrome.
   for (const scene::Camera& cam : cameras) {
     const arbc::Rect res_rect = arbc::Rect::from_size(static_cast<double>(cam.resolution.width),
                                                       static_cast<double>(cam.resolution.height));
-    arbc::Affine frame = cam.frame;
-    if (move_.active && move_.moved && move_.content == cam.id && mouse_comp) {
-      frame = interact::move_cell(cam.frame, mouse_comp->x - move_.grab_comp.x,
-                                  mouse_comp->y - move_.grab_comp.y);
-    }
+    const arbc::Affine frame = draw_placement(cam.id, cam.layer, cam.frame);
     const bool selected = selection.contains(cam.id);
     const ImVec2 tl = x.to_screen(frame.apply({res_rect.x0, res_rect.y0}));
     const ImVec2 tr = x.to_screen(frame.apply({res_rect.x1, res_rect.y0}));

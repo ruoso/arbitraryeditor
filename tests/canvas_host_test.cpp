@@ -826,6 +826,92 @@ TEST_CASE("canvas_host: a stream of UI-thread GROUP transform batches runs clean
   handle->join();
 }
 
+TEST_CASE("canvas_host: a stream of UI-thread OVERVIEW gizmo transform commits runs clean against "
+          "the render + scoped pick read (panels.overview_gizmo TSan anchor)") {
+  // The overview gizmo commits the SAME `transform_cells_command` funnel as the canvas gizmo/group
+  // (D-overview_gizmo-2), driven from the UI thread with a scoped `pick_targets(document, registry,
+  // entered)` read interleaved — exactly the overview's per-frame assembly. This anchor repeats
+  // both a single-cell (1-layer) and a group (N-layer) commit against the real interactive pool to
+  // prove the placement path adds no new cross-thread surface (Constraint 10): the gizmo session
+  // state is UI-thread-only, so only the shipped writer-identity + pin() seam is exercised.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+
+  std::vector<arbc::ObjectId> layers;
+  bool seeded = false;
+  writer.submit_sync([&] {
+    bool ok = true;
+    for (int i = 0; i < 2; ++i) {
+      const auto added = ace::scene::add_cell(*probe.document, registry, "org.arbc.raster", "16x16",
+                                              arbc::Affine::translation(8.0 + 20.0 * i, 8.0));
+      ok = ok && added.has_value();
+    }
+    for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry)) {
+      layers.push_back(cell.layer);
+    }
+    seeded = ok;
+  });
+  REQUIRE(seeded);
+  REQUIRE(layers.size() >= 2);
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // Alternate a single-cell gizmo commit (one layer) and a group commit (all layers), each a fresh
+  // always-invertible placement, with the scoped pick read interleaved as the overview draws it.
+  constexpr int k_gestures = 64;
+  std::vector<ace::commands::LayerTransform> last;
+  for (int i = 0; i < k_gestures; ++i) {
+    const double s = 1.0 + static_cast<double>(i % 8) * 0.25; // a varying, non-degenerate scale
+    std::vector<ace::commands::LayerTransform> batch;
+    if (i % 2 == 0) {
+      batch.push_back(ace::commands::LayerTransform{
+          layers[static_cast<std::size_t>(i) % layers.size()],
+          arbc::Affine{s, 0.0, 0.0, s, static_cast<double>(i), static_cast<double>(-i)}});
+    } else {
+      for (std::size_t j = 0; j < layers.size(); ++j) {
+        batch.push_back(ace::commands::LayerTransform{
+            layers[j], arbc::Affine{s, 0.0, 0.0, s, static_cast<double>(i) + static_cast<double>(j),
+                                    static_cast<double>(-i)}});
+      }
+    }
+    last = batch;
+    apply_edit(writer, host,
+               [&] { ace::commands::transform_cells_command(batch).apply(*probe.document); });
+    const std::vector<ace::interact::PickTarget> targets =
+        ace::interact::pick_targets(*probe.document, registry, std::nullopt);
+    (void)targets; // the overview's per-frame scoped assembly read, overlapping writer + render
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  // Every layer named in the LAST batch carries that placement — the final commit fully landed.
+  const std::vector<ace::interact::PickTarget> final_targets =
+      ace::interact::pick_targets(*probe.document, registry, std::nullopt);
+  for (const ace::commands::LayerTransform& lt : last) {
+    bool found = false;
+    for (const ace::interact::PickTarget& tgt : final_targets) {
+      if (tgt.layer == lt.layer) {
+        found = true;
+        CHECK(tgt.placement == lt.placement);
+      }
+    }
+    CHECK(found);
+  }
+
+  host.stop();
+  handle->join();
+}
+
 // --- editor.canvas.nav: the per-entry camera channel + deep-zoom observability ------
 
 namespace {
