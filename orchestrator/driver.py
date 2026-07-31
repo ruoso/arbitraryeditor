@@ -27,11 +27,11 @@ Select the CLI with `AGENT_CLI=claude` (the default) or `AGENT_CLI=codex`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
 import re
-import shutil
 import shutil
 import string
 import subprocess
@@ -64,6 +64,73 @@ SYSTEM_PROMPT_PATH = PROMPTS_DIR / "orchestrator_system.md"
 # the persisted context back up so the orchestrator sees the failure on
 # its next turn.
 MAX_FIXER_ATTEMPTS = 10
+
+# --- Fixer escape hatch ------------------------------------------------------
+#
+# `MAX_FIXER_ATTEMPTS` alone is a budget, not a decision procedure: a fixer that
+# correctly concludes "this cannot be fixed in scope" was, before this, treated
+# exactly like one that landed a fix — re-verify, re-dispatch — so the only way
+# out was burning the entire budget. That is how iter 65 spent ~6 hours and ten
+# full CI replays re-deriving one answer the FIRST fixer had already given
+# (nine of the ten made no edits at all). The failure surfaced to the
+# orchestrator six hours later than it was known.
+#
+# Two independent exits, because each covers the other's blind spot:
+#
+#   1. The DECLARED one. `prompts/fixer.md` tells a fixer that cannot fix the
+#      failure in scope to emit this marker on its own line. Explicit, carries
+#      the fixer's reason, and fires on the first attempt.
+#   2. The OBSERVED one. A fixer that edits nothing cannot change a
+#      deterministic chain's outcome, so re-running it is pure waste. This
+#      catches the fixer that reasons its way to "I can't fix this" but forgets
+#      the marker — which is exactly what happened in iter 65, where the brief
+#      already said "STOP and report" and no fixer had a way to say so.
+#
+# The observed exit forgives ONE no-op, because this repo does have genuinely
+# flaky steps (the container e2e frame-grab warm-up race), and re-running an
+# unchanged tree is the cheapest way to tell a flake from a real failure. A
+# SECOND consecutive no-op is not a flake, it is a loop.
+FIXER_ESCALATE_MARKER = "CANNOT-FIX-IN-SCOPE"
+MAX_FIXER_NO_EDIT_STREAK = 2
+
+
+def worktree_fingerprint() -> str:
+    """Content hash of the working tree — tracked modifications plus untracked
+    files. Two equal fingerprints mean nothing on disk changed between them, so
+    a deterministic verification chain must produce the same result.
+
+    Untracked content is hashed explicitly rather than inferred from `git
+    status`: the implementer routinely writes NEW files (a fresh test, a new
+    source), and a fixer editing one of those would otherwise read as a no-op
+    and be escalated for making no change."""
+    diff = subprocess.run(
+        ["git", "diff", "HEAD"],
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=False,
+        check=False,
+    ).stdout
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    ).stdout.split()
+
+    digest = hashlib.sha256()
+    digest.update(diff or b"")
+    for rel in sorted(untracked):
+        digest.update(rel.encode("utf-8", "replace"))
+        try:
+            digest.update((REPO_ROOT / rel).read_bytes())
+        except OSError:
+            # Unreadable/vanished between listing and read — fold the fact in
+            # rather than crashing the chain over a transient file.
+            digest.update(b"<unreadable>")
+    return digest.hexdigest()
 
 # Auto-format step run deterministically before the verification chain on
 # every iteration. `clang-format -i` is a pure formatting fixup — if the
@@ -1713,14 +1780,49 @@ def run_post_implementer_chain(
     suites green. Returns the closer's final assistant message so the
     orchestrator's next turn sees it as `last_subagent_output`.
 
-    On fixer exhaustion: append a failure block to CONTEXT_FILE and
-    sys.exit(1). The next driver run will re-load the appended context and
-    the orchestrator will see the failure on its next turn."""
+    The fixer loop has three exits, all of which append a failure block to
+    CONTEXT_FILE and sys.exit(1) so the next driver run re-loads it and the
+    orchestrator sees the failure on its next turn: the attempt budget
+    (`MAX_FIXER_ATTEMPTS`), a fixer DECLARING the failure unfixable in scope
+    (`FIXER_ESCALATE_MARKER`), and a fixer that edits nothing twice running
+    (`MAX_FIXER_NO_EDIT_STREAK`). The latter two exist so a known-unfixable
+    failure reaches the orchestrator in one attempt instead of ten."""
     task_id = template_vars.get("task_id", "")
     refinement_path = template_vars.get("refinement_path", "")
     combined_summary = implementer_summary
     fixer_attempts = 0
     fix_history: list[str] = []
+    no_edit_streak = 0
+
+    def give_up(headline: str, reason: str, failing_step: str, failing_argv: list[str],
+                failing_log: Path) -> None:
+        """Record why the chain is being abandoned and exit non-zero.
+
+        Every exit routes through here so the orchestrator reads the same
+        shape whichever way the loop ended, with `reason` naming which one it
+        was — the difference between "we tried ten times" and "the fixer said
+        this needs a decision above its pay grade" is exactly what the
+        orchestrator needs in order to rescope rather than re-dispatch."""
+        failure_block = (
+            f"## {headline} at iter {iteration}\n\n"
+            f"- task_id: {task_id}\n"
+            f"- refinement: {refinement_path}\n"
+            f"- failing step: {failing_step} ({' '.join(failing_argv)})\n"
+            f"- failing log: {failing_log.relative_to(REPO_ROOT)}\n"
+            f"- reason: {reason}\n"
+            f"- fixer attempts spent: {fixer_attempts}\n\n"
+            f"### Implementer summary\n\n{implementer_summary}\n\n"
+            f"### Fix history (most recent last)\n\n"
+            + "\n\n".join(
+                f"#### attempt {i + 1}\n{fh}" for i, fh in enumerate(fix_history)
+            )
+            + "\n"
+        )
+        append_context_failure(failure_block)
+        print_wrapped(
+            f"{RED}!! {reason} — failure appended to {CONTEXT_FILE} and exiting{RESET}"
+        )
+        sys.exit(1)
 
     # Synthesized push event consumed by the chain's act steps. Written once
     # per chain: HEAD is stable until the closer commits, which happens only
@@ -1789,26 +1891,13 @@ def run_post_implementer_chain(
         )
 
         if fixer_attempts > MAX_FIXER_ATTEMPTS:
-            failure_block = (
-                f"## Verification chain exhausted at iter {iteration}\n\n"
-                f"- task_id: {task_id}\n"
-                f"- refinement: {refinement_path}\n"
-                f"- failing step: {name} ({' '.join(argv)})\n"
-                f"- failing log: {log_path.relative_to(REPO_ROOT)}\n"
-                f"- fixer attempts: {MAX_FIXER_ATTEMPTS} (cap)\n\n"
-                f"### Implementer summary\n\n{implementer_summary}\n\n"
-                f"### Fix history (most recent last)\n\n"
-                + "\n\n".join(
-                    f"#### attempt {i + 1}\n{fh}" for i, fh in enumerate(fix_history)
-                )
-                + "\n"
+            give_up(
+                "Verification chain exhausted",
+                f"fixer budget exhausted ({MAX_FIXER_ATTEMPTS} attempts)",
+                name,
+                argv,
+                log_path,
             )
-            append_context_failure(failure_block)
-            print_wrapped(
-                f"{RED}!! fixer budget exhausted — failure appended to "
-                f"{CONTEXT_FILE} and exiting{RESET}"
-            )
-            sys.exit(1)
 
         fixer_vars = {
             "task_id": task_id,
@@ -1841,12 +1930,51 @@ def run_post_implementer_chain(
         )
         for line in fmt_vars_passed(fixer_vars):
             print_wrapped(line)
+        tree_before = worktree_fingerprint()
         fixer_out = run_agent_with_retry(
             fixer_prompt, fixer_log, fixer_model
         )
         for line in fmt_returned(fixer_out):
             print_wrapped(line)
         fix_history.append(fixer_out.strip())
+
+        # --- escape hatch 1: the fixer DECLARED this unfixable in scope ------
+        # Believed on its word and acted on immediately. A fixer reaches this
+        # only after diagnosing the failure, and the judgement it is reporting
+        # ("this needs a frozen decision reversed / a dependency bumped") is
+        # one the orchestrator can act on and a successor fixer cannot.
+        if FIXER_ESCALATE_MARKER in fixer_out:
+            give_up(
+                "Verification chain escalated by fixer",
+                f"fixer declared the failure unfixable in scope "
+                f"({FIXER_ESCALATE_MARKER}) on attempt {fixer_attempts}",
+                name,
+                argv,
+                log_path,
+            )
+
+        # --- escape hatch 2: the fixer changed NOTHING -----------------------
+        # Re-verifying an unchanged tree can only produce the same result,
+        # flakes aside — so one no-op is re-verified (the cheapest flake test
+        # there is) and a second consecutive one ends the loop.
+        if worktree_fingerprint() == tree_before:
+            no_edit_streak += 1
+            print_wrapped(
+                f"  {YELLOW}● fixer #{fixer_attempts} left the tree unchanged "
+                f"({no_edit_streak}/{MAX_FIXER_NO_EDIT_STREAK}){RESET}"
+            )
+            if no_edit_streak >= MAX_FIXER_NO_EDIT_STREAK:
+                give_up(
+                    "Verification chain stalled",
+                    f"{no_edit_streak} consecutive fixers made no edit — "
+                    f"re-running the chain cannot change the outcome",
+                    name,
+                    argv,
+                    log_path,
+                )
+        else:
+            no_edit_streak = 0
+
         # Append fix summary into the closer's seed so the eventual Status
         # block reflects everything that landed for this task.
         combined_summary = (

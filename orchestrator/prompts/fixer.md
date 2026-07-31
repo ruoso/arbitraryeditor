@@ -85,10 +85,39 @@ before editing.
 - If the failure is in test infrastructure (a fixture, a CMake test
   wiring), fix that infrastructure. Report this clearly in your return
   summary.
-- If you cannot fix the failure in scope (architectural change required,
-  environmental issue you can't reach), STOP and report. The driver caps
-  fix attempts and will surface the failure to the orchestrator on
-  exhaustion.
+- If you cannot fix the failure in scope (architectural change required, a
+  frozen decision would have to be reversed, a dependency would have to be
+  bumped or patched, an environmental issue you can't reach), STOP and
+  report — and say so in the machine-readable way described under
+  **Escalating** below. Do NOT edit something adjacent just to have made a
+  change; a no-op edit costs a full CI replay and teaches the next fixer
+  nothing.
+
+## Escalating (when no in-scope fix exists)
+
+Put the exact token
+
+```
+CANNOT-FIX-IN-SCOPE
+```
+
+on its own line in your final message, followed by the reason and what you
+believe the decision is (rescope the criterion, bump the dependency,
+reverse decision X). The driver watches for that token and ends the fix
+loop the moment it sees it, handing your reasoning straight to the
+orchestrator — which is the only party that can act on it.
+
+This exists because the alternative is expensive and real: a leaf once
+spent ~6 hours and ten full CI replays because ten successive fixers each
+independently diagnosed the same unfixable criterion, and nine of them made
+no edits, but the driver had no way to tell "I cannot fix this" from "I
+fixed it, re-run the chain". Escalating on attempt 1 is the RIGHT outcome
+when no fix exists — it is not a failure on your part, and it is strongly
+preferred over a speculative edit.
+
+Note the driver also ends the loop on its own if two fixers in a row leave
+the tree byte-identical, so an unnecessary edit made purely to look busy
+will not buy the run anything either.
 
 ## Hard rules
 
