@@ -539,6 +539,37 @@ ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affin
   return health;
 }
 
+BrushDetailFloor brush_detail_floor(double comp_radius, const arbc::Affine& placement,
+                                    bool has_native_pixels) {
+  BrushDetailFloor floor;
+  if (!has_native_pixels) {
+    return floor; // resolution-independent target: no native grid, no px readout (Constraint 4)
+  }
+  if (!std::isfinite(comp_radius) || !(comp_radius > 0.0)) {
+    return floor; // non-positive / non-finite radius: safe no-op, never a NaN
+  }
+  const double place_scale = placement.max_scale(); // composition units per content px (worst axis)
+  if (!(place_scale > 0.0) || !std::isfinite(place_scale)) {
+    return floor; // zero-area (both axes collapsed) / non-finite placement: safe no-op
+  }
+  if (!placement.inverse()) {
+    return floor; // non-invertible (a single collapsed axis) placement: no footprint
+                  // (brush_footprint)
+  }
+  // The SAME content-px radius `brush_footprint` derives (`comp_radius / placement.max_scale()`),
+  // doubled to a diameter — the native-pixel count the brush covers (1 content px = 1 native px,
+  // D-resolution-1). `max_scale` is the worst (most-magnified) axis, so `N` is floor-first
+  // (D-paint_res-3): a non-uniform placement reaches the floor on its most-magnified axis first.
+  const double diameter_px = 2.0 * (comp_radius / place_scale);
+  if (!std::isfinite(diameter_px) || !(diameter_px > 0.0)) {
+    return floor; // any residual non-finite: never a false floor
+  }
+  floor.cell_px = diameter_px;
+  floor.at_floor = diameter_px <= k_detail_floor_px;
+  floor.valid = true;
+  return floor;
+}
+
 PlacementReadout decompose_placement(const arbc::Affine& placement,
                                      const std::optional<arbc::Rect>& content_bounds) {
   PlacementReadout out;

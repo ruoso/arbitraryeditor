@@ -685,8 +685,9 @@ task editor "Editor — host GUI over libarbc" {
     task paint_res "Cell-fixed resolution painting; screen->cell mapping; detail-floor readout" {
       effort 2d
       allocate team
+      complete 100
       depends !brush
-      note "Dabs rasterize into the CELL's fixed working grid; the brush footprint maps camera px -> composition units -> cell px by affine composition. The '~N px on <cell>' readout doubles as the resolution-health / detail-floor cue. Design: D4/D5. Refinement: tasks/refinements/paint_res.md"
+      note "Dabs rasterize into the CELL's fixed working grid; the brush footprint maps camera px -> composition units -> cell px by affine composition. The '~N px on <cell>' readout doubles as the resolution-health / detail-floor cue. Design: D4/D5. Refinement: tasks/refinements/editor/paint_res.md"
     }
     task retouch_stack "Add-paint-layer-above a referenced photo (non-destructive)" {
       effort 1.5d

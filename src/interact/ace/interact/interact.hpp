@@ -347,6 +347,49 @@ struct ResolutionHealth {
 ResolutionHealth resolution_health(int native_w, int native_h, const arbc::Affine& placement,
                                    int cam_w, int cam_h, const arbc::Affine& cam_frame);
 
+// --- Brush detail floor (editor.paint.paint_res; D4/D5/§4) --------------------
+// The D5 secondary readout `~ N px on <cell>` and its detail-floor cue, as a pure L1 helper
+// over PRIMITIVE geometry beside `resolution_health` — the BRUSH-relative twin of that
+// CAMERA-relative verdict (§2 "resolution health is computable, not a vibe", the same
+// affine composition inverted onto the brush footprint instead of a camera). It answers §4
+// on the PAINT side: how many of the target cell's NATIVE pixels the screen brush's diameter
+// covers, and whether that count has fallen to the detail floor (below ~one native pixel,
+// where a dab maps sub-pixel and no real detail can be added, `docs/00-design.md:120-124`).
+
+// The detail-floor threshold in native pixels: the brush is AT the floor when its native-pixel
+// diameter is at or below this. A diameter of one native pixel or less maps below a single
+// cell pixel — sub-pixel, the §4 detail floor. Named so the readout text, the verdict, and the
+// tests share one number.
+inline constexpr double k_detail_floor_px = 1.0;
+
+struct BrushDetailFloor {
+  // The brush diameter expressed in the target cell's NATIVE pixels — the `N` in
+  // `~ N px on <cell>`. `2 * brush_footprint(...).radius`; 1 content px = 1 native px
+  // (D-resolution-1). 0 when `valid` is false.
+  double cell_px = 0.0;
+  // True when `cell_px <= k_detail_floor_px`: the brush maps to one native pixel or less — the
+  // detail floor, where painting adds no real detail (§4). Always false when `valid` is false
+  // (a resolution-independent / degenerate target has no floor, never a FALSE floor).
+  bool at_floor = false;
+  // False for a `ResolutionIndependent` target (no native grid ⇒ no px readout and no floor),
+  // a non-invertible / zero-area placement, or a non-positive/non-finite brush radius — the
+  // readout-absent sentinel (Constraint 4). No NaN, no div-by-zero, no false floor.
+  bool valid = false;
+};
+
+// The `~ N px` detail-floor readout for a screen brush of composition-space radius `comp_radius`
+// painting a cell placed by `placement` (content-px -> composition) whose native pixel grid is
+// present iff `has_native_pixels`. `N == 2 * comp_radius / placement.max_scale()` — the SAME
+// worst-axis (`max_scale`, floor-first) content-px radius `brush_footprint` derives
+// (D-paint_res-1/-3), doubled to a diameter; a non-uniform placement is judged by its MOST-
+// magnified axis, so the floor cue never over-reports headroom (Constraint 4). `has_native_pixels`
+// is `scene::CellDetail::native_pixels.has_value()` — false for a `ResolutionIndependent` target,
+// which yields no `N` (never a false floor). A non-invertible / zero-area `placement`, a
+// non-positive/non-finite `comp_radius`, or a non-finite scale yields `valid == false` — never a
+// div-by-zero. PURE, byte-deterministic; no `scene`/ImGui type crosses the seam (Constraint 1).
+BrushDetailFloor brush_detail_floor(double comp_radius, const arbc::Affine& placement,
+                                    bool has_native_pixels);
+
 // --- Transform readout (editor.panels.inspector; D7/§6) -----------------------
 // The inspector's live decomposition of a cell's placing-layer `Affine` into the D7/§6 display
 // quantities. PURE — takes only the placement `Affine` + the cell's content extent

@@ -307,6 +307,16 @@ The overview ships provisional idiom gestures (double-click-to-enter, zoom-contr
 
 ---
 
+## Anisotropic (elliptical) dab shape under non-uniform placement
+
+**Source:** `tasks/refinements/editor/paint_res.md` (editor.paint.paint_res, 2026-07-31) — D-paint_res-3 / Open questions.
+
+**Trigger:** a design row in `docs/00-design.md` demanding affine-correct (anisotropic) dabs, **or** the ring-vs-mark mismatch observed in real use on a non-uniformly-scaled cell.
+
+The shipped brush paints an isotropic circular `round_dab` (circular in content px). Under a non-uniform placement scale (an edge-dragged cell, D8 edges are 1D) a screen-circular brush ring maps to an ellipse in content px, so the painted mark does not exactly match the on-screen ring. The detail-floor cue is already worst-axis-correct (`placement.max_scale()`, D-paint_res-3), so the *floor verdict* is honest regardless; only the *mark shape* is approximate. This is agent-implementable when wanted — build an affine-correct `CoverageSampler` in L1 `interact` (map each content pixel back through the composed `camera∘placement` to evaluate the screen-space radial falloff) and add a `scene::brush_dab` overload taking that sampler — but no design row demands elliptical marks and the isotropic dab is exact under the common uniform placement. When the trigger fires, this becomes WBS leaf **`editor.paint.anisotropic_dab`** (~1.5d) wired into the `editor.packaging.package` gather.
+
+---
+
 ## Eyedropper modifier final key chord (Alt provisional)
 
 **Source:** `tasks/refinements/editor.panels/color_eyedrop_cell.md` (panels.color_eyedrop_cell, 2026-07-30) — D-eyedrop_cell-4.

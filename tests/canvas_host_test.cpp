@@ -2121,6 +2121,15 @@ TEST_CASE("canvas_host: UI-thread resolution-health reads run clean against the 
               cam.resolution.width, cam.resolution.height, cam.frame);
           REQUIRE(health.verdict != ace::interact::ResolutionVerdict::NotApplicable);
         }
+        // editor.paint.paint_res (Threading): the on-canvas `~ N px on <cell>` detail-floor readout
+        // performs the SAME per-frame const read — `cell.detail.native_pixels` presence +
+        // `cell.placement` — off the live pin() while the render thread walks the same document.
+        // The pure `brush_detail_floor` math over those raced reads adds NO new lock and NO new
+        // thread; a TSan/ASan report here is a real contract violation. The paint stream itself
+        // stays covered by brush's existing TSan anchor (unchanged).
+        const ace::interact::BrushDetailFloor floor = ace::interact::brush_detail_floor(
+            4.0, cell.placement, cell.detail.native_pixels.has_value());
+        REQUIRE(floor.valid); // a raster cell (native px present) always yields a number
       }
     }
   }

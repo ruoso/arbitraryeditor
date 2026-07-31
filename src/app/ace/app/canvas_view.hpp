@@ -153,6 +153,21 @@ public:
   // after a zoom (the scale readout tracks the camera; D-nav-6).
   double scale_bar_units(std::string_view view_id) const;
 
+  // The live `~ N px on <cell>` brush detail-floor readout (editor.paint.paint_res; D5/§4) most
+  // recently computed by `dispatch_brush` — the on-canvas cue's test-visible state (there is no
+  // screenshot golden for the shell rig; the e2e asserts this scene-truth mirror instead). A pure
+  // per-frame read (Constraint 2), never a transaction. `has_target` is true when a writable
+  // selection-primary / pinned-stroke raster is the brush's target; `cell_px` / `at_floor` are the
+  // `interact::brush_detail_floor` result, meaningful iff `valid`. All-false with no writable
+  // raster targeted (Constraint 5) — the readout is then absent (only the ring shows).
+  struct BrushReadout {
+    bool has_target = false; // a writable raster is the brush target this frame
+    bool valid = false;      // `brush_detail_floor` produced a native-px number
+    double cell_px = 0.0;    // N: the brush diameter in the target's native px
+    bool at_floor = false;   // N <= interact::k_detail_floor_px (the §4 detail floor)
+  };
+  BrushReadout brush_readout() const;
+
   // The per-pane composition-grid display toggle + spacing (editor.canvas.grid, D-grid-1):
   // transient session state, never a transaction. `set_*` drives the pane's grid from the e2e /
   // overlay control; the readback reports `false`/`0.0` for an unknown id. When the grid is shown
@@ -453,6 +468,10 @@ private:
   // `commands::AppState` active color, which `dispatch_brush` reads through
   // `state_.active_working_color()` — the one project-level seam every paint consumer shares.
   double brush_slider_t_ = 0.0; // seeded in the ctor from a default fraction
+  // The `~ N px on <cell>` detail-floor readout last computed by `dispatch_brush` (editor.paint.
+  // paint_res; D5/§4). Recomputed every frame the Brush tool is active; all-false when no writable
+  // raster is the target. Session state, never a transaction — the on-canvas cue's test mirror.
+  BrushReadout brush_readout_;
 };
 
 } // namespace ace::app

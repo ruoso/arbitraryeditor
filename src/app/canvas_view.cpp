@@ -550,6 +550,79 @@ void CanvasView::dispatch_brush(Presenter& p, const views::CanvasInput& in, int 
       (cam_scale > 0.0 && std::isfinite(cam_scale)) ? short_edge_px / cam_scale : 0.0;
   const double comp_radius = 0.5 * interact::brush_units(view_fraction, short_edge_units);
 
+  // The live `~ N px on <cell>` detail-floor readout (editor.paint.paint_res; D5/§4). A pure
+  // per-frame read (Constraint 2): it opens no transaction and mutates nothing, deriving the
+  // brush's native-pixel diameter on the TARGET cell from the same pinned snapshot the canvas
+  // already reads. Computed BEFORE the paint early-returns below so it is live during a plain
+  // hover (D-paint_res-5: the cue helps the user decide whether to zoom, before painting). The
+  // target is the pinned stroke cell mid-drag, else the current selection-primary `PaintedRaster`
+  // (Constraint 5, the brush's own target model); with no writable raster the readout is absent
+  // (`has_target` false — only the ring shows). The `N`/floor math is pure L1 `interact`.
+  brush_readout_ = BrushReadout{};
+  {
+    arbc::Affine target_placement = arbc::Affine::identity();
+    bool have_target = false;
+    bool has_native = false;
+    std::string target_label;
+    const arbc::ObjectId comp =
+        scene::active_composition(state_.document(), state_.entered_composition());
+    if (p.brush_stroke_active) {
+      // Mid-stroke: the placement is the one PINNED at press (a mid-stroke selection change cannot
+      // redirect it, D-brush-5); re-resolve the live cell only for its native-px presence + label.
+      for (const scene::Cell& cell : scene::cells(state_.document(), state_.registry(), comp)) {
+        if (cell.id == p.brush_stroke_cell) {
+          target_placement = p.brush_stroke_placement;
+          has_native = cell.detail.native_pixels.has_value();
+          target_label = cell.kind_id;
+          have_target = true;
+          break;
+        }
+      }
+    } else {
+      const commands::Selection& selection = state_.selection();
+      const arbc::ObjectId primary = selection.primary();
+      if (primary.valid()) {
+        for (const scene::Cell& cell : scene::cells(state_.document(), state_.registry(), comp)) {
+          if (cell.id == primary && cell.detail.source == scene::DetailSource::PaintedRaster) {
+            target_placement = cell.placement;
+            has_native = cell.detail.native_pixels.has_value();
+            target_label = cell.kind_id;
+            have_target = true;
+            break;
+          }
+        }
+      }
+    }
+    if (have_target) {
+      brush_readout_.has_target = true;
+      const interact::BrushDetailFloor floor =
+          interact::brush_detail_floor(comp_radius, target_placement, has_native);
+      brush_readout_.valid = floor.valid;
+      brush_readout_.cell_px = floor.cell_px;
+      brush_readout_.at_floor = floor.at_floor;
+      // The on-canvas label, drawn AT the cursor beside the ring (D-paint_res-5). Only when the
+      // pointer is over the pane and the helper yields a number — a `ResolutionIndependent` /
+      // degenerate target shows the ring but no px text (Constraint 4/5). ASCII only (the default
+      // ImGui font has no `~=`/`<>` guillemet glyphs); the cell label is the kind id's leaf. The
+      // floor cue STATES the condition and offers NO resample action (Constraint 6 /
+      // D-paint_res-4).
+      if (in.hovered && floor.valid) {
+        const std::string::size_type dot = target_label.find_last_of('.');
+        const std::string leaf =
+            dot == std::string::npos ? target_label : target_label.substr(dot + 1);
+        char readout[96];
+        if (floor.at_floor) {
+          std::snprintf(readout, sizeof(readout), "~ 1 px on %s - detail floor", leaf.c_str());
+        } else {
+          std::snprintf(readout, sizeof(readout), "~ %.0f px on %s", floor.cell_px, leaf.c_str());
+        }
+        ImDrawList* readout_draw = ImGui::GetWindowDrawList();
+        readout_draw->AddText(ImVec2(origin_x + in.focus_x + 12.0F, origin_y + in.focus_y + 12.0F),
+                              accent(220), readout);
+      }
+    }
+  }
+
   if (space) {
     // A Space-pan claimed the pointer: abandon any in-flight stroke so a released-elsewhere button
     // cannot resume it, and deposit nothing.
@@ -1439,6 +1512,8 @@ double CanvasView::scale_bar_units(std::string_view view_id) const {
   auto it = presenters_.find(view_id);
   return it == presenters_.end() ? 0.0 : it->second.scale_bar_units;
 }
+
+CanvasView::BrushReadout CanvasView::brush_readout() const { return brush_readout_; }
 
 std::vector<PaneFraming> CanvasView::pane_rows() const {
   // `presenters_` is key-ordered but its keys are ordered by BYTES (`std::less<>`), which puts

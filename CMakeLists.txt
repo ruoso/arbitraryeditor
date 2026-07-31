@@ -287,6 +287,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/overview_gizmo_test.cpp
                          tests/hatch_swatch_test.cpp
                          tests/brush_test.cpp
+                         tests/paint_res_test.cpp
                          tests/color_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
@@ -356,6 +357,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/overview_gizmo_e2e_test.cpp
                               tests/hatch_swatch_e2e_test.cpp
                               tests/brush_e2e_test.cpp
+                              tests/paint_res_e2e_test.cpp
                               tests/color_e2e_test.cpp
                               tests/welcome_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
