@@ -17,6 +17,8 @@
 #include <arbc/base/ids.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/compositor/compositor.hpp>
+#include <arbc/compositor/operator_graph.hpp>
+#include <arbc/kind_fade/fade_content.hpp>
 #include <arbc/kind_nested/nested_content.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/media/pixel_traits.hpp>
@@ -110,6 +112,34 @@ arbc::WorkingPixel hand_layer_pixel(const arbc::Document& doc, arbc::ObjectId la
   arbc::render_layer(resolve, *record, composed, arbc::Rect{0.0, 0.0, 1.0, 1.0}, backend, pool,
                      **target);
   return arbc::visit_surface(**target, [](auto typed) -> arbc::WorkingPixel {
+    using Traits = arbc::PixelTraits<decltype(typed)::format>;
+    return Traits::decode(typed.data.data());
+  });
+}
+
+// A byte-exact reference for the NESTED sampler (editor.panels.color_eyedrop_nested): a hand-driven
+// `render_offline` of exactly the cell's child composition into a 1×1 target, anchored at that
+// child so the frame walk draws only the child's own members (`compositor.hpp:20-27`), against the
+// same pin the sampler uses. This is the isolated-render twin of `hand_layer_pixel` for a nested
+// cell — what `sample_cell_color`'s anchored branch must reproduce byte-for-byte.
+arbc::WorkingPixel hand_nested_pixel(const arbc::Document& doc, arbc::ObjectId layer,
+                                     const arbc::Affine& camera, double x, double y) {
+  const arbc::DocStatePtr state = doc.pin();
+  REQUIRE(state);
+  const arbc::LayerRecord* record = state->find_layer(layer);
+  REQUIRE(record != nullptr);
+  arbc::Content* content = doc.resolve(record->content);
+  REQUIRE(content != nullptr);
+  const arbc::ObjectId child = content->composition_ref();
+  REQUIRE(child.valid());
+  const arbc::Affine shifted = arbc::compose(arbc::Affine::translation(-x, -y), camera);
+  const arbc::Affine composed = arbc::compose(shifted, record->transform);
+  arbc::CpuBackend backend;
+  const arbc::Viewport viewport{1, 1, composed, child};
+  const arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> frame =
+      arbc::render_offline(doc, state, viewport, backend);
+  REQUIRE(frame.has_value());
+  return arbc::visit_surface(**frame, [](auto typed) -> arbc::WorkingPixel {
     using Traits = arbc::PixelTraits<decltype(typed)::format>;
     return Traits::decode(typed.data.data());
   });
@@ -293,11 +323,14 @@ TEST_CASE("color: sample_cell_color of a leaf recovers its own STRAIGHT colour (
   CHECK(working_to_srgb(*sampled) == authored); // decoded to the authored straight sRGB, exactly
 }
 
-TEST_CASE("color: sample_cell_color returns nullopt for a non-cell id and for a non-isolable "
-          "(nested/operator) cell") {
-  // The leaf/operator gate (D-eyedrop_cell-2): an id that names no placed layer, and a cell whose
-  // content pulls inputs through a pull service a bare `render_layer` does not stand up, both yield
-  // `std::nullopt` so the arm degrades to the composited sample (D-eyedrop_cell-3).
+TEST_CASE("color: sample_cell_color returns nullopt for a non-cell id and for an operator cell "
+          "(the retained gate)") {
+  // The operator gate (D-eyedrop_cell-2 / D-eyedrop_nested-3): an id that names no placed layer,
+  // and an OPERATOR cell (non-empty `inputs()`) both yield `std::nullopt` so the arm degrades to
+  // the composited sample (D-eyedrop_cell-3). The NESTED case that previously stood here as a
+  // non-isolable example MOVED OUT — editor.panels.color_eyedrop_nested lifts a valid
+  // `composition_ref()` into the anchored `render_offline` branch, so a nested cell now returns a
+  // value (asserted by the nested golden above); only the `is_operator` clause remains a `nullopt`.
   constexpr int k_edge = 64;
   arbc::Document doc;
   const arbc::ObjectId comp =
@@ -308,16 +341,16 @@ TEST_CASE("color: sample_cell_color returns nullopt for a non-cell id and for a 
   CHECK(!sample_cell_color(doc, camera, arbc::ObjectId{}, 30.0, 30.0).has_value());
   CHECK(!sample_cell_color(doc, camera, arbc::ObjectId{999999}, 30.0, 30.0).has_value());
 
-  // A nested-composition cell: its content answers a valid `composition_ref()`, so the structural
-  // gate refuses the isolated render (the library's own predicate, not a kind allow-list). A child
-  // composition supplies the ref; the isolated path never renders it.
-  const arbc::ObjectId child =
-      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
-  const arbc::ObjectId nested_content =
-      doc.add_content(std::make_shared<arbc::NestedContent>(child));
-  const arbc::ObjectId nested_layer = doc.add_layer(nested_content, arbc::Affine::identity());
-  doc.attach_layer(comp, nested_layer);
-  CHECK(!sample_cell_color(doc, camera, nested_layer, 30.0, 30.0).has_value());
+  // An OPERATOR cell: a fade content has one input, so `arbc::is_operator` is true and the gate
+  // refuses the isolated render (the library's structural predicate, not a kind allow-list — still
+  // no still-image authoring surface for operators, D-eyedrop_nested-3). The input pointer is never
+  // dereferenced (the gate only inspects `inputs().size()`), so a null input is sufficient to trip
+  // it; the sampler returns `std::nullopt` before any render.
+  const arbc::ObjectId op_content = doc.add_content(std::make_shared<arbc::FadeContent>(
+      static_cast<arbc::ContentRef>(nullptr), arbc::FadeParams{}));
+  const arbc::ObjectId op_layer = doc.add_layer(op_content, arbc::Affine::identity());
+  doc.attach_layer(comp, op_layer);
+  CHECK(!sample_cell_color(doc, camera, op_layer, 30.0, 30.0).has_value());
 }
 
 TEST_CASE("color: sample_cell_color decodes the isolated pixel through every working-space storage "
@@ -350,4 +383,200 @@ TEST_CASE("color: sample_cell_color decodes the isolated pixel through every wor
     CHECK(std::abs((*own)[2] - k_own[2]) < 0.02F);
     CHECK(std::abs((*own)[3] - k_own[3]) < 0.01F);
   }
+}
+
+// --- The nested-composition branch (editor.panels.color_eyedrop_nested, D-eyedrop_nested-1/-2/-4)
+
+TEST_CASE("color: sample_cell_color of a nested cell returns the child composition's own colour "
+          "(anchored render_offline golden-in-a-value)") {
+  // A two-level document: a CHILD composition holding one solid of a known premultiplied-linear
+  // colour, and a NESTED cell placing that child in the ROOT. `sample_cell_color` of the nested
+  // cell's layer renders the child composition IN ISOLATION — anchored at the child so the frame
+  // walk draws exactly its own members, through the full pull-service pipeline — and returns the
+  // child solid's OWN straight colour. Byte-exact (working space rgba32f) against both the authored
+  // constant AND a hand-driven anchored `render_offline` reference (`hand_nested_pixel`). This is
+  // the leaf's binding golden-in-a-value (Constraints 1, 2, 4).
+  constexpr int k_edge = 64;
+  const arbc::WorkingPixel k_own{0.5F, 0.25F, 0.1F, 1.0F}; // opaque premultiplied-linear
+  arbc::Document doc;
+  const arbc::ObjectId root = // lowest id -> the document root the sampler renders under
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId child =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId child_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{k_own[0], k_own[1], k_own[2], k_own[3]}, arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+  doc.attach_layer(child, doc.add_layer(child_content, arbc::Affine::identity()));
+  const arbc::ObjectId nested_content =
+      doc.add_content(std::make_shared<arbc::NestedContent>(child));
+  const arbc::ObjectId nested_layer = doc.add_layer(nested_content, arbc::Affine::identity());
+  doc.attach_layer(root, nested_layer);
+
+  const arbc::Affine camera = arbc::Affine::identity();
+  // At (30,30) — inside the child solid's [10,50]^2 through the identity placement — the nested
+  // cell's own composited colour is the child solid, byte-exact.
+  const std::optional<arbc::WorkingPixel> own =
+      sample_cell_color(doc, camera, nested_layer, 30.0, 30.0);
+  REQUIRE(own.has_value());
+  CHECK(*own == k_own); // the child composition's own composited straight colour
+  CHECK(*own == hand_nested_pixel(doc, nested_layer, camera, 30.0, 30.0));
+  // Decoded to sRGB it is a real opaque colour — never a premultiplied/linear leak (§7:279).
+  CHECK(working_to_srgb(*own).a == 255);
+}
+
+TEST_CASE("color: sample_cell_color of a nested cell returns its child's own colour under an "
+          "occluder; the composite there is the front sibling (nested isolation proof)") {
+  // The nested twin of the leaf occluder proof (Constraint 1): a nested cell whose child holds a
+  // known solid, partly covered in the ROOT by an opaque LEAF sibling of a distinct colour added
+  // AFTER it (so the sibling is higher in z). At the overlap point, `sample_cell_color` of the
+  // nested cell returns the CHILD's own colour (isolated), while `sample_composited_color` returns
+  // the OCCLUDER's — the two samplers disagree exactly where the sibling occludes. The proof rests
+  // only on leaf compositing (the occluder and the child's leaf member), so it is robust regardless
+  // of how a nested-at-root operator would bind.
+  constexpr int k_edge = 64;
+  const arbc::WorkingPixel k_child{0.5F, 0.25F, 0.1F, 1.0F}; // opaque premultiplied-linear
+  const arbc::WorkingPixel k_front{0.2F, 0.4F, 0.8F, 1.0F};  // opaque, distinct occluder
+  arbc::Document doc;
+  const arbc::ObjectId root =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId child =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId child_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{k_child[0], k_child[1], k_child[2], k_child[3]},
+      arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+  doc.attach_layer(child, doc.add_layer(child_content, arbc::Affine::identity()));
+  const arbc::ObjectId nested_content =
+      doc.add_content(std::make_shared<arbc::NestedContent>(child));
+  const arbc::ObjectId nested_layer = doc.add_layer(nested_content, arbc::Affine::identity());
+  doc.attach_layer(root, nested_layer);
+  // An opaque leaf occluder in the ROOT over [20,40]^2, added AFTER the nested cell (higher z).
+  const arbc::ObjectId front_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{k_front[0], k_front[1], k_front[2], k_front[3]},
+      arbc::Rect{20.0, 20.0, 40.0, 40.0}));
+  doc.attach_layer(root, doc.add_layer(front_content, arbc::Affine::identity()));
+
+  const arbc::Affine camera = arbc::Affine::identity();
+  const std::optional<arbc::WorkingPixel> own =
+      sample_cell_color(doc, camera, nested_layer, 30.0, 30.0);
+  REQUIRE(own.has_value());
+  CHECK(*own == k_child); // the child's own colour, unmixed with the sibling occluder
+  CHECK(*own == hand_nested_pixel(doc, nested_layer, camera, 30.0, 30.0));
+  // The composite at the SAME point is the FRONT occluder (opaque, on top) — the samplers disagree.
+  const arbc::WorkingPixel composite = sample_composited_color(doc, camera, 30.0, 30.0);
+  CHECK(composite == k_front);
+  CHECK(*own != composite);
+}
+
+TEST_CASE(
+    "color: sample_cell_color of a nested cell resolves nested-within-nested to the innermost "
+    "own colour (full pull service)") {
+  // A 2-deep chain: the OUTER nested cell's child composition (`mid`) itself contains a nested cell
+  // wrapping an INNERMOST solid (`inner`). `sample_cell_color` of the outer nested cell returns the
+  // innermost solid's own colour — pinning that the anchored `render_offline` stands up the full
+  // pull service (`offline.cpp:50-52`, register_builtin_operator_binders + bind_operators) so the
+  // isolated sample is not limited to a single level (Constraint 1 / the v0.4.0 render-path
+  // unification). All in-document compositions, so no external settle is involved.
+  constexpr int k_edge = 64;
+  const arbc::WorkingPixel k_inner{0.3F, 0.6F, 0.2F, 1.0F}; // opaque premultiplied-linear
+  arbc::Document doc;
+  const arbc::ObjectId root =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId mid = // the outer cell's child composition
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId inner = // the mid cell's child composition
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId inner_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{k_inner[0], k_inner[1], k_inner[2], k_inner[3]},
+      arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+  doc.attach_layer(inner, doc.add_layer(inner_content, arbc::Affine::identity()));
+  const arbc::ObjectId mid_nested = doc.add_content(std::make_shared<arbc::NestedContent>(inner));
+  doc.attach_layer(mid, doc.add_layer(mid_nested, arbc::Affine::identity()));
+  const arbc::ObjectId outer_nested = doc.add_content(std::make_shared<arbc::NestedContent>(mid));
+  const arbc::ObjectId outer_layer = doc.add_layer(outer_nested, arbc::Affine::identity());
+  doc.attach_layer(root, outer_layer);
+
+  const arbc::Affine camera = arbc::Affine::identity();
+  const std::optional<arbc::WorkingPixel> own =
+      sample_cell_color(doc, camera, outer_layer, 30.0, 30.0);
+  REQUIRE(own.has_value());
+  CHECK(*own == k_inner); // resolved through both nesting levels to the innermost own colour
+  CHECK(*own == hand_nested_pixel(doc, outer_layer, camera, 30.0, 30.0));
+}
+
+TEST_CASE("color: sample_cell_color decodes the nested branch's isolated pixel through every "
+          "working-space storage format") {
+  // The nested twin of the leaf format sweep: the anchored `render_offline` allocates its 1×1
+  // target at the document (root) working space, and the sampler reads pixel 0 through
+  // `arbc::visit_surface` — so sampling a nested cell under each configured working space warms
+  // every storage instantiation on the new path (rgba32f / rgba16f / rgba8srgb). Round-trip within
+  // each format's precision (f16 and 8-bit sRGB quantize); the library owns the codec (D-color-2).
+  constexpr int k_edge = 64;
+  const arbc::WorkingPixel k_own{0.5F, 0.25F, 0.1F, 1.0F}; // opaque premultiplied-linear
+  for (const arbc::SurfaceFormat& space :
+       {arbc::k_working_rgba32f, arbc::k_working_rgba16f, arbc::k_fast_rgba8srgb}) {
+    arbc::Document doc;
+    const arbc::ObjectId root =
+        doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+    const arbc::ObjectId child =
+        doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+    // `render_offline` allocates the target at the document (root) working space, so set it there —
+    // that is the format the nested branch's `visit_surface` read-back decodes.
+    doc.set_working_space(root, space);
+    const arbc::ObjectId child_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+        arbc::Rgba{k_own[0], k_own[1], k_own[2], k_own[3]}, arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+    doc.attach_layer(child, doc.add_layer(child_content, arbc::Affine::identity()));
+    const arbc::ObjectId nested_content =
+        doc.add_content(std::make_shared<arbc::NestedContent>(child));
+    const arbc::ObjectId nested_layer = doc.add_layer(nested_content, arbc::Affine::identity());
+    doc.attach_layer(root, nested_layer);
+
+    const std::optional<arbc::WorkingPixel> own =
+        sample_cell_color(doc, arbc::Affine::identity(), nested_layer, 30.0, 30.0);
+    REQUIRE(own.has_value());
+    // Opaque, so premultiplied == straight; each storage recovers the own colour to its precision.
+    CHECK(std::abs((*own)[0] - k_own[0]) < 0.02F);
+    CHECK(std::abs((*own)[1] - k_own[1]) < 0.02F);
+    CHECK(std::abs((*own)[2] - k_own[2]) < 0.02F);
+    CHECK(std::abs((*own)[3] - k_own[3]) < 0.01F);
+  }
+}
+
+TEST_CASE("color: sample_cell_color of a nested cell degrades to nullopt when the render cannot be "
+          "stored") {
+  // The nested arm's error path (D-eyedrop_nested-1's closing promise): "a null/unstorable frame
+  // returns `std::nullopt`, so the arm degrades to the composited sample exactly as the leaf error
+  // path does". The caller (`dispatch_eyedropper`) reads that `nullopt` as "no isolated answer" and
+  // falls back to `sample_composited_color`, so the modifier degrades to the plain sample rather
+  // than reporting a wrong colour or a black one.
+  //
+  // Driven honestly, through the library's own capability gate rather than a stub: the CPU backend
+  // stores exactly the three closed working formats (premultiplied linear rgba32f/rgba16f and the
+  // straight-alpha 8-bit sRGB fast mode), so a tag triple no codec honors -- gamma-space rgba32f
+  // here -- is genuinely unstorable and `render_offline` surfaces it as an error value, never a
+  // crash. The sampler allocates its 1×1 target at the DOCUMENT (root) working space, so setting
+  // it there is what the anchored render fails on.
+  constexpr int k_edge = 64;
+  constexpr arbc::SurfaceFormat k_unstorable{arbc::PixelFormat::Rgba32fLinearPremul, arbc::k_srgb,
+                                             arbc::Premultiplied::Yes};
+
+  arbc::Document doc;
+  const arbc::ObjectId root =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId child =
+      doc.add_composition(static_cast<double>(k_edge), static_cast<double>(k_edge));
+  const arbc::ObjectId child_content = doc.add_content(std::make_shared<arbc::SolidContent>(
+      arbc::Rgba{0.5F, 0.25F, 0.1F, 1.0F}, arbc::Rect{10.0, 10.0, 50.0, 50.0}));
+  doc.attach_layer(child, doc.add_layer(child_content, arbc::Affine::identity()));
+  const arbc::ObjectId nested_content =
+      doc.add_content(std::make_shared<arbc::NestedContent>(child));
+  const arbc::ObjectId nested_layer = doc.add_layer(nested_content, arbc::Affine::identity());
+  doc.attach_layer(root, nested_layer);
+
+  // The SAME scene stores fine at a storable working space -- so the nullopt below is the
+  // unstorable path talking, not an empty scene or a mis-anchored sample.
+  doc.set_working_space(root, arbc::k_working_rgba32f);
+  REQUIRE(sample_cell_color(doc, arbc::Affine::identity(), nested_layer, 30.0, 30.0).has_value());
+
+  doc.set_working_space(root, k_unstorable);
+  CHECK_FALSE(
+      sample_cell_color(doc, arbc::Affine::identity(), nested_layer, 30.0, 30.0).has_value());
 }

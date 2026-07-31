@@ -22,7 +22,12 @@
 //     (isolated single-cell render), while a plain click at the same point yields the FRONT
 //     composite — the modifier and the default visibly diverge;
 //   * eyedropper modifier fallback — Alt-clicking with NO cell selected degrades to the composited
-//     sample (never empty/black), proving the std::nullopt graceful fallback.
+//     sample (never empty/black), proving the std::nullopt graceful fallback;
+//   * eyedropper modifier → NESTED own colour (editor.panels.color_eyedrop_nested) — Alt-clicking a
+//     selected nested cell under an opaque leaf occluder sets active_color() to the CHILD
+//     composition's OWN sRGB (the anchored render_offline branch), while a plain click yields the
+//     occluder composite — the modifier and default diverge on a nested cell, inverting the
+//     predecessor's nested→nullopt fallback phase.
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/color_panel.hpp>
 #include <ace/app/folder_dialog.hpp>
@@ -47,6 +52,7 @@
 #include <arbc/media/pixel_traits.hpp>
 #include <arbc/model/journal.hpp>
 #include <arbc/runtime/document.hpp>
+#include <arbc/runtime/worker_pool.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -98,6 +104,14 @@ constexpr arbc::WorkingPixel k_backdrop{0.15F, 0.2F, 0.25F, 1.0F};
 // composite) diverge.
 constexpr arbc::WorkingPixel k_back{0.5F, 0.25F, 0.1F, 1.0F};
 constexpr arbc::WorkingPixel k_front{0.2F, 0.4F, 0.8F, 1.0F};
+// The NESTED-cell modifier's own-colour/occluder pair (editor.panels.color_eyedrop_nested): a
+// nested cell whose CHILD composition holds a known opaque solid, placed in the root over
+// [10,50]x[190,230], partly covered by a known opaque LEAF sibling over [30,50]x[190,210] added
+// after it (higher z). Alt-Eyedropping the nested cell inside the overlap samples the child's OWN
+// colour (isolated, via the anchored render_offline branch); a plain click there yields the
+// occluder's composite — the modifier and default diverge on a nested cell.
+constexpr arbc::WorkingPixel k_nested_own{0.7F, 0.3F, 0.5F, 1.0F};
+constexpr arbc::WorkingPixel k_nested_occ{0.1F, 0.6F, 0.9F, 1.0F};
 
 struct ScratchDir {
   std::filesystem::path root;
@@ -135,16 +149,25 @@ arbc::ObjectId seed(AppState& state, arbc::ObjectId& back, arbc::ObjectId& front
                            arbc::Affine::identity());
   back = b.has_value() ? *b : arbc::ObjectId{};
   front = f.has_value() ? *f : arbc::ObjectId{};
-  // A NESTED cell in an empty bottom-left region ([10,50]x[190,230]) — a non-isolable cell (its
-  // content answers a valid `composition_ref()`, so `sample_cell_color` gates to std::nullopt). It
-  // is pickable (bounds-based, D-selection-11) yet renders transparent (empty child), so the
-  // isolated eyedropper degrades to the composited backdrop there — the `break` fall-through
-  // (editor.panels.color_eyedrop_cell / canvas_view.cpp). Placed clear of every earlier sample
-  // point so phases i–vi are undisturbed.
+  // A NESTED cell in the bottom-left region ([10,50]x[190,230]) whose CHILD composition holds a
+  // known opaque solid — an ISOLABLE cell now (editor.panels.color_eyedrop_nested): its content
+  // answers a valid `composition_ref()`, so `sample_cell_color` renders the child in isolation and
+  // returns its own colour. A known opaque LEAF sibling occludes part of it ([30,50]x[190,210],
+  // added after so it is higher in z), so the modifier (child's own colour) and the default
+  // (occluder composite) diverge inside the overlap. Placed clear of every earlier sample point so
+  // phases i–vi are undisturbed.
   const arbc::ObjectId child = doc.add_composition(40.0, 40.0);
+  // The child's own colour: an unbounded solid filling the child composition, added INTO the child
+  // (entered=child), so the isolated anchored render composites it whole.
+  ace::scene::add_cell(doc, state.registry(), "org.arbc.solid", "0.7,0.3,0.5,1",
+                       arbc::Affine::identity(), child);
   const arbc::expected<arbc::ObjectId, std::string> n =
       ace::scene::add_cell(doc, state.registry(), "org.arbc.nested", std::to_string(child.value),
                            arbc::Affine::translation(10.0, 190.0));
+  // The occluder over the nested cell's top-right region ([30,50]x[190,210]) in the ROOT, opaque
+  // and distinct, added AFTER the nested cell so it is on top in the overlap.
+  ace::scene::add_cell(doc, state.registry(), "org.arbc.solid", "0.1,0.6,0.9,1,30,190,20,20",
+                       arbc::Affine::identity());
   nested = n.has_value() ? *n : arbc::ObjectId{};
   return r.has_value() ? *r : arbc::ObjectId{};
 }
@@ -245,7 +268,14 @@ TEST_CASE("color e2e: boot continuity, picker->state, picker->brush boundary, ey
   opts.height = 640;
   REQUIRE(shell.init(opts));
 
-  CanvasView canvas(state, session.writer());
+  // The live canvas composites a NESTED cell with non-empty child content (the nested own-colour
+  // phase below), so route its render through the inline settle-fully pool (`WorkerPoolConfig{}`,
+  // byte-identical to the threaded default) rather than the interactive worker pool — the
+  // arbc-nested-render-worker-detach-race memo: a threaded nested render trips arbc v0.4.0's
+  // "NestedContent rendered before attach" detach path. The eyedropper's own-colour sampler is
+  // single-threaded (`render_offline` / `direct_dispatch`) regardless, so this only bounds the live
+  // composite; interactive worker threading over the nested sampler is covered by the TSan case.
+  CanvasView canvas(state, session.writer(), arbc::WorkerPoolConfig{}, std::chrono::hours(1));
   ColorPanel color_panel(state);
   ace::dock::Dockspace dockspace;
   ace::views::register_view_body(ViewType::Canvas, [&canvas, &dockspace](std::string_view view_id) {
@@ -437,19 +467,29 @@ TEST_CASE("color e2e: boot continuity, picker->state, picker->brush boundary, ey
     alt_click_at(at(200.0F, 200.0F)); // backdrop-only region; no cell selected -> composited sample
     IM_CHECK(near_srgb(state.active_color(), expected_backdrop_fallback, 4));
 
-    // --- (vii) Non-isolable selected cell -> the `break` fall-through (editor.panels.
-    // -------- color_eyedrop_cell). Select the NESTED cell, then Alt-Eyedrop it: the modifier
-    // enters the selected-cell arm, but `sample_cell_color` gates a nested (composition_ref) cell
-    // to std::nullopt, so the gesture breaks out and degrades to the composited sample — the empty
-    // child renders transparent, so the composite there is the backdrop. Distinct from (vi): here a
-    // cell IS selected, exercising the loop's `break`, not the invalid-primary skip.
+    // --- (vii) Modifier -> nested OWN colour (the nested isolation proof, editor.panels.
+    // -------- color_eyedrop_nested). Select the NESTED cell (a nested-only point, outside the
+    // occluder), move the active colour away, then Alt-Eyedrop the OVERLAP: `sample_cell_color`
+    // renders the child composition in isolation (the anchored `render_offline` branch) and
+    // active_color() is the CHILD's own sRGB. A plain (no-Alt) click at the SAME point yields the
+    // OCCLUDER composite — the modifier and the default diverge on a nested cell, exactly as they
+    // did for the leaf pair in (v). This INVERTS the predecessor phase, which drove Alt on a nested
+    // cell to prove nullopt -> composite; a nested cell now yields its own colour, and the graceful
+    // std::nullopt fallback proof lives in (vi) above (empty selection — a still-non-isolable
+    // case).
+    const SrgbColor nested_own_srgb = ace::commands::working_to_srgb(k_nested_own);
+    const SrgbColor nested_occ_srgb = ace::commands::working_to_srgb(k_nested_occ);
     set_tool(ToolId::Select);
-    click_at(at(30.0F, 210.0F)); // inside the nested cell's bounds ([10,50]x[190,230])
+    click_at(
+        at(20.0F, 220.0F)); // inside nested [10,50]x[190,230], outside occluder [30,50]x[190,210]
     IM_CHECK(sel.primary() == nested);
-    set_rgb(250, 10, 250); // away from the backdrop so the composited fall-through is observable
+    set_rgb(10, 250,
+            10); // move away from both the child and the occluder so the sample is a change
     set_tool(ToolId::Eyedropper);
-    alt_click_at(at(30.0F, 210.0F)); // selected nested -> nullopt -> break -> composited backdrop
-    IM_CHECK(near_srgb(state.active_color(), expected_backdrop_fallback, 4));
+    alt_click_at(at(40.0F, 200.0F)); // inside the overlap: the child's OWN colour, isolated
+    IM_CHECK(near_srgb(state.active_color(), nested_own_srgb, 4));
+    click_at(at(40.0F, 200.0F)); // plain: the composite there is the OCCLUDER (opaque, on top)
+    IM_CHECK(near_srgb(state.active_color(), nested_occ_srgb, 4));
   };
   ImGuiTestEngine_QueueTest(engine, test);
 

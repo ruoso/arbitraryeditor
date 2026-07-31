@@ -641,9 +641,12 @@ void CanvasView::dispatch_eyedropper(Presenter& p, const views::CanvasInput& in)
   // the composite. Resolve the selection-primary content to its placing layer through the same
   // `scene::cells` walk the brush uses, call the isolated `commands::sample_cell_color`, and on a
   // value decode + set exactly as the composited path does. On `std::nullopt` (Alt not held, no
-  // cell selected, or a content the isolated render cannot represent — an operator / nested cell)
-  // the gesture falls through to the shipped composited sample, so it always yields a meaningful
-  // colour (D-eyedrop_cell-3/-4). Alt is the provisional binding pending the full input map.
+  // cell selected, or a content the isolated render cannot represent — an operator, or a nested
+  // cell whose child composition is not yet resolved) the gesture falls through to the shipped
+  // composited sample, so it always yields a meaningful colour (D-eyedrop_cell-3/-4 /
+  // D-eyedrop_nested-3). A nested cell with a resolved child now samples its own colour via the
+  // sampler's anchored `render_offline` branch (editor.panels.color_eyedrop_nested). Alt is the
+  // provisional binding pending the full input map.
   if (!(in.down || in.released)) {
     return;
   }

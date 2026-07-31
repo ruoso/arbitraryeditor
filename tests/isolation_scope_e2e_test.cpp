@@ -253,7 +253,19 @@ TEST_CASE(
     shell.render(grab_frame);
     ImGuiTestEngine_PostSwap(engine);
     const int ph = e2e.phase.load();
-    if (ph == 1 && !e2e.enter_done.load()) {
+    // Only accept the baseline once the async canvas render has actually PRESENTED the seeded scene
+    // (a green parent pixel AND the red child): `frames_issued >= 1` (the coroutine's phase-1 gate)
+    // means a frame was ISSUED, not that its readback has landed, so under container/software-GL
+    // load the frame at the moment the coroutine reaches phase 1 can still be the pre-content frame
+    // — a blind grab then captures an empty frame and `find_dominant` below returns -1 (a warm-up
+    // race, not a scrim bug). If the content genuinely never renders, the coroutine's `pump_until`
+    // times out, `grabs.root` stays empty, and `REQUIRE(grabs.root.size() == …)` still fails: this
+    // guard removes the race, it does not hide a regression.
+    const bool root_ready =
+        find_dominant(last_frame, opts.width, opts.height, 0, opts.width, /*want_red=*/false) >=
+            0 &&
+        find_dominant(last_frame, opts.width, opts.height, 0, opts.width, /*want_red=*/true) >= 0;
+    if (ph == 1 && !e2e.enter_done.load() && root_ready) {
       grabs.root = last_frame;
       state.entered_composition() = child;
       e2e.before_enter.store(canvas.frames_issued("canvas#1"));
@@ -387,7 +399,16 @@ TEST_CASE("isolation_scope e2e: entering the scope dims BOTH open canvases (D19)
     shell.render(grab_frame);
     ImGuiTestEngine_PostSwap(engine);
     const int ph = e2e.phase.load();
-    if (ph == 1 && !e2e.enter_done.load()) {
+    // Baseline warm-up guard (see the single-canvas case): accept the baseline only once BOTH panes
+    // have PRESENTED their green content, so the phase-1 grab is never the pre-content frame under
+    // container/software-GL load. A genuine no-render regression times out `pump_until` and leaves
+    // `grabs.root` empty, still tripping the `REQUIRE(grabs.root.size() == …)` below.
+    const bool root_ready =
+        find_dominant(last_frame, opts.width, opts.height, 0, opts.width / 2, /*want_red=*/false) >=
+            0 &&
+        find_dominant(last_frame, opts.width, opts.height, opts.width / 2, opts.width,
+                      /*want_red=*/false) >= 0;
+    if (ph == 1 && !e2e.enter_done.load() && root_ready) {
       grabs.root = last_frame;
       state.entered_composition() = child;
       e2e.before_enter.store(canvas.frames_issued("canvas#1"));

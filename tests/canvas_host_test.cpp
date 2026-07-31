@@ -2949,9 +2949,15 @@ TEST_CASE("canvas_host: a stream of active-color paints runs clean against the r
   // The color crosses to the writer as a COPIED value (the closure captures `color` by value), so
   // there is no shared mutable color state across threads: the UI thread alone touches
   // `active_color_` (it is blocked inside `submit_sync` while the writer runs), and the
-  // writer/render threads never read it. A FLAT raster paint (no nested render), so — exactly like
-  // the brush-dab anchor above — the arbc-nested-render-worker-detach-race inline-pool caveat does
-  // not apply and the REAL interactive pool is correct. No new lane, no new suppression.
+  // writer/render threads never read it. No new lane, no new suppression.
+  //
+  // The document now also holds a NESTED cell (editor.panels.color_eyedrop_nested), which the
+  // render walk composites — so this case renders over the INLINE `WorkerPoolConfig{}` pool per the
+  // arbc-nested-render-worker-detach-race memo (a threaded nested render SIGSEGVs the v0.4.0 detach
+  // path). The UI-thread nested sampler is unaffected either way: it renders through
+  // `render_offline` with `direct_dispatch()` (single-threaded, `offline.cpp:50`), never the
+  // interactive pool. The brush-paint into the raster stays a FLAT (no-nested) write, exactly as
+  // before.
   //
   // The AppState is BUILT ON the writer thread (the first write binds the document's writer
   // identity for life, D-writer_thread-6), held in an `optional` so the move ctor — not the deleted
@@ -2964,6 +2970,7 @@ TEST_CASE("canvas_host: a stream of active-color paints runs clean against the r
 
   std::optional<ace::commands::AppState> state_opt;
   arbc::ObjectId raster;
+  arbc::ObjectId nested;
   writer.submit_sync([&] {
     auto created = ace::project::create_project(fs, scratch.root / "color");
     if (!created.has_value()) {
@@ -2980,23 +2987,42 @@ TEST_CASE("canvas_host: a stream of active-color paints runs clean against the r
     if (added.has_value()) {
       raster = *added;
     }
+    // A NESTED cell (editor.panels.color_eyedrop_nested) in a clear region ([44,60]^2), whose CHILD
+    // composition holds a solid. The isolated eyedropper modifier samples it through the anchored
+    // `render_offline` branch — a UI-thread pinned read exercised concurrently with the live render
+    // below, to prove the nested path is TSan-clean like the leaf/composited samplers.
+    const arbc::ObjectId child = state.document().add_composition(16.0, 16.0);
+    ace::scene::add_cell(state.document(), state.registry(), "org.arbc.solid", "0.7,0.3,0.5,1",
+                         arbc::Affine::identity(), child);
+    const auto nested_added =
+        ace::scene::add_cell(state.document(), state.registry(), "org.arbc.nested",
+                             std::to_string(child.value), arbc::Affine::translation(44.0, 44.0));
+    if (nested_added.has_value()) {
+      nested = *nested_added;
+    }
   });
   REQUIRE(state_opt.has_value());
   REQUIRE(raster.valid());
+  REQUIRE(nested.valid());
   ace::commands::AppState& state = *state_opt;
 
   // The raster's placing layer — the isolated eyedropper modifier samples through it
   // (editor.panels.color_eyedrop_cell). A UI-thread pinned read, taken once here.
   arbc::ObjectId raster_layer;
+  arbc::ObjectId nested_layer;
   for (const ace::scene::Cell& cell : ace::scene::cells(state.document(), state.registry())) {
     if (cell.id == raster) {
       raster_layer = cell.layer;
-      break;
+    } else if (cell.id == nested) {
+      nested_layer = cell.layer;
     }
   }
   REQUIRE(raster_layer.valid());
+  REQUIRE(nested_layer.valid());
 
-  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  // The INLINE pool (WorkerPoolConfig{}) — the document holds a nested cell the render composites,
+  // so the arbc-nested-render-worker-detach-race memo requires it over the real threaded pool.
+  CanvasHost host(arbc::WorkerPoolConfig{}, std::chrono::milliseconds(8));
   host.set_writer(&writer);
   std::unique_ptr<ace::platform::JoinHandle> handle =
       threads.spawn([&] { host.run([] { return false; }); });
@@ -3031,6 +3057,18 @@ TEST_CASE("canvas_host: a stream of active-color paints runs clean against the r
     if (const std::optional<arbc::WorkingPixel> own = ace::commands::sample_cell_color(
             state.document(), arbc::Affine::identity(), raster_layer, 16.0, 16.0)) {
       state.set_active_color(ace::commands::working_to_srgb(*own));
+    }
+    // The NESTED-cell branch (editor.panels.color_eyedrop_nested): the same UI-thread pinned read,
+    // but through the anchored `render_offline` path — single-threaded via `direct_dispatch()`
+    // (`offline.cpp:50`), so it never enters the interactive worker pool and does not touch the
+    // worker-detach path the `arbc-nested-render-worker-detach-race` memo warns about. Run
+    // CONCURRENT with the live render walk to prove the nested sample is TSan-clean too — the
+    // resulting `WorkingPixel` crosses to nothing shared. This is field-for-field the same
+    // UI-thread `render_offline`-with-operator-binding the composited sampler already runs over a
+    // document that contains a nested cell, so it adds no new concurrency class.
+    if (const std::optional<arbc::WorkingPixel> nested_own = ace::commands::sample_cell_color(
+            state.document(), arbc::Affine::identity(), nested_layer, 48.0, 48.0)) {
+      state.set_active_color(ace::commands::working_to_srgb(*nested_own));
     }
   }
   REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));

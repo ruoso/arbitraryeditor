@@ -87,22 +87,56 @@ std::optional<arbc::WorkingPixel> sample_cell_color(const arbc::Document& docume
   if (record == nullptr) {
     return std::nullopt; // empty selection, a camera, or an id that names no placed layer
   }
-  // The leaf/operator gate (D-eyedrop_cell-2): a bare `render_layer` stands up no pull service, so
-  // an operator (non-empty `inputs()`) or a nested-composition cell (a valid `composition_ref()`)
-  // cannot be isolated here — the caller degrades to the composited sample. The library owns the
-  // structural predicate; this is NOT a kind allow-list (respects D-cells_model-8).
+  // The gate (D-eyedrop_cell-2 / D-eyedrop_nested-3): a null resolve, or a TRUE operator —
+  // non-empty `inputs()` with NO composition_ref, the library's `fade`/`crossfade`/`tone` — that a
+  // bare `render_layer` stands up no pull service for, degrades to the composited sample. A nested
+  // composition ALSO reports non-empty `inputs()` once bound to the document's pull service (its
+  // child is an input), so `is_operator` is true for it too; the `!composition_ref().valid()`
+  // clause carves the nested case OUT of this gate and routes it to the anchored `render_offline`
+  // branch below — otherwise a bound nested cell would be misclassified as an operator and refused.
+  // Still the library's structural predicate, still NOT a kind allow-list (respects
+  // D-cells_model-8).
   arbc::Content* content = document.resolve(record->content);
-  if (content == nullptr || arbc::is_operator(content) || content->composition_ref().valid()) {
+  if (content == nullptr || (arbc::is_operator(content) && !content->composition_ref().valid())) {
     return std::nullopt;
   }
   // Translate the camera so the sampled device point lands at output pixel (0,0), then compose with
-  // the layer's placement to get the content→device transform `render_layer` expects — the exact
+  // the layer's placement to get the content→device transform the render expects — the exact
   // 1×1-shift trick `sample_composited_color` uses, extended by the placement compose (Constraint
-  // 2).
+  // 2/4). Shared by the nested-branch anchored render and the leaf `render_layer` path.
   const arbc::Affine shifted =
       arbc::compose(arbc::Affine::translation(-device_x, -device_y), camera);
   const arbc::Affine composed = arbc::compose(shifted, record->transform);
   arbc::CpuBackend backend;
+  // The nested-composition branch (D-eyedrop_nested-1/-2/-4, Constraints 1/2/4): a content
+  // answering a valid `composition_ref()` is a nested composition (it passed the gate above via the
+  // carve-out). Render the child composition IN ISOLATION from the parent's siblings by anchoring
+  // the offline viewport at that child composition id: `Viewport::anchor` scopes the frame walk to
+  // exactly that composition's own members (`compositor.hpp:20-27`), and `render_offline` stands up
+  // the full pull service + operator binding (`offline.cpp:50-52`) so nested-within-nested
+  // resolves. A PURE PINNED read — the caller-pinned overload renders against the SAME generation
+  // the gate inspected (Constraint 2), single-threaded via `direct_dispatch()`, so it never enters
+  // the interactive worker pool. The result is the child's own composited straight colour — the
+  // cell's own colour, not the parent-placement-attenuated pixel (D-eyedrop_nested-4). A
+  // null/unstorable frame returns std::nullopt, so the arm degrades to the composited sample
+  // exactly as the leaf error path does.
+  if (const arbc::ObjectId child = content->composition_ref(); child.valid()) {
+    const arbc::Viewport viewport{1, 1, composed, child};
+    const arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> frame =
+        arbc::render_offline(document, state, viewport, backend);
+    if (!frame.has_value()) {
+      return std::nullopt; // an unstorable working space or null pin (defensive)
+    }
+    return arbc::visit_surface(**frame, [](auto typed) -> arbc::WorkingPixel {
+      using Traits = arbc::PixelTraits<decltype(typed)::format>;
+      if (typed.data.size() < Traits::channels) {
+        return arbc::WorkingPixel{0.0F, 0.0F, 0.0F,
+                                  0.0F}; // no CPU readback (defensive): transparent
+      }
+      return Traits::decode(typed.data.data());
+    });
+  }
+  // The leaf path (unchanged): render exactly this one layer source-over into a 1×1 target.
   const arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> target =
       backend.make_surface(1, 1, state->working_space());
   if (!target.has_value()) {
