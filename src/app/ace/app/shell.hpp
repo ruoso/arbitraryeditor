@@ -79,6 +79,14 @@ public:
   // keeping the arbc/GL/view orchestration out of the generic shell (A8). Empty
   // by default — the piecewise smoke drives a bare shell with no content.
   void set_draw_content(std::function<void()> content) { draw_content_ = std::move(content); }
+
+  // Install the OS file-drop handler the SDL_EVENT_DROP_FILE arm invokes (editor.import.image,
+  // D-image-4): it receives the dropped file path and the drop's WINDOW-space point. run_editor
+  // binds it to map the point onto the focused canvas pane and call `insert_image`. Empty by
+  // default — a bare shell / offscreen smoke ignores drops. Thin SDL glue, like the dialog seam.
+  void set_file_drop_handler(std::function<void(std::filesystem::path, float, float)> handler) {
+    file_drop_handler_ = std::move(handler);
+  }
   // ImGui::Render + GL clear + present. `before_present`, if set, runs after the
   // draw data is submitted and before the buffer swap — the seam the e2e uses to
   // read back the frame (screenshot baseline) while the back buffer is valid.
@@ -92,6 +100,7 @@ public:
 private:
   ShellOptions opts_{};
   std::function<void()> draw_content_;
+  std::function<void(std::filesystem::path, float, float)> file_drop_handler_;
   SDL_Window* window_ = nullptr;
   void* gl_ctx_ = nullptr; // SDL_GLContext (an opaque pointer)
   ImGuiContext* imgui_ctx_ = nullptr;

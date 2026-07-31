@@ -1,11 +1,14 @@
+#include <ace/app/file_dialog.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
 #include <ace/commands/app_state.hpp>
 #include <ace/commands/cameras.hpp>
 #include <ace/commands/cells.hpp>
 #include <ace/commands/exec_new.hpp>
+#include <ace/commands/image_import.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/interact/pick.hpp>
+#include <ace/project/import_asset.hpp>
 #include <ace/project/project.hpp>
 #include <ace/scene/camera.hpp>
 #include <ace/scene/cell.hpp>
@@ -350,6 +353,75 @@ std::string AppProjectGateway::insert_cell(const std::string& kind_id,
   run_edit([this, &command] { ace::commands::dispatch(app_state_, command); });
   return outcome.error;
 }
+
+std::optional<arbc::Vec2> drop_device_point(arbc::Vec2 window_point,
+                                            const std::optional<arbc::Rect>& pane_screen_rect) {
+  if (!pane_screen_rect.has_value() || pane_screen_rect->empty()) {
+    return std::nullopt; // no live pane rect -> the focused-centre fallback
+  }
+  const arbc::Rect& rect = *pane_screen_rect;
+  if (window_point.x < rect.x0 || window_point.x >= rect.x1 || window_point.y < rect.y0 ||
+      window_point.y >= rect.y1) {
+    return std::nullopt; // dropped outside the canvas pane -> fall back, never lose the drop
+  }
+  return arbc::Vec2{window_point.x - rect.x0, window_point.y - rect.y0}; // pane-local device px
+}
+
+std::string AppProjectGateway::insert_image(const std::filesystem::path& path,
+                                            std::optional<arbc::Vec2> device_point) {
+  // project owns the file byte-read + path->URI normalization (borrowed, un-relativized, D13).
+  const ace::project::BorrowedAsset asset = ace::project::borrow_asset_file(filesystem_, path);
+  // commands assembles the opaque image config with the bytes embedded (decodes immediately);
+  // authored == resolved == the borrowed absolute-path URI (present file, D-image-5).
+  const std::string config = ace::commands::image_config(asset.uri, asset.uri, asset.bytes);
+  // Probe the photo's native-pixel bounds BEFORE minting (the placement needs them). A
+  // malformed frame is the kind's own error, Document untouched.
+  const arbc::expected<std::optional<arbc::Rect>, std::string> bounds =
+      ace::scene::probe_bounds(app_state_.registry(), ace::commands::image_kind_id, config);
+  if (!bounds) {
+    return bounds.error();
+  }
+  const ViewFraming framing = view_framing();
+  // A supplied drop point places there; nullopt (the dialog, and the out-of-pane drop fallback)
+  // places at the focused view centre — symmetric with the centred native-scale placement.
+  const arbc::Vec2 point = device_point.value_or(arbc::Vec2{
+      static_cast<double>(framing.pane_w) * 0.5, static_cast<double>(framing.pane_h) * 0.5});
+  // 1:1 native scale, camera-independent (D12/§8) — NOT place_in_view's fill-to-view.
+  const arbc::Affine placement =
+      ace::interact::place_at_native_scale(framing.camera, point, *bounds);
+  ace::commands::InsertCellOutcome outcome;
+  const ace::commands::Command command = ace::commands::insert_cell_command(
+      app_state_.registry(), ace::commands::image_kind_id, config, placement, outcome,
+      app_state_.entered_composition());
+  // ONE undoable action through the single-writer seam (A13), exactly like insert_cell.
+  run_edit([this, &command] { ace::commands::dispatch(app_state_, command); });
+  // Select the freshly-imported cell (the drop/Place UX: what you brought in is what is
+  // selected). Transient UI-thread project state (D19/D15) — never a transaction, so it is set
+  // HERE off the writer turn, not inside the command. A refused import selects nothing.
+  if (outcome.error.empty() && outcome.content.valid()) {
+    app_state_.selection().select(outcome.content);
+  }
+  return outcome.error;
+}
+
+bool AppProjectGateway::can_place_image() const { return file_dialog_ != nullptr; }
+
+void AppProjectGateway::place_image() {
+  if (file_dialog_ == nullptr) {
+    return;
+  }
+  // Async like pick_folder: the pick callback fires on a later UI-thread frame, where the
+  // import rides run_edit onto the writer thread. A cancelled pick imports nothing; a picked
+  // file places at the focused view centre (nullopt device point). The kind's own error, if
+  // any, has no modal to surface in here (a present readable file never produces one).
+  file_dialog_->show([this](std::optional<std::filesystem::path> picked) {
+    if (picked.has_value()) {
+      (void)insert_image(*picked, std::nullopt);
+    }
+  });
+}
+
+void AppProjectGateway::set_file_dialog(FileDialog& dialog) { file_dialog_ = &dialog; }
 
 bool AppProjectGateway::can_delete() const { return ace::commands::can_delete(app_state_); }
 

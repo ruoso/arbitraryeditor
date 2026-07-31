@@ -188,6 +188,13 @@ target_link_libraries(ace_project PRIVATE nlohmann_json::nlohmann_json)
 ace_component(scene DEPENDS base project)
 ace_component(interact DEPENDS base scene)
 ace_component(commands DEPENDS base project scene)
+# editor.import.image (A29 / D-image-3): register the out-of-lib `org.arbc.image` kind by
+# STATIC-linking its impl archive into `ace_commands` — the ONE build/link edge this leaf adds.
+# PRIVATE so the image header stays confined to commands' own TUs (src/commands/image_import.cpp)
+# and travels no further; the archive links its stb-class decoder (`arbc-plugin-imdec`) PRIVATE,
+# so the decode symbols never reach any editor TU (containment holds with no check_levels edit —
+# `arbc/kind_image/*` is under the existing EXTERNAL_ALLOWED["arbc"] ⊇ {commands}).
+target_link_libraries(ace_commands PRIVATE arbc-plugin-image-impl)
 # editor.cameras.export's PNG encoder (A20 / D-export-3): the editor's ONE vendored
 # stb-class dependency, a single public-domain header instantiated by exactly one TU
 # (src/commands/png_encode.cpp, with STBI_WRITE_NO_STDIO so no FILE* path exists to
@@ -289,6 +296,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/brush_test.cpp
                          tests/paint_res_test.cpp
                          tests/color_test.cpp
+                         tests/image_import_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene ace::writer
@@ -312,6 +320,10 @@ target_include_directories(ace_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/app")
 # (D-render_probe-6); the byte-compare helper resolves them by absolute path.
 target_compile_definitions(ace_tests PRIVATE
   ACE_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/goldens")
+# editor.import.image: the checked-in image fixture (a small Netpbm PPM, the format the
+# vendored `imdec` decoder handles) the decode/round-trip/golden cases read by absolute path.
+target_compile_definitions(ace_tests PRIVATE
+  ACE_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 add_test(NAME ace_tests COMMAND ace_tests)
 
 # The app_shell test suite (docs §9): the pure frame-loop predicate (Catch2
@@ -334,6 +346,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/grid_e2e_test.cpp
                               tests/group_transform_e2e_test.cpp
                               tests/cells_insert_e2e_test.cpp
+                              tests/image_import_e2e_test.cpp
                               tests/resolution_e2e_test.cpp
                               tests/selection_e2e_test.cpp
                               tests/tool_dispatch_e2e_test.cpp
@@ -361,6 +374,9 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/color_e2e_test.cpp
                               tests/welcome_e2e_test.cpp)
 target_link_libraries(ace_shell_test PRIVATE ace::app Catch2::Catch2WithMain)
+# editor.import.image: the e2e imports the same checked-in PPM fixture the unit lane uses.
+target_compile_definitions(ace_shell_test PRIVATE
+  ACE_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 add_test(NAME ace_shell_test COMMAND ace_shell_test)
 # SDL3 reads the hint env var SDL_VIDEO_DRIVER; SDL_VIDEODRIVER is the legacy
 # name — set both so the windowed-path smoke (which relies on the env, not the

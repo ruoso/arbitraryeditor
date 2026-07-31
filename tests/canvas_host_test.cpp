@@ -13,6 +13,7 @@
 #include <ace/commands/cells.hpp>
 #include <ace/commands/color.hpp>
 #include <ace/commands/export.hpp>
+#include <ace/commands/image_import.hpp>
 #include <ace/interact/interact.hpp>
 #include <ace/interact/pick.hpp>
 #include <ace/platform/filesystem.hpp>
@@ -49,6 +50,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -637,6 +639,73 @@ TEST_CASE("canvas_host: streamed SCOPED inserts/deletes run clean against the re
   // The scoped delete removed exactly what the scoped insert added each round: the child holds only
   // its original red solid, and the root holds only the probe solid + the nested wrapper.
   CHECK(ace::scene::cells(*probe.document, registry, child).size() == 1);
+}
+
+TEST_CASE("canvas_host: a streamed borrowed-image import runs clean against the render read "
+          "(import_image TSan anchor)") {
+  // editor.import.image Acceptance (Threading / Constraint / A13): the import mutation rides
+  // `apply_edit` -> the document's ONE writer thread, and the new `org.arbc.image` cell AND its
+  // DECODE publish through the pin() seam — so an import overlapping the off-thread render read of
+  // the SAME Document is data-race-clean. No new thread and no new lock: the decode's global
+  // pyramid cache carries its own mutex, and the content binding publishes copy-on-write like
+  // every other add_cell. The render walk here genuinely composites the borrowed image on the
+  // interactive worker pool while the UI thread streams more imports.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::commands::register_image_kind(registry);
+
+  // The borrowed-image config, assembled once on the test thread (the file read is the import
+  // verb's turf, never the writer's): the fixture bytes embedded so each minted cell decodes.
+  const std::filesystem::path fixture = std::filesystem::path(ACE_FIXTURE_DIR) / "photo_12x8.ppm";
+  std::ifstream in(fixture, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  REQUIRE(!bytes.empty());
+  const std::string uri = std::filesystem::absolute(fixture).string();
+  const std::string config = ace::commands::image_config(uri, uri, bytes);
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document, &registry);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // Stream borrowed-image imports while both canvases render the same document off-thread: each
+  // `add_cell` mints a new cell + decodes it, published through pin() (Constraint 4).
+  constexpr int k_imports = 16;
+  for (int i = 0; i < k_imports; ++i) {
+    apply_edit(writer, host, [&, i] {
+      const auto added = ace::scene::add_cell(
+          *probe.document, registry, ace::commands::image_kind_id, config,
+          arbc::Affine::translation(2.0 * static_cast<double>(i), 3.0 * static_cast<double>(i)));
+      REQUIRE(added.has_value());
+    });
+  }
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+
+  // Every import landed a live borrowed-image cell (the probe's own solid is the +1).
+  std::size_t images = 0;
+  for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry)) {
+    if (cell.kind_id == std::string(ace::commands::image_kind_id)) {
+      ++images;
+    }
+  }
+  CHECK(images == static_cast<std::size_t>(k_imports));
 }
 
 TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean against the render read "

@@ -211,6 +211,16 @@ void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
   if (ImGui::Selectable("Insert Cell…###insert_cell")) {
     dockspace.open_insert_modal(gateway.insert_kinds());
   }
+  // The second import entry point beside Insert (editor.import.image / A29): shown only when a
+  // native file picker is wired (a session gateway; a launcher offers nothing). The drop
+  // gesture is the OS's, handled in the shell — this is the keyboard/pointer path D18's
+  // menu-bar-free shell needs (D-image-4). Opening the picker is async; the import lands on a
+  // later frame through the same run_edit seam as Insert.
+  if (gateway.can_place_image()) {
+    if (ImGui::Selectable("Place image…###place_image")) {
+      gateway.place_image();
+    }
+  }
   // DISABLED rather than hidden with an empty selection: the rail's fixed geometry is
   // the "home base" guarantee (§10), and a greyed item makes the gate discoverable.
   const bool can_delete = gateway.can_delete();

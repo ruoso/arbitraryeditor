@@ -211,6 +211,13 @@ public:
   // `focused_view_id()`'s — valid until the next `reconcile()` drops that pane.
   std::string_view indicated_view_id() const;
 
+  // The SCREEN-space rectangle of the pane the framing-derived verbs act on (the
+  // `indicated_view_id()` pane) — its last-drawn top-left plus its device size, or `nullopt`
+  // when no canvas is live and sized. The shell's SDL_EVENT_DROP_FILE arm feeds this to
+  // `drop_device_point` to turn an OS drop's window point into a pane-local device point
+  // (editor.import.image, Constraint 6); a drop outside it falls back to the focused centre.
+  std::optional<arbc::Rect> focused_pane_rect() const;
+
   // Push a transient viewport camera into the pane the framing-derived verbs act on — the
   // WRITE-mirror of `focused_framing()` (editor.panels.overview, D-overview-3). Targets the
   // `indicated_view_id()` pane (so *which pane the overview drives* is identical to *which pane
@@ -243,6 +250,12 @@ private:
     unsigned int texture = 0;
     int tex_width = 0;
     int tex_height = 0;
+    // The pane's last-drawn top-left in ImGui SCREEN space (== window client space in the
+    // single-viewport shell), paired with requested_width/height to form the pane rectangle an
+    // OS file-drop's window point is tested against (editor.import.image, Constraint 6). Only
+    // meaningful once the pane has been drawn (requested_width/height > 0).
+    double screen_x = 0.0;
+    double screen_y = 0.0;
     arbc::Affine camera = arbc::Affine::identity(); // the transient viewport camera
     // The camera this pane is ACTUALLY SHOWING, refreshed once per frame: the shot's derived
     // comp->device camera while looking through one, else `camera`. Paired with

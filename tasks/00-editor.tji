@@ -702,8 +702,9 @@ task editor "Editor — host GUI over libarbc" {
     task image "Drop / place an image -> borrowed cell (1:1 px->units)" {
       effort 2d
       allocate team
+      complete 100
       depends editor.cells.model
-      note "Drop or Place an image file -> a borrowed (referenced) read-only org.arbc.image cell at the drop point, sized native px -> composition units 1:1 so pixel dimensions carry real relative scale. Design: D11/D12. Refinement: tasks/refinements/import_image.md"
+      note "Drop or Place an image file -> a borrowed (referenced) read-only org.arbc.image cell at the drop point, sized native px -> composition units 1:1 so pixel dimensions carry real relative scale. Design: D11/D12. Refinement: tasks/refinements/editor/image.md"
     }
     task paste "Paste / clipboard bitmap -> owned image" {
       effort 1.5d

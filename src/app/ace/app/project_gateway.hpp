@@ -17,6 +17,16 @@
 namespace ace::app {
 
 class FolderDialog;
+class FileDialog;
+
+// Map a window-space drop point onto a canvas pane, PURE (editor.import.image, Constraint 6).
+// Returns the pane-LOCAL device point when `window_point` lands inside `pane_screen_rect`
+// (screen-space origin + size, the pane's last-drawn rectangle), else `nullopt` — the
+// out-of-pane drop, which the import verb turns into the focused-canvas-centre fallback rather
+// than losing the drop. A missing/empty pane rect is also `nullopt`. Headless-testable (no SDL,
+// no ImGui): the real shell's SDL_EVENT_DROP_FILE arm feeds it the focused pane's rect.
+std::optional<arbc::Vec2> drop_device_point(arbc::Vec2 window_point,
+                                            const std::optional<arbc::Rect>& pane_screen_rect);
 
 // The SESSION-FREE half of the L4 project-entry gateway (docs/01-architecture.md A22,
 // D-welcome-6). Exactly five of `dock::ProjectGateway`'s virtuals never touch an
@@ -152,6 +162,32 @@ public:
   std::string insert_cell(const std::string& kind_id,
                           const ace::dock::InsertValues& values) override;
 
+  // --- Import image (editor.import.image / A29 / D-image-4) -------------------
+  // The ONE app import verb both entry points funnel through — the OS file-drop (which
+  // supplies a pane-local `device_point`) and the "Place image…" dialog (which supplies
+  // `nullopt` -> the focused canvas centre). Reads the file through the `FileSystem` seam and
+  // normalizes its path to a borrowed URI (`project::borrow_asset_file`), assembles the
+  // `org.arbc.image` config with the bytes embedded (`commands::image_config`), probes the
+  // photo's native-pixel bounds, places it at NATIVE SCALE (`interact::place_at_native_scale`,
+  // 1:1 and camera-independent, D12/§8), and mints it through `insert_cell_command` inside
+  // `run_edit` — ONE libarbc transaction = one journal entry = one undo press (A13/D15), with
+  // the new cell selected. A `nullopt` device point (the dialog, and the out-of-pane drop
+  // fallback) places at the focused view centre. Returns the kind's own error string, empty on
+  // success; a factory failure leaves the `Document` untouched (A16 error-as-value).
+  std::string insert_image(const std::filesystem::path& path,
+                           std::optional<arbc::Vec2> device_point);
+
+  // The "Place image…" seam (A12 dialog inversion): shown only when a `FileDialog` is installed
+  // (`can_place_image`), `place_image` opens it and, on a pick, imports at the focused centre.
+  bool can_place_image() const override;
+  void place_image() override;
+
+  // Install the native file picker the "Place image…" affordance drives (the A12 seam, the
+  // `FolderDialog` mould). Not owned; must outlive the gateway. Default: none, so a headless
+  // gateway offers no "Place image…" item and imports only through the direct `insert_image`
+  // verb (which the drop path and the e2e call).
+  void set_file_dialog(FileDialog& dialog);
+
   // --- Delete Selected (editor.cells.remove) ---------------------------------
   // The inverse of `insert_cell`, over the ONE project-level selection (D19). `can_delete`
   // is the cheap gate both affordances poll each frame; `delete_selected` resolves the
@@ -221,6 +257,8 @@ private:
   // The live canvas framing source for a cell insert's provisional placement; null in
   // headless tests -> fall back to the root composition's extent.
   std::function<ViewFraming()> view_framing_;
+  // The native file picker for "Place image…" (A12); null -> no "Place image…" affordance.
+  FileDialog* file_dialog_ = nullptr;
 };
 
 } // namespace ace::app

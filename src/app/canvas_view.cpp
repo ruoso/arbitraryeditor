@@ -245,6 +245,10 @@ void CanvasView::draw_content(std::string_view view_id, int pane_width, int pane
   // regardless of whether a frame exists yet, so a canvas can be retargeted before its first
   // frame lands.
   const ImVec2 pane_origin = ImGui::GetCursorScreenPos();
+  // Record the pane's screen rectangle so an OS file-drop's window point can be mapped to a
+  // pane-local device point (editor.import.image, Constraint 6 / `focused_pane_rect`).
+  p.screen_x = static_cast<double>(pane_origin.x);
+  p.screen_y = static_cast<double>(pane_origin.y);
   if (p.texture != 0 && p.tex_width > 0 && p.tex_height > 0) {
     if (shot_camera) {
       // Look through a shot: present its crop letterboxed. Nav is INERT here — the gesture
@@ -1555,6 +1559,25 @@ ViewFraming CanvasView::primary_framing() const {
 ViewFraming CanvasView::focused_framing() const { return framing_for(focused_view_id_); }
 
 std::string_view CanvasView::focused_view_id() const { return focused_view_id_; }
+
+std::optional<arbc::Rect> CanvasView::focused_pane_rect() const {
+  // The pane a verb would act on — the SAME `focus_target` rule the marker and the framing
+  // accessors run, so a drop targets the pane the user sees highlighted.
+  const std::string_view target = indicated_view_id();
+  if (target.empty()) {
+    return std::nullopt; // no live, sized canvas -> the drop falls back to the focused centre
+  }
+  const auto it = presenters_.find(std::string(target));
+  if (it == presenters_.end()) {
+    return std::nullopt;
+  }
+  const Presenter& p = it->second;
+  if (p.requested_width <= 0 || p.requested_height <= 0) {
+    return std::nullopt;
+  }
+  return arbc::Rect{p.screen_x, p.screen_y, p.screen_x + static_cast<double>(p.requested_width),
+                    p.screen_y + static_cast<double>(p.requested_height)};
+}
 
 std::string_view CanvasView::indicated_view_id() const {
   // The SAME rule `focused_framing()` runs, projected onto the pane's NAME instead of its

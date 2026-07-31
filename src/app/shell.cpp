@@ -1,6 +1,7 @@
 #include <ace/app/canvas_view.hpp>
 #include <ace/app/color_panel.hpp>
 #include <ace/app/export_wiring.hpp>
+#include <ace/app/file_dialog.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/inspector_panel.hpp>
 #include <ace/app/layers_panel.hpp>
@@ -23,6 +24,7 @@
 #include <ace/views/views.hpp>
 #include <ace/writer/writer_thread.hpp>
 
+#include <arbc/base/geometry.hpp>              // arbc::Vec2 / arbc::Rect for the file-drop mapping
 #include <arbc/runtime/document_serialize.hpp> // settle_external_loads (the writer's idle work)
 
 #include <SDL3/SDL.h>
@@ -146,6 +148,17 @@ void Shell::new_frame() {
                event.window.windowID == SDL_GetWindowID(window_)) {
       quit_requested_ = true;
     }
+    // An OS file-drop (editor.import.image, D-image-4): hand the path + the WINDOW-space drop
+    // point to the installed handler, which maps it onto the focused canvas pane and imports.
+    // SDL delivers this on the event-pumping (UI) thread, so no cross-thread sync is needed.
+    // OS-event glue with no headless driver — the mapping + import it calls are covered
+    // directly (drop_device_point / insert_image units + e2e), so the arm is excluded whole.
+    // GCOVR_EXCL_START
+    else if (event.type == SDL_EVENT_DROP_FILE && file_drop_handler_ &&
+             event.drop.windowID == SDL_GetWindowID(window_) && event.drop.data != nullptr) {
+      file_drop_handler_(std::filesystem::path(event.drop.data), event.drop.x, event.drop.y);
+    }
+    // GCOVR_EXCL_STOP
   }
   ImGui_ImplOpenGL3_NewFrame();
   ImGui_ImplSDL3_NewFrame();
@@ -427,6 +440,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     ace::platform::NativeProcessLauncher launcher;
     std::unique_ptr<ace::dockmodel::RecentProjects> recent_projects;
     std::unique_ptr<ace::app::SdlFolderDialog> folder_dialog;
+    std::unique_ptr<ace::app::SdlFileDialog> file_dialog;
     std::unique_ptr<ace::app::AppProjectGateway> app_gateway;
     ace::dock::ProjectGateway* project_gateway = opts.project_gateway;
     if (project_gateway == nullptr) {
@@ -469,6 +483,24 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
       // canvas the user is working in is looking, and a mint promotes that same pane rather than
       // canvas#1. Read by value at verb time. Same lifetime argument as the edit runner above.
       app_gateway->set_view_framing([&canvas] { return canvas.focused_framing(); });
+      // The two image-import entry points (editor.import.image / D-image-4), both funnelling
+      // into `AppProjectGateway::insert_image`. (1) The "Place image…" affordance drives the
+      // native FILE picker — the `FolderDialog` mould — and imports at the focused view centre.
+      file_dialog = std::make_unique<ace::app::SdlFileDialog>();
+      app_gateway->set_file_dialog(*file_dialog);
+      // (2) An OS file-drop: map the drop's window point onto the focused canvas pane and place
+      // there, falling back to the focused centre for an out-of-pane drop (Constraint 6). Thin
+      // SDL glue; the testable verb + the mapping (`drop_device_point`) are covered directly.
+      ace::app::AppProjectGateway* image_gateway = app_gateway.get();
+      shell.set_file_drop_handler(
+          [&canvas, image_gateway](std::filesystem::path path, float wx, float wy) {
+            // Only fires on a real OS drop (no headless driver); the mapping + import are
+            // covered directly. GCOVR_EXCL_START
+            (void)image_gateway->insert_image(
+                std::move(path),
+                ace::app::drop_device_point(arbc::Vec2{wx, wy}, canvas.focused_pane_rect()));
+          });
+      // GCOVR_EXCL_STOP
       project_gateway = app_gateway.get();
     }
     dockspace.set_project_gateway(project_gateway);

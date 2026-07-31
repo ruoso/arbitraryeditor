@@ -247,6 +247,19 @@ public:
     return "Insert is unavailable.";
   }
 
+  // Place image… (editor.import.image / A29): the second import entry point beside "Insert
+  // Cell…". `can_place_image()` gates the rail item — shown only when THIS session gateway has
+  // a native file picker installed (A12), so a launcher gateway that owns no session offers
+  // nothing. `place_image()` opens the picker and imports the chosen file as a borrowed,
+  // read-only image at the focused canvas centre, sized native px -> composition units 1:1
+  // (D12/§8) — asynchronous like `pick_folder`, its pick callback firing on a later UI-thread
+  // frame. The seam traffics in no argument and no return: `dock` may include neither
+  // `ace/scene` nor `ace/commands` (A12), and the OS-drop path reaches the same L4 verb
+  // directly. Non-pure with inert defaults, so unrelated gateway fakes need no churn; the
+  // shipped L4 `AppProjectGateway` overrides both.
+  virtual bool can_place_image() const { return false; }
+  virtual void place_image() {}
+
   // Delete the project-level selection (editor.cells.remove / D19): the inverse of
   // `insert_cell`, and the seventh verb that acts on THIS process's one owned session
   // rather than spawning a sibling. `can_delete()` gates BOTH affordances — the rail item

@@ -182,6 +182,35 @@ arbc::Affine place_in_view(const arbc::Affine& view, int pane_w, int pane_h,
   return arbc::Affine{scale, 0.0, 0.0, scale, tx, ty};
 }
 
+arbc::Affine place_at_native_scale(const arbc::Affine& camera, arbc::Vec2 device_point,
+                                   const std::optional<arbc::Rect>& content_bounds) {
+  if (!content_bounds.has_value() || content_bounds->empty()) {
+    return arbc::Affine::identity(); // unbounded / pending image: nothing to place at scale
+  }
+  if (!std::isfinite(device_point.x) || !std::isfinite(device_point.y)) {
+    return arbc::Affine::identity();
+  }
+  // The composition-space image of the drop point. A collapsed / zero-area camera has no
+  // inverse — degrade to identity placement rather than emit a NaN translation.
+  const std::optional<arbc::Affine> inverse = camera.inverse();
+  if (!inverse.has_value()) {
+    return arbc::Affine::identity();
+  }
+  const arbc::Vec2 comp = inverse->apply(device_point); // device -> composition
+  if (!std::isfinite(comp.x) || !std::isfinite(comp.y)) {
+    return arbc::Affine::identity();
+  }
+  // UNIT scale (1 native px = 1 composition unit, camera-independent) — the whole point of a
+  // native-scale drop. Translate so the extent's centre lands on the mapped drop point.
+  const arbc::Rect& extent = *content_bounds;
+  const double tx = comp.x - (extent.x0 + extent.x1) * 0.5;
+  const double ty = comp.y - (extent.y0 + extent.y1) * 0.5;
+  if (!std::isfinite(tx) || !std::isfinite(ty)) {
+    return arbc::Affine::identity();
+  }
+  return arbc::Affine{1.0, 0.0, 0.0, 1.0, tx, ty};
+}
+
 ShotFraming new_shot_from_view(const arbc::Affine& camera, int pane_w, int pane_h) {
   ShotFraming shot;
   shot.width = pane_w;

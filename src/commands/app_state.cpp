@@ -1,5 +1,6 @@
 #include <ace/commands/app_state.hpp>
 #include <ace/commands/exec_new.hpp>
+#include <ace/commands/image_import.hpp>
 #include <ace/scene/camera.hpp>
 
 #include <arbc/builtin_kinds.hpp>
@@ -26,7 +27,12 @@ namespace {
 // `scene`, so naming `scene::register_camera_kind` here adds no `project->scene` edge
 // (Constraint 1). When a second custom kind ships, adding it HERE restores it on reopen
 // for free.
-void register_editor_kinds(arbc::Registry& registry) { scene::register_camera_kind(registry); }
+void register_editor_kinds(arbc::Registry& registry) {
+  scene::register_camera_kind(registry);
+  // The out-of-lib borrowed-image kind `org.arbc.image` (A29 / editor.import.image): the
+  // second custom kind, static-linked and registered here so it round-trips on save/reopen.
+  register_image_kind(registry);
+}
 
 } // namespace
 

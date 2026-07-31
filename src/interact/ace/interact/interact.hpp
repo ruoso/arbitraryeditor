@@ -156,6 +156,27 @@ arbc::Affine place_in_view(const arbc::Affine& view, int pane_w, int pane_h,
                            const std::optional<arbc::Rect>& content_bounds,
                            double fill_fraction = k_default_placement_fill);
 
+// The placement affine for an imported image at NATIVE SCALE (editor.import.image, D12/§8):
+// a UNIT-scale affine (1 native pixel = 1 composition unit) centred on the composition-space
+// image of the drop `device_point`. Unlike `place_in_view`, sizing is ALWAYS 1:1 on drop and
+// CAMERA-INDEPENDENT — a 4000-px photo is 4000 composition units wide whether it is dropped
+// zoomed-in or zoomed-out, so pixel dimensions carry real relative scale between imports
+// (fit-to-camera would discard it, §8 "Sizing is always 1:1 on drop"). This is the sibling
+// the `place_in_view` note above reserves: "a native-px->units 1:1 affine with no change to
+// `scene`".
+//
+// `camera` is the transient viewport camera (composition units -> device pixels,
+// `Presenter::camera`); the drop point maps device -> composition via `camera.inverse()` (the
+// `brush_footprint` idiom). `content_bounds` is the image's native-pixel bounds
+// (`arbc::Content::bounds()`). The drop point sets only the TRANSLATION — the extent is placed
+// so its centre lands on the mapped drop point.
+//
+// UNBOUNDED content (`nullopt`), an empty extent, a non-invertible / zero-area camera, or a
+// non-finite drop point all yield IDENTITY placement — no NaN, no div-by-zero (the
+// D-fit_bounds-3 fallback discipline). Resolution NEVER enters this computation (D8).
+arbc::Affine place_at_native_scale(const arbc::Affine& camera, arbc::Vec2 device_point,
+                                   const std::optional<arbc::Rect>& content_bounds);
+
 // --- New shot from view (editor.cameras.model; D2 §"new shot from view") ------
 
 // The (frame placement, output resolution) a "new shot from view" mints from the
