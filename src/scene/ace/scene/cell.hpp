@@ -136,6 +136,41 @@ add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_v
          std::string_view config, const arbc::Affine& placement,
          std::optional<arbc::ObjectId> entered = std::nullopt);
 
+// Mint an `org.arbc.nested` cell carrying the library's EXTERNAL nested reference — the third D12
+// import path (editor.import.nested / A31): placing another project's `.arbc` document into the
+// active composition as a cell whose `params.ref` is the borrowed URI of the picked file, NOT an
+// inline copy of its graph (D-nested-2). Returns the new `Content`'s `ObjectId`.
+//
+// This is a DEDICATED construction seam, not the A16 factory path `add_cell` uses (D-nested-1):
+// the built-in `make_nested` factory accepts only a numeric in-document child `ObjectId`
+// (`builtin_kinds.cpp:181-188`) and has no config grammar for a `ref` URI, so the generic
+// `registry.factory(id)(config)` seam CANNOT construct an external reference. This verb constructs
+// `arbc::NestedContent(arbc::ObjectId{}, std::string(ref_uri))` directly — the public
+// `arbc/kind_nested/nested_content.hpp` built-in type on the already-declared `scene → libarbc`
+// edge (the A14 camera mould) — and attaches it via `create_content_and_attach`. It must NOT
+// re-register the `org.arbc.nested` factory (that would break the in-document nested insert path).
+//
+// `ref_uri` is the borrowed absolute-path URI of the picked `.arbc` (`project::borrow_asset_file`'s
+// URI half, no embedded bytes — nested resolves through the `AssetSource`, not an embed channel):
+// kept verbatim, un-relativized (D-image-5 / D13). An EMPTY `ref_uri` is refused with the document
+// untouched (a cancelled/empty pick imports nothing, Constraint 3) — the factory-first discipline.
+//
+// `entered` is the isolation scope resolved fail-safe against the create's OWN pin, identical to
+// `add_cell` (D-scoped_edit-1): a nested `.arbc` placed while a composition is entered lands there;
+// a vanished/foreign scope degrades to Root. The freshly minted cell has `child == ObjectId{}`
+// (unresolved), so it renders the doc-05 placeholder in-session and resolves to the referenced
+// composition on the NEXT reopen, where the editor's `FilesystemAssetSource` loads it INLINE
+// (D-nested-3); live in-session resolution needs a libarbc seam and is out of scope (parking lot).
+//
+// On success this is ONE libarbc transaction (D-one_action_one_entry-1): one journal entry, one
+// undo press, no intermediate published state. Placement rides in as a finished `arbc::Affine`
+// (identity over the unattached content's empty bounds, D-nested-4). WRITER-THREAD ONLY; wrap it in
+// a `commands::insert_nested_reference_command` and `apply_edit` it — never a direct L4 mutation.
+arbc::expected<arbc::ObjectId, std::string>
+add_nested_reference(arbc::Document& document, const arbc::Registry& registry,
+                     std::string_view ref_uri, const arbc::Affine& placement,
+                     std::optional<arbc::ObjectId> entered = std::nullopt);
+
 // One resolved deletion target for the batch verb below: the `Content` a selection names and
 // the `Layer` that places it in the root composition. A scene-local mirror of
 // `commands::Removal`, kept here because `commands` depends on `scene`, not the reverse (the

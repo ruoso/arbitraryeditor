@@ -272,6 +272,20 @@ public:
   virtual bool can_paste_image() const { return false; }
   virtual void paste_image() {}
 
+  // Place composition… (editor.import.nested / A31): the fourth import entry point, beside "Place
+  // image…". `can_place_nested()` gates the rail item — shown only when THIS session gateway has a
+  // native file picker installed (A12), so a launcher gateway offers nothing. `place_nested()`
+  // opens the picker and places the chosen `.arbc` as a BORROWED nested-composition reference (the
+  // library's external nested reference, not an inline copy, D12/D-nested-2) at the focused canvas
+  // centre, 1:1 child-units -> composition units (D-nested-4); it renders the doc-05 placeholder in
+  // this session and resolves on the next reopen (D-nested-3). Like `place_image`, the seam
+  // traffics in no argument and no return (`dock` includes neither `ace/scene` nor `ace/commands`,
+  // A12), and the OS-drop path of a `.arbc` reaches the same L4 verb directly. Non-pure with inert
+  // defaults so unrelated gateway fakes need no churn; the shipped L4 `AppProjectGateway` overrides
+  // both.
+  virtual bool can_place_nested() const { return false; }
+  virtual void place_nested() {}
+
   // Delete the project-level selection (editor.cells.remove / D19): the inverse of
   // `insert_cell`, and the seventh verb that acts on THIS process's one owned session
   // rather than spawning a sibling. `can_delete()` gates BOTH affordances — the rail item

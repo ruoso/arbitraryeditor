@@ -298,6 +298,7 @@ add_executable(ace_tests tests/interact_test.cpp tests/nav_test.cpp tests/bindin
                          tests/color_test.cpp
                          tests/image_import_test.cpp
                          tests/paste_image_test.cpp
+                         tests/nested_import_test.cpp
                          tests/arbc_pin_test.cpp)
 target_link_libraries(ace_tests PRIVATE ace::interact ace::project ace::render ace::platform
                                         ace::dockmodel ace::commands ace::scene ace::writer
@@ -349,6 +350,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/cells_insert_e2e_test.cpp
                               tests/image_import_e2e_test.cpp
                               tests/paste_image_e2e_test.cpp
+                              tests/nested_import_e2e_test.cpp
                               tests/resolution_e2e_test.cpp
                               tests/selection_e2e_test.cpp
                               tests/tool_dispatch_e2e_test.cpp

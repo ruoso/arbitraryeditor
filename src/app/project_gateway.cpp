@@ -18,6 +18,7 @@
 #include <arbc/base/geometry.hpp>
 #include <arbc/base/transform.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -414,6 +415,45 @@ std::string AppProjectGateway::insert_image(const std::filesystem::path& path,
   return insert_image_bytes(asset.uri, asset.bytes, device_point);
 }
 
+std::string AppProjectGateway::insert_nested(const std::filesystem::path& path,
+                                             std::optional<arbc::Vec2> device_point) {
+  // project owns the path->URI normalization (borrowed, absolute, un-relativized, D13); the URI
+  // HALF only — a nested reference resolves through the `AssetSource` on reopen, not an embedded-
+  // bytes channel (D-nested-2), so the bytes are deliberately dropped. An unresolvable path yields
+  // an empty URI, which `add_nested_reference` refuses with the document untouched (Constraint 3).
+  const ace::project::BorrowedAsset asset = ace::project::borrow_asset_file(filesystem_, path);
+  const ViewFraming framing = view_framing();
+  const arbc::Vec2 point = device_point.value_or(arbc::Vec2{
+      static_cast<double>(framing.pane_w) * 0.5, static_cast<double>(framing.pane_h) * 0.5});
+  // The unattached nested content reports empty bounds, so the base placement is `place_in_view`
+  // over `nullopt` = IDENTITY (A16's unbounded rule, D-nested-4) — 1:1 child-composition-units ->
+  // parent-composition units, the nested analog of image's native-px 1:1. Anchor the child's
+  // composition origin at the comp-space image of the drop point (the focused-pane centre for the
+  // dialog / `nullopt` path), the `place_at_native_scale` idiom minus the extent-centring an
+  // unbounded content cannot supply; a non-invertible / non-finite camera keeps the identity base
+  // (no NaN translation). The placement is not re-fit once the child resolves on reopen
+  // (D8/D-nested-4).
+  arbc::Affine placement =
+      ace::interact::place_in_view(framing.camera, framing.pane_w, framing.pane_h, std::nullopt);
+  if (const std::optional<arbc::Affine> inverse = framing.camera.inverse(); inverse.has_value()) {
+    const arbc::Vec2 comp = inverse->apply(point);
+    if (std::isfinite(comp.x) && std::isfinite(comp.y)) {
+      placement = arbc::Affine::translation(comp.x, comp.y);
+    }
+  }
+  ace::commands::InsertCellOutcome outcome;
+  const ace::commands::Command command = ace::commands::insert_nested_reference_command(
+      app_state_.registry(), asset.uri, placement, outcome, app_state_.entered_composition());
+  run_edit([this, &command] { ace::commands::dispatch(app_state_, command); });
+  if (outcome.error.empty() && outcome.content.valid()) {
+    // The freshly placed cell is selected — transient UI state, off the writer turn, like every
+    // drop/Place (Constraint 8). It renders the doc-05 placeholder until the next reopen
+    // (D-nested-3).
+    app_state_.selection().select(outcome.content);
+  }
+  return outcome.error;
+}
+
 namespace {
 
 // The bare file extension for a clipboard mime (`image/png` -> `png`), for on-disk legibility of
@@ -468,6 +508,23 @@ void AppProjectGateway::place_image() {
 }
 
 void AppProjectGateway::set_file_dialog(FileDialog& dialog) { file_dialog_ = &dialog; }
+
+bool AppProjectGateway::can_place_nested() const { return file_dialog_ != nullptr; }
+
+void AppProjectGateway::place_nested() {
+  if (file_dialog_ == nullptr) {
+    return;
+  }
+  // The "Place composition…" affordance shares the one `FileDialog` seam with "Place image…"
+  // (D-nested-7): async like `pick_folder`, the pick callback fires on a later UI-thread frame and
+  // funnels through the SAME one gateway verb the OS-drop path uses (`insert_nested`, D-image-4). A
+  // cancelled pick imports nothing; a picked `.arbc` places at the focused view centre (nullopt).
+  file_dialog_->show([this](std::optional<std::filesystem::path> picked) {
+    if (picked.has_value()) {
+      (void)insert_nested(*picked, std::nullopt);
+    }
+  });
+}
 
 bool AppProjectGateway::can_delete() const { return ace::commands::can_delete(app_state_); }
 

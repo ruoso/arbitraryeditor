@@ -32,7 +32,8 @@
 #include <arbc/builtin_kinds.hpp>                 // register_builtin_kinds (org.arbc.nested/.solid)
 #include <arbc/compositor/anchored_viewports.hpp> // k_reanchor_scale_threshold (nav anchor_depth)
 #include <arbc/contract/registry.hpp>             // arbc::Registry
-#include <arbc/kind_raster/raster_content.hpp>    // DecodedImage / RasterContent (bounded content)
+#include <arbc/kind_nested/nested_content.hpp>
+#include <arbc/kind_raster/raster_content.hpp> // DecodedImage / RasterContent (bounded content)
 #include <arbc/kind_solid/solid_content.hpp>
 #include <arbc/media/pixel_traits.hpp> // arbc::WorkingPixel (brush color)
 #include <arbc/model/journal.hpp>      // Journal::cursor() (the coalesced-entry count)
@@ -707,6 +708,67 @@ TEST_CASE("canvas_host: a streamed borrowed-image import runs clean against the 
     }
   }
   CHECK(images == static_cast<std::size_t>(k_imports));
+}
+
+TEST_CASE("canvas_host: a streamed nested-reference import runs clean against the render read "
+          "(import_nested TSan anchor)") {
+  // editor.import.nested Acceptance (Threading / A31 / A13): the nested-reference insert rides
+  // `apply_edit` -> the document's ONE writer thread, and the freshly minted `org.arbc.nested` cell
+  // is UNRESOLVED (`child == ObjectId{}`) — it never traverses the codec, so it renders the doc-05
+  // placeholder with NO external-load traffic (`external_loads_ready() == 0`, D-nested-3). An
+  // insert overlapping the off-thread render read of the SAME Document is therefore
+  // data-race-clean: one writer-thread transaction, a placeholder composite, no new synchronization
+  // (the edit<->render handoff is `edit_render_sync`'s charter).
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(
+      registry); // `org.arbc.nested` is a built-in — no plugin link (D-nested-6)
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document, &registry);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // Stream nested-reference inserts while both canvases render the same document off-thread: each
+  // `add_nested_reference` mints an UNRESOLVED external-ref cell, published through pin().
+  constexpr int k_imports = 16;
+  for (int i = 0; i < k_imports; ++i) {
+    apply_edit(writer, host, [&, i] {
+      const auto added = ace::scene::add_nested_reference(
+          *probe.document, registry, "/abs/streamed/child.arbc",
+          arbc::Affine::translation(2.0 * static_cast<double>(i), 3.0 * static_cast<double>(i)));
+      REQUIRE(added.has_value());
+    });
+  }
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+
+  // Every insert landed a live nested cell (the probe's own solid is the +1), and the unresolved
+  // references generated ZERO external-load traffic — the placeholder path, exactly as scoped.
+  std::size_t nested = 0;
+  for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry)) {
+    if (cell.kind_id == std::string(arbc::NestedContent::kind_id)) {
+      ++nested;
+    }
+  }
+  CHECK(nested == static_cast<std::size_t>(k_imports));
+  CHECK(load_counters(writer, *probe.document).pending == 0);
+  CHECK(probe.document->external_loads_ready() == 0);
 }
 
 TEST_CASE("canvas_host: a streamed owned-image paste runs clean against the render read "

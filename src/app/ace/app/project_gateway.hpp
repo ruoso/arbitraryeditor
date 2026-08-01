@@ -187,8 +187,32 @@ public:
   // Install the native file picker the "Place image…" affordance drives (the A12 seam, the
   // `FolderDialog` mould). Not owned; must outlive the gateway. Default: none, so a headless
   // gateway offers no "Place image…" item and imports only through the direct `insert_image`
-  // verb (which the drop path and the e2e call).
+  // verb (which the drop path and the e2e call). The same picker backs "Place composition…".
   void set_file_dialog(FileDialog& dialog);
+
+  // --- Place composition (editor.import.nested / A31 / D-nested-7) ------------
+  // The ONE app import verb both nested entry points funnel through — the OS file-drop of a
+  // `.arbc` (which supplies a pane-local `device_point`) and the "Place composition…" dialog
+  // (which supplies `nullopt` -> the focused canvas centre). Normalizes the picked `.arbc`'s path
+  // to a BORROWED absolute URI (`project::borrow_asset_file`'s URI half — no embedded bytes; a
+  // nested reference resolves through the `AssetSource`, not an embed channel, D-nested-2) and
+  // mints an `org.arbc.nested` cell carrying it as `params.ref` through the DEDICATED
+  // `insert_nested_reference_command` seam (NOT the A16 factory path — `make_nested` is
+  // numeric-`ObjectId`-only, D-nested-1) inside `run_edit` — ONE libarbc transaction = one journal
+  // entry = one undo press (A13/D15), with the new cell selected. Placement is 1:1 identity over
+  // the unattached content's empty bounds, anchored at the drop point / focused-pane centre
+  // (D-nested-4). The cell renders the doc-05 placeholder in-session and resolves to the referenced
+  // composition on the NEXT reopen, inline through the editor's `FilesystemAssetSource`
+  // (D-nested-3). Returns the verb's own error string, empty on success; an empty/unresolvable path
+  // leaves the `Document` untouched (a cancelled/non-`.arbc` pick imports nothing).
+  std::string insert_nested(const std::filesystem::path& path,
+                            std::optional<arbc::Vec2> device_point);
+
+  // The "Place composition…" seam (A12 dialog inversion, beside "Place image…"): shown only when a
+  // `FileDialog` is installed (`can_place_nested`), `place_nested` opens the same picker and, on a
+  // pick, imports the chosen `.arbc` at the focused centre through `insert_nested`.
+  bool can_place_nested() const override;
+  void place_nested() override;
 
   // --- Paste image (editor.import.paste / A30 / D-paste-3) --------------------
   // The ONE app paste verb both triggers funnel through — the Ctrl+V chord and the "Paste image"

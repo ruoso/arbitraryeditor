@@ -33,6 +33,8 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl3.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -502,11 +504,22 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
       ace::app::AppProjectGateway* image_gateway = app_gateway.get();
       shell.set_file_drop_handler(
           [&canvas, image_gateway](std::filesystem::path path, float wx, float wy) {
-            // Only fires on a real OS drop (no headless driver); the mapping + import are
+            // Only fires on a real OS drop (no headless driver); the mapping + imports are
             // covered directly. GCOVR_EXCL_START
-            (void)image_gateway->insert_image(
-                std::move(path),
-                ace::app::drop_device_point(arbc::Vec2{wx, wy}, canvas.focused_pane_rect()));
+            const std::optional<arbc::Vec2> device_point =
+                ace::app::drop_device_point(arbc::Vec2{wx, wy}, canvas.focused_pane_rect());
+            // Branch by extension (editor.import.nested / D-nested-7 / Constraint 8): a `.arbc`
+            // drop places another project as a BORROWED nested-composition reference; anything else
+            // funnels to the image import. A non-`.arbc`, non-image drop yields the image kind's
+            // own error (swallowed) — nothing is minted (Constraint 8 / A16 error-as-value).
+            std::string ext = path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".arbc") {
+              (void)image_gateway->insert_nested(std::move(path), device_point);
+            } else {
+              (void)image_gateway->insert_image(std::move(path), device_point);
+            }
           });
       // GCOVR_EXCL_STOP
       project_gateway = app_gateway.get();

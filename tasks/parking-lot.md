@@ -346,3 +346,15 @@ libarbc v0.4.1's `gc_project_directory` reaper scans only `assets/tiles/` (not `
 **Trigger:** §11 input map settled in `docs/00-design.md`.
 
 `editor.panels.color_eyedrop_cell` ships Alt as the modifier key for the active-cell isolated eyedropper, read from `CanvasInput.alt` (`src/views/ace/views/views.hpp:69`). Alt is free in the Eyedropper context and is the conventional "sample this specific thing" modifier, so it is a defensible v1 binding. The binding is **provisional** pending the full input map (`docs/00-design.md:507` §11), the same provisional status D24's keyboard bindings carry. When the input map is written, the chord may be confirmed, remapped, or given a dedicated modifier; the L4 dispatch in `dispatch_eyedropper` (`src/app/canvas_view.cpp`) reads `in.alt` in one place and requires no other change when the binding moves. No WBS task — this is a human design call gated on the input map.
+
+---
+
+## Live in-session resolution of a freshly-placed `org.arbc.nested` external reference
+
+**Source:** `tasks/refinements/editor/nested.md` (editor.import.nested, 2026-07-31) — D-nested-3.
+
+**Trigger:** a new libarbc release exposing a public seam to install an external composition into an open `Document` post-deserialize (i.e. a live `ExternalCompositionLoader` path callable by a host at runtime, not just at `load_document` / `open_document` time).
+
+`editor.import.nested` ships the defensible v1: a freshly-placed `org.arbc.nested` cell renders the doc-05 placeholder in the placing session and resolves on the next reopen (inline via the editor's `FilesystemAssetSource`, §4:140-149). libarbc's `ExternalCompositionLoader` is scoped to deserialize time (`LoadContext`-scoped, single-writer, one-load-one-thread); there is no public API to install an external composition into an already-open `Document`. No editor-side fix is possible — the seam must be supplied by the library. The shipped reopen-path is fully testable (save→reopen round-trip golden, `import_nested_64x64.rgba8`) and documents the live case as an honest limitation, not a bug.
+
+**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting a host-callable live external-composition install seam (e.g. `Document::install_external_composition(ref_uri, document)` or equivalent). When the trigger fires: bump the pin and implement a new editor leaf (approximately `editor.import.nested_live_resolve`, ~1d) that calls the seam from the writer thread after a nested cell is placed, wiring it through the existing `FilesystemAssetSource` path.

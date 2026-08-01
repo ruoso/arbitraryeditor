@@ -46,6 +46,24 @@ Command insert_cell_command(const arbc::Registry& registry, std::string kind_id,
                             const arbc::Affine& placement, InsertCellOutcome& outcome,
                             std::optional<arbc::ObjectId> entered = std::nullopt);
 
+// The dispatchable "place another `.arbc` as a nested reference" verb (editor.import.nested / A31):
+// the DEDICATED-seam sibling of `insert_cell_command`. Because the built-in `make_nested` factory
+// is numeric-`ObjectId`-only, an EXTERNAL nested reference cannot travel `insert_cell_command`'s
+// factory `kind_id`+`config` seam (D-nested-1) — a fundamentally different construction — so this
+// verb calls `scene::add_nested_reference` directly, which constructs
+// `arbc::NestedContent(arbc::ObjectId{}, ref_uri)` and attaches it in ONE transaction (one journal
+// entry, one undo — the create removes the cell whole, one redo restores it on the same
+// `ObjectId`).
+//
+// `ref_uri` is the borrowed absolute URI of the picked `.arbc` (an EMPTY URI is refused with the
+// document untouched), taken BY VALUE into the writer-thread closure; `entered` is the isolation
+// scope, also captured by value and resolved fail-safe at apply time (D-scoped_edit-2). `registry`
+// and `outcome` are held BY REFERENCE and must outlive the synchronous `dispatch`. Reuses
+// `InsertCellOutcome`: the minted cell content on success, else the verb's own error string.
+Command insert_nested_reference_command(const arbc::Registry& registry, std::string ref_uri,
+                                        const arbc::Affine& placement, InsertCellOutcome& outcome,
+                                        std::optional<arbc::ObjectId> entered = std::nullopt);
+
 // --- Delete (editor.cells.remove) -------------------------------------------------------
 
 // One resolved deletion target: the `Content` the selection names and the `Layer` that

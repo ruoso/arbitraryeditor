@@ -4,6 +4,7 @@
 
 #include <arbc/contract/content.hpp>
 #include <arbc/contract/registry.hpp>
+#include <arbc/kind_nested/nested_content.hpp> // NestedContent — the external-ref import verb (A31)
 #include <arbc/kind_raster/raster_content.hpp> // RasterContent::paint, round_dab, CoverageSampler
 #include <arbc/media/pixel_traits.hpp>         // arbc::WorkingPixel (premultiplied-linear color)
 #include <arbc/model/model.hpp>
@@ -121,13 +122,27 @@ CellDetail classify_detail(arbc::Content& content, const std::optional<arbc::Rec
   // shape (D-paste-2): a project-relative `assets/` URI is a minted OWNED image (owned); an
   // external absolute/`file://` URI is a borrowed referenced photo (borrowed).
   const std::string_view asset_ref = content.external_asset_ref();
-  detail.borrowed = !asset_ref.empty() && !is_owned_asset_ref(asset_ref);
+  // A nested `org.arbc.nested` cell answers `external_composition_ref()`, NOT the image-only
+  // `external_asset_ref()` the classifier reads for a photo — deliberately distinct virtuals
+  // (`content.hpp:652,672`, D-nested-5). A borrowed external `.arbc` reference carries the SAME
+  // borrowed provenance as a borrowed image, split owned/borrowed by the identical URI shape
+  // (D-paste-2): an external absolute/`file://` URI is borrowed, a project-relative `assets/` URI
+  // (post-Consolidate) is owned. Read the composition ref only when there is no asset ref — the two
+  // are mutually exclusive across kinds (image answers the former's twin, nested the latter), so a
+  // photo's classification is untouched (the acceptance regression guard).
+  const std::string_view composition_ref = content.external_composition_ref();
+  const std::string_view external_ref = !asset_ref.empty() ? asset_ref : composition_ref;
+  detail.borrowed = !external_ref.empty() && !is_owned_asset_ref(external_ref);
   if (content.editable() != nullptr) {
     detail.source = DetailSource::PaintedRaster;
   } else if (!asset_ref.empty()) {
     detail.source = DetailSource::ReferencedImage; // owned OR borrowed — the `borrowed` flag splits
   } else {
-    return detail; // ResolutionIndependent (the default): no native floor, no native px
+    // ResolutionIndependent (the default): a solid / procedural / nested cell has no native detail
+    // floor and no native px. A nested reference still carried its `borrowed` provenance above, so
+    // the Layers source-file/relink readout lights up (D11/D13) without a per-kind `kind_id`
+    // switch.
+    return detail;
   }
   // A finite-detail cell: its content-space extent numerically IS its pixel grid
   // (D-resolution-1). An absent or empty extent (an unavailable image) leaves the native
@@ -293,6 +308,47 @@ add_cell(arbc::Document& document, const arbc::Registry& registry, std::string_v
   const arbc::Document::Placed placed =
       document.create_content_and_attach(std::shared_ptr<arbc::Content>(std::move(*made)),
                                          cell_token(registry, kind_id), composition, placement);
+  return placed.content;
+}
+
+arbc::expected<arbc::ObjectId, std::string>
+add_nested_reference(arbc::Document& document, const arbc::Registry& registry,
+                     std::string_view ref_uri, const arbc::Affine& placement,
+                     std::optional<arbc::ObjectId> entered) {
+  // An empty URI is a value error, not a mutation: refuse BEFORE touching the document (the
+  // `add_cell` factory-first discipline), so a cancelled/empty pick leaves it byte-for-byte
+  // untouched (Constraint 3 / D-nested-2). Everything below mutates.
+  if (ref_uri.empty()) {
+    return arbc::unexpected<std::string>("org.arbc.nested: empty external reference URI");
+  }
+  arbc::ObjectId composition;
+  {
+    const arbc::DocStatePtr state = document.pin();
+    if (!state) {
+      return arbc::unexpected<std::string>("the document has no published state");
+    }
+    // Resolve the scope against THIS pin exactly as `add_cell` does (D-scoped_edit-1): a nested
+    // `.arbc` placed while a composition is entered lands there; a vanished scope degrades to Root.
+    composition = active_composition_in(*state, entered);
+  }
+  if (!composition.valid()) {
+    return arbc::unexpected<std::string>("no root composition to place a nested reference in");
+  }
+  // The DEDICATED construction seam (A31 / D-nested-1): the built-in `make_nested` factory is
+  // numeric-`ObjectId`-only, so the generic `registry.factory(id)(config)` path image/paste mint
+  // through cannot construct an EXTERNAL reference. Construct `NestedContent(ObjectId{}, ref)`
+  // directly — an unresolved child (`child == ObjectId{}`) holding the borrowed authored URI
+  // verbatim (D-nested-2), which renders the doc-05 placeholder in-session and resolves inline on
+  // reopen through the editor's `FilesystemAssetSource` (D-nested-3). This does NOT re-register the
+  // `org.arbc.nested` factory (that would break the in-document nested insert; A31 alt-rejected).
+  auto content = std::make_shared<arbc::NestedContent>(arbc::ObjectId{}, std::string(ref_uri));
+  // ONE journal entry (D-one_action_one_entry-1), the `add_cell` mould minus the factory: bind,
+  // add the placing layer, and attach inside a SINGLE transaction — one undo press reverses the
+  // whole create. Placement rides in as the finished `arbc::Affine` (identity over the unattached
+  // content's empty bounds, D-nested-4); the library's default opacity is kept.
+  const arbc::Document::Placed placed = document.create_content_and_attach(
+      std::move(content), cell_token(registry, arbc::NestedContent::kind_id), composition,
+      placement);
   return placed.content;
 }
 

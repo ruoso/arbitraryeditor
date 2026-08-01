@@ -32,6 +32,27 @@ Command insert_cell_command(const arbc::Registry& registry, std::string kind_id,
                  }};
 }
 
+Command insert_nested_reference_command(const arbc::Registry& registry, std::string ref_uri,
+                                        const arbc::Affine& placement, InsertCellOutcome& outcome,
+                                        std::optional<arbc::ObjectId> entered) {
+  outcome = InsertCellOutcome{};
+  // `ref_uri` + `entered` captured BY VALUE (D-scoped_edit-2 / Constraint 3): the UI-thread pick
+  // travels into the writer-thread closure, and `scene::add_nested_reference` resolves the scope
+  // fail-safe against the pin the create lands on — the writer never reads live `AppState`. The
+  // DEDICATED seam, never the generic factory (D-nested-1): the built-in `make_nested` is
+  // numeric-`ObjectId`-only and cannot mint an external `params.ref` reference.
+  return Command{"insert_nested_reference", [&registry, &outcome, ref_uri = std::move(ref_uri),
+                                             placement, entered](arbc::Document& doc) {
+                   const arbc::expected<arbc::ObjectId, std::string> added =
+                       scene::add_nested_reference(doc, registry, ref_uri, placement, entered);
+                   if (added) {
+                     outcome.content = *added;
+                   } else {
+                     outcome.error = added.error();
+                   }
+                 }};
+}
+
 std::vector<Removal> selected_removals(const arbc::Document& document,
                                        const arbc::Registry& registry, const Selection& selection,
                                        std::optional<arbc::ObjectId> entered) {

@@ -230,6 +230,17 @@ void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
       gateway.paste_image();
     }
   }
+  // The fourth import entry point beside Paste (editor.import.nested / A31): shown only when a
+  // native file picker is wired (a session gateway). Places another project's `.arbc` as a BORROWED
+  // nested-composition reference (D12/D-nested-2); the OS-drop of a `.arbc` is the shell's, this is
+  // the keyboard/pointer path. Opening the picker is async; the import lands on a later frame
+  // through the same run_edit seam as Place image, and renders the placeholder until reopen
+  // (D-nested-3).
+  if (gateway.can_place_nested()) {
+    if (ImGui::Selectable("Place composition…###place_nested")) {
+      gateway.place_nested();
+    }
+  }
   // DISABLED rather than hidden with an empty selection: the rail's fixed geometry is
   // the "home base" guarantee (§10), and a greyed item makes the gate discoverable.
   const bool can_delete = gateway.can_delete();

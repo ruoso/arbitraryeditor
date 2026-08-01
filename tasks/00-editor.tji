@@ -722,8 +722,9 @@ task editor "Editor — host GUI over libarbc" {
     task nested "Place another .arbc -> nested composition cell" {
       effort 2d
       allocate team
+      complete 100
       depends !image
-      note "Place another project (.arbc) -> an org.arbc.nested cell referencing it (the library's external nested reference). Design: D12. Refinement: tasks/refinements/import_nested.md"
+      note "Place another project (.arbc) -> an org.arbc.nested cell referencing it (the library's external nested reference). Design: D12. Refinement: tasks/refinements/editor/nested.md"
     }
     task consolidate "Consolidate project (borrowed -> owned + relativize URIs) + relink missing borrows" {
       effort 2.5d
