@@ -709,8 +709,15 @@ task editor "Editor — host GUI over libarbc" {
     task paste "Paste / clipboard bitmap -> owned image" {
       effort 1.5d
       allocate team
+      complete 100
       depends !image
-      note "A pasted bitmap has no source file to borrow, so the project MINTS it as an owned read-only image in assets/; otherwise it behaves like an import. Design: D11/D12. Refinement: tasks/refinements/import_paste.md"
+      note "A pasted bitmap has no source file to borrow, so the project MINTS it as an owned read-only image in assets/; otherwise it behaves like an import. Design: D11/D12. Refinement: tasks/refinements/editor/paste.md"
+    }
+    task owned_asset_republish "Copy owned image blobs into a fresh root on Save As / Consolidate" {
+      effort 1.5d
+      allocate team
+      depends editor.import.paste
+      note "On Save As / Consolidate into a fresh root, copy each document-referenced owned image blob from the source assets/ into the target root's assets/ so a pasted image survives a copy to a new root (scratch->Save-As persistence). In-place Save->reopen round-trips without it; only a different-root copy needs the republish step. The image codec writes only params.source (never routing bytes through the sink), so project::save_project against a different root leaves the target assets/ missing the blob. Source-of-debt: tasks/refinements/editor/paste.md (D-paste-5, Constraint 6). Design: D11/D12/D13, docs/01-architecture.md A30."
     }
     task nested "Place another .arbc -> nested composition cell" {
       effort 2d

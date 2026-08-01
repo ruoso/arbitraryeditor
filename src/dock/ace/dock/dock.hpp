@@ -260,6 +260,18 @@ public:
   virtual bool can_place_image() const { return false; }
   virtual void place_image() {}
 
+  // Paste image (editor.import.paste / A30): the third import entry point, beside "Place image…".
+  // `can_paste_image()` gates the rail item AND the Ctrl+V chord — shown/armed only when THIS
+  // session gateway has a clipboard installed (A12), so a launcher gateway offers nothing.
+  // `paste_image()` reads an ENCODED image off the clipboard and, if present, MINTS it as an OWNED,
+  // read-only image (the project has no source file to borrow, D11) at the focused canvas centre,
+  // sized native px -> composition units 1:1 (D12/§8); an empty/no-image clipboard is a graceful
+  // no-op. Like `place_image`, the seam traffics in no argument and no return (`dock` includes
+  // neither `ace/scene` nor `ace/commands`, A12). Non-pure with inert defaults so unrelated gateway
+  // fakes need no churn; the shipped L4 `AppProjectGateway` overrides both.
+  virtual bool can_paste_image() const { return false; }
+  virtual void paste_image() {}
+
   // Delete the project-level selection (editor.cells.remove / D19): the inverse of
   // `insert_cell`, and the seventh verb that acts on THIS process's one owned session
   // rather than spawning a sibling. `can_delete()` gates BOTH affordances — the rail item

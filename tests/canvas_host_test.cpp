@@ -18,6 +18,7 @@
 #include <ace/interact/pick.hpp>
 #include <ace/platform/filesystem.hpp>
 #include <ace/platform/threads.hpp>
+#include <ace/project/import_asset.hpp>
 #include <ace/project/project.hpp>
 #include <ace/render/canvas_host.hpp>
 #include <ace/render/render.hpp>
@@ -706,6 +707,81 @@ TEST_CASE("canvas_host: a streamed borrowed-image import runs clean against the 
     }
   }
   CHECK(images == static_cast<std::size_t>(k_imports));
+}
+
+TEST_CASE("canvas_host: a streamed owned-image paste runs clean against the render read "
+          "(import_paste TSan anchor)") {
+  // editor.import.paste Acceptance (Threading / A13/A30): a paste's mint + insert + decode ride the
+  // same seams a borrowed import does — the MINT (a content-addressed blob write to `assets/`) runs
+  // on the UI thread and touches no Document, and the OWNED `org.arbc.image` cell + its decode
+  // publish through the pin() seam on the writer thread. So a paste overlapping the off-thread
+  // render read of the SAME Document is data-race-clean. No new thread, no new lock: the only thing
+  // that differs from the import anchor is the URI is project-relative owned (classify -> owned).
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::commands::register_image_kind(registry);
+
+  // MINT the clipboard bytes into a scratch project's `assets/` once on the test (UI) thread — the
+  // paste verb's turf, never the writer's — then assemble the OWNED image config (bytes embedded so
+  // each inserted cell decodes). The mint is off-Document, so it is not the race surface; the
+  // insert stream below is.
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = std::filesystem::temp_directory_path() / "ace_paste_tsan";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  const ace::project::ProjectLayout layout = ace::project::project_layout(root);
+  const std::filesystem::path fixture = std::filesystem::path(ACE_FIXTURE_DIR) / "photo_12x8.ppm";
+  std::ifstream in(fixture, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  REQUIRE(!bytes.empty());
+  const ace::project::OwnedAsset owned = ace::project::mint_owned_asset(fs, layout, bytes, "ppm");
+  CHECK(owned.uri.rfind("assets/", 0) == 0);
+  const std::string config = ace::commands::image_config(owned.uri, owned.uri, owned.bytes);
+
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  host.add("canvas#2", *probe.document, &registry);
+  host.request_resize("canvas#2", k_w, k_h);
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 1 && host.published_sequence("canvas#2") >= 1;
+  }));
+
+  // Stream owned-image pastes while both canvases render the same document off-thread.
+  constexpr int k_pastes = 16;
+  for (int i = 0; i < k_pastes; ++i) {
+    apply_edit(writer, host, [&, i] {
+      const auto added = ace::scene::add_cell(
+          *probe.document, registry, ace::commands::image_kind_id, config,
+          arbc::Affine::translation(2.0 * static_cast<double>(i), 3.0 * static_cast<double>(i)));
+      REQUIRE(added.has_value());
+    });
+  }
+  REQUIRE(pump_until([&] {
+    return host.published_sequence("canvas#1") >= 2 && host.published_sequence("canvas#2") >= 2;
+  }));
+
+  host.stop();
+  handle->join();
+
+  // Every paste landed a live OWNED image cell, classified owned (not borrowed) off the URI shape.
+  std::size_t images = 0;
+  for (const ace::scene::Cell& cell : ace::scene::cells(*probe.document, registry)) {
+    if (cell.kind_id == std::string(ace::commands::image_kind_id)) {
+      ++images;
+      CHECK_FALSE(cell.detail.borrowed);
+    }
+  }
+  CHECK(images == static_cast<std::size_t>(k_pastes));
+  std::filesystem::remove_all(root, ec);
 }
 
 TEST_CASE("canvas_host: a stream of UI-thread content REMOVALS runs clean against the render read "

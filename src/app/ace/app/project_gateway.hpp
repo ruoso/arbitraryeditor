@@ -12,12 +12,14 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ace::app {
 
 class FolderDialog;
 class FileDialog;
+class Clipboard;
 
 // Map a window-space drop point onto a canvas pane, PURE (editor.import.image, Constraint 6).
 // Returns the pane-LOCAL device point when `window_point` lands inside `pane_screen_rect`
@@ -188,6 +190,26 @@ public:
   // verb (which the drop path and the e2e call).
   void set_file_dialog(FileDialog& dialog);
 
+  // --- Paste image (editor.import.paste / A30 / D-paste-3) --------------------
+  // The ONE app paste verb both triggers funnel through — the Ctrl+V chord and the "Paste image"
+  // affordance (beside "Place image…"). Reads an ENCODED image off the clipboard seam; if none is
+  // present it is a graceful NO-OP (empty/text/raw-only clipboard — no cell, no error, no crash,
+  // Constraint 7). Otherwise it MINTS the bytes as an OWNED asset in the live project's `assets/`
+  // (`project::mint_owned_asset` — content-addressed, write-if-absent, a project-relative owned
+  // URI, A30) and inserts through the SAME native-scale tail as `insert_image` at the focused-pane
+  // centre — ONE journal entry, one undo, the new cell selected (A13/D15). The minted image is
+  // owned + read-only, so `classify_detail` reports `borrowed=false`. The mint is NOT undoable
+  // (writing a blob is not a document edit); a clipboard with no decodable image opens no
+  // transaction and leaves the `Document` untouched (Constraint 5).
+  bool can_paste_image() const override;
+  void paste_image() override;
+
+  // Install the clipboard the Ctrl+V chord + "Paste image" affordance drive (the A12 seam, the
+  // `FileDialog` mould). Not owned; must outlive the gateway. Default: none, so a headless gateway
+  // offers no "Paste image" item and `can_paste_image()` is false (the e2e installs a scripted
+  // fake).
+  void set_clipboard(Clipboard& clipboard);
+
   // --- Delete Selected (editor.cells.remove) ---------------------------------
   // The inverse of `insert_cell`, over the ONE project-level selection (D19). `can_delete`
   // is the cheap gate both affordances poll each frame; `delete_selected` resolves the
@@ -247,6 +269,15 @@ private:
   // Run a Document-mutating edit through the installed runner (posted to the document's writer
   // thread via CanvasView::apply_edit), or directly when none is installed.
   void run_edit(const std::function<void()>& edit);
+  // The insert TAIL shared by `insert_image` (borrowed) and `paste_image` (owned): assemble the
+  // `org.arbc.image` config with the bytes embedded (`authored == resolved == uri`), probe native
+  // bounds, place at NATIVE SCALE at `device_point` (or the focused-pane centre when `nullopt`),
+  // and mint through `insert_cell_command` inside `run_edit` — one journal entry, one undo, the new
+  // cell selected (A13/D15). The ONLY thing that varies between the two verbs is the byte source +
+  // the URI (borrowed absolute vs owned project-relative), so only that is factored out above it.
+  // Returns the kind's own error string, empty on success.
+  std::string insert_image_bytes(std::string_view uri, std::string_view bytes,
+                                 std::optional<arbc::Vec2> device_point);
 
   ace::commands::AppState& app_state_; // the one in-process session (A7) Save/dirty drive
   // Posts a UI-thread edit onto the document's one writer thread (bound to
@@ -259,6 +290,9 @@ private:
   std::function<ViewFraming()> view_framing_;
   // The native file picker for "Place image…" (A12); null -> no "Place image…" affordance.
   FileDialog* file_dialog_ = nullptr;
+  // The clipboard for Ctrl+V / "Paste image" (A12/A30); null -> no "Paste image" affordance and
+  // `can_paste_image()` false.
+  Clipboard* clipboard_ = nullptr;
 };
 
 } // namespace ace::app

@@ -1,3 +1,4 @@
+#include <ace/app/clipboard.hpp>
 #include <ace/app/file_dialog.hpp>
 #include <ace/app/folder_dialog.hpp>
 #include <ace/app/project_gateway.hpp>
@@ -20,6 +21,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -367,13 +369,11 @@ std::optional<arbc::Vec2> drop_device_point(arbc::Vec2 window_point,
   return arbc::Vec2{window_point.x - rect.x0, window_point.y - rect.y0}; // pane-local device px
 }
 
-std::string AppProjectGateway::insert_image(const std::filesystem::path& path,
-                                            std::optional<arbc::Vec2> device_point) {
-  // project owns the file byte-read + path->URI normalization (borrowed, un-relativized, D13).
-  const ace::project::BorrowedAsset asset = ace::project::borrow_asset_file(filesystem_, path);
+std::string AppProjectGateway::insert_image_bytes(std::string_view uri, std::string_view bytes,
+                                                  std::optional<arbc::Vec2> device_point) {
   // commands assembles the opaque image config with the bytes embedded (decodes immediately);
-  // authored == resolved == the borrowed absolute-path URI (present file, D-image-5).
-  const std::string config = ace::commands::image_config(asset.uri, asset.uri, asset.bytes);
+  // authored == resolved == the source URI (borrowed absolute path, or owned project-relative).
+  const std::string config = ace::commands::image_config(uri, uri, bytes);
   // Probe the photo's native-pixel bounds BEFORE minting (the placement needs them). A
   // malformed frame is the kind's own error, Document untouched.
   const arbc::expected<std::optional<arbc::Rect>, std::string> bounds =
@@ -382,8 +382,9 @@ std::string AppProjectGateway::insert_image(const std::filesystem::path& path,
     return bounds.error();
   }
   const ViewFraming framing = view_framing();
-  // A supplied drop point places there; nullopt (the dialog, and the out-of-pane drop fallback)
-  // places at the focused view centre — symmetric with the centred native-scale placement.
+  // A supplied drop point places there; nullopt (the dialog/paste, and the out-of-pane drop
+  // fallback) places at the focused view centre — symmetric with the centred native-scale
+  // placement.
   const arbc::Vec2 point = device_point.value_or(arbc::Vec2{
       static_cast<double>(framing.pane_w) * 0.5, static_cast<double>(framing.pane_h) * 0.5});
   // 1:1 native scale, camera-independent (D12/§8) — NOT place_in_view's fill-to-view.
@@ -395,7 +396,7 @@ std::string AppProjectGateway::insert_image(const std::filesystem::path& path,
       app_state_.entered_composition());
   // ONE undoable action through the single-writer seam (A13), exactly like insert_cell.
   run_edit([this, &command] { ace::commands::dispatch(app_state_, command); });
-  // Select the freshly-imported cell (the drop/Place UX: what you brought in is what is
+  // Select the freshly-brought-in cell (the drop/Place/Paste UX: what you brought in is what is
   // selected). Transient UI-thread project state (D19/D15) — never a transaction, so it is set
   // HERE off the writer turn, not inside the command. A refused import selects nothing.
   if (outcome.error.empty() && outcome.content.valid()) {
@@ -403,6 +404,51 @@ std::string AppProjectGateway::insert_image(const std::filesystem::path& path,
   }
   return outcome.error;
 }
+
+std::string AppProjectGateway::insert_image(const std::filesystem::path& path,
+                                            std::optional<arbc::Vec2> device_point) {
+  // project owns the file byte-read + path->URI normalization (borrowed, un-relativized, D13);
+  // authored == resolved == the borrowed absolute-path URI (present file, D-image-5). The shared
+  // tail does everything downstream of "here are the bytes and a URI" (editor.import.image).
+  const ace::project::BorrowedAsset asset = ace::project::borrow_asset_file(filesystem_, path);
+  return insert_image_bytes(asset.uri, asset.bytes, device_point);
+}
+
+namespace {
+
+// The bare file extension for a clipboard mime (`image/png` -> `png`), for on-disk legibility of
+// the minted blob only — the decode sniffs the bytes, never the name. Empty for a schemeless mime.
+std::string mime_to_ext(std::string_view mime) {
+  const std::size_t slash = mime.rfind('/');
+  return slash == std::string_view::npos ? std::string() : std::string(mime.substr(slash + 1));
+}
+
+} // namespace
+
+bool AppProjectGateway::can_paste_image() const { return clipboard_ != nullptr; }
+
+void AppProjectGateway::paste_image() {
+  if (clipboard_ == nullptr) {
+    return;
+  }
+  // Read an ENCODED image off the clipboard (UI-thread). Nothing pasteable (empty/text/raw-only)
+  // is a graceful NO-OP: no mint, no transaction, the Document untouched (Constraint 7).
+  const std::optional<ClipboardImage> image = clipboard_->read_image();
+  if (!image.has_value() || image->bytes.empty()) {
+    return;
+  }
+  // MINT the clipboard bytes as an OWNED asset in the LIVE project's `assets/` (A30, D-paste-1):
+  // content-addressed, write-if-absent, a project-relative owned URI. NOT undoable (writing a blob
+  // is not a document edit — an orphan the GC reaps); only the cell insert below is journaled.
+  const ace::project::OwnedAsset owned = ace::project::mint_owned_asset(
+      filesystem_, app_state_.layout(), image->bytes, mime_to_ext(image->mime));
+  // Paste places at the focused-pane centre (nullopt device point), then rides the SAME
+  // native-scale insert tail as a borrowed import — the only differences are the byte source and
+  // the owned URI.
+  (void)insert_image_bytes(owned.uri, owned.bytes, std::nullopt);
+}
+
+void AppProjectGateway::set_clipboard(Clipboard& clipboard) { clipboard_ = &clipboard; }
 
 bool AppProjectGateway::can_place_image() const { return file_dialog_ != nullptr; }
 

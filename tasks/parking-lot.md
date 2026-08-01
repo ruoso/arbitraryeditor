@@ -317,6 +317,28 @@ The shipped brush paints an isotropic circular `round_dab` (circular in content 
 
 ---
 
+## libarbc GC blind to owned image blobs — `assets/images/` never rooted or reclaimed
+
+**Source:** `tasks/refinements/editor/paste.md` (editor.import.paste, 2026-07-31) — GC-roots-owned-blob acceptance criterion escape clause.
+
+**Trigger:** a new libarbc release whose GC mark walk visits `params.source` refs on the image codec, or a reaper pass that scans `assets/images/` in addition to `assets/tiles/`.
+
+libarbc v0.4.1's `gc_project_directory` reaper scans only `assets/tiles/` (not `assets/images/`), and the GC mark walk harvests only `params.blobs`, never `params.source` (which is where `mint_owned_asset` stores the owned-image URI). Consequence: (a) the GC-roots-owned-blob Catch2 test case from the acceptance criteria was NOT landed — neither half is satisfiable against the current library; (b) a paste→undo→save→Clean-Up cycle does NOT reclaim the orphaned owned image blob in practice, even though the design (D13/A23) expects it to. The owned blob is also never leaked (the reaper ignores `assets/images/` entirely), so no spurious deletion occurs. This is a structural library gap, not an editor-side issue.
+
+**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting that (a) the reaper scans `assets/images/` in addition to `assets/tiles/`, and (b) the GC mark walk harvests image-codec `params.source` URIs alongside `params.blobs`. When the trigger fires: bump the pin and land the GC-roots-owned-blob test that the paste acceptance criteria deferred.
+
+---
+
+## Raw-RGBA clipboard scope and image encoder choice
+
+**Source:** `tasks/refinements/editor/paste.md` (editor.import.paste, 2026-07-31) — D-paste-4 / Open questions.
+
+**Trigger:** real use showing that raw-RGBA-only clipboards are a common source of paste failures, **and** a decision on which image encoder to vendor (imdec is decode-only).
+
+`editor.import.paste` ships encoded-clipboard-only (prefer `image/png`, then any imdec-decodable mime); a clipboard with only raw pixels (no encoded form) is a graceful no-op. Extending v1 to accept raw RGBA would require vendoring an image encoder — imdec is decode-only, so a new dependency (e.g. `stb_image_write.h`, already adjacent to the existing `stb_image_write.h` vendored for export, or `libpng`) would be needed. The correct encoder choice is a dependency/product call, and the limitation is only observable on applications that place raw RGBA on the clipboard without also placing a PNG form (uncommon in practice). No WBS task until the limitation is confirmed painful in real use and an encoder is chosen.
+
+---
+
 ## Eyedropper modifier final key chord (Alt provisional)
 
 **Source:** `tasks/refinements/editor.panels/color_eyedrop_cell.md` (panels.color_eyedrop_cell, 2026-07-30) — D-eyedrop_cell-4.

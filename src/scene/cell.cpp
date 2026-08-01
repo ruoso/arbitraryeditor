@@ -104,18 +104,28 @@ make_content(const arbc::Registry& registry, std::string_view kind_id, std::stri
 // and for an unavailable image (empty bounds). `editable()` is a non-const facet virtual
 // but a pure discovery read (it mints nothing) — const-clean under the render walk (the
 // TSan anchor covers it). `bounds` is the same value the caller already read off this pin.
+// D11's "bytes where?" axis by URI SHAPE (editor.import.paste / D-paste-2): a pasted image the
+// project MINTED lives project-relative under `assets/` (the `tile_blob_uri` scheme,
+// `mint_owned_asset`) — OWNED; an imported photo keeps an external absolute/`file://` URI —
+// BORROWED. The URI already encodes the answer, so no per-kind owned/borrowed flag is needed (A16).
+bool is_owned_asset_ref(std::string_view ref) {
+  constexpr std::string_view k_owned_prefix = "assets/";
+  return ref.substr(0, k_owned_prefix.size()) == k_owned_prefix;
+}
+
 CellDetail classify_detail(arbc::Content& content, const std::optional<arbc::Rect>& bounds) {
   CellDetail detail;
   // D11's "bytes where?" axis, orthogonal to the editable? classification below and read from the
-  // SAME generic facet `ReferencedImage` keys on (A16 / D-layers-4): a non-empty external asset ref
-  // means the bytes live in a borrowed external file; empty means owned. A painted grid and a
-  // resolution-independent cell are owned; a pasted owned image is owned; a referenced photo
-  // borrows.
-  detail.borrowed = !content.external_asset_ref().empty();
+  // SAME generic facet `ReferencedImage` keys on (A16 / D-layers-4). An empty asset ref means the
+  // bytes are owned (a painted grid, a resolution-independent cell). A NON-empty ref splits by URI
+  // shape (D-paste-2): a project-relative `assets/` URI is a minted OWNED image (owned); an
+  // external absolute/`file://` URI is a borrowed referenced photo (borrowed).
+  const std::string_view asset_ref = content.external_asset_ref();
+  detail.borrowed = !asset_ref.empty() && !is_owned_asset_ref(asset_ref);
   if (content.editable() != nullptr) {
     detail.source = DetailSource::PaintedRaster;
-  } else if (!content.external_asset_ref().empty()) {
-    detail.source = DetailSource::ReferencedImage;
+  } else if (!asset_ref.empty()) {
+    detail.source = DetailSource::ReferencedImage; // owned OR borrowed — the `borrowed` flag splits
   } else {
     return detail; // ResolutionIndependent (the default): no native floor, no native px
   }

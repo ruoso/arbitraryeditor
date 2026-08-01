@@ -221,6 +221,15 @@ void draw_edit_section(Dockspace& dockspace, ProjectGateway& gateway) {
       gateway.place_image();
     }
   }
+  // The third import entry point beside Place (editor.import.paste / A30): shown only when a
+  // clipboard is wired (a session gateway). The pointer path for the Ctrl+V chord below — both
+  // funnel through the ONE `paste_image()` verb, which mints an OWNED image from the clipboard
+  // bytes (no source file to borrow, D11). An empty/no-image clipboard is a graceful no-op.
+  if (gateway.can_paste_image()) {
+    if (ImGui::Selectable("Paste image###paste_image")) {
+      gateway.paste_image();
+    }
+  }
   // DISABLED rather than hidden with an empty selection: the rail's fixed geometry is
   // the "home base" guarantee (§10), and a greyed item makes the gate discoverable.
   const bool can_delete = gateway.can_delete();
@@ -393,6 +402,16 @@ void handle_undo_shortcuts(ProjectGateway& gateway) {
       ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y)) {
     if (gateway.can_redo()) {
       gateway.redo();
+    }
+  }
+  // Paste image (editor.import.paste / A30 / D-paste-3): Ctrl+V, beside the undo/redo chords and
+  // routed through the same gateway seam, gated on `can_paste_image()` (a clipboard is installed)
+  // so a no-op is never dispatched. A modifier chord like Ctrl+Z (not a bare key), so it follows
+  // the undo pattern and needs no text-input guard; an empty/no-image clipboard is the verb's own
+  // no-op.
+  if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_V)) {
+    if (gateway.can_paste_image()) {
+      gateway.paste_image();
     }
   }
 }

@@ -1,4 +1,5 @@
 #include <ace/app/canvas_view.hpp>
+#include <ace/app/clipboard.hpp>
 #include <ace/app/color_panel.hpp>
 #include <ace/app/export_wiring.hpp>
 #include <ace/app/file_dialog.hpp>
@@ -441,6 +442,7 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
     std::unique_ptr<ace::dockmodel::RecentProjects> recent_projects;
     std::unique_ptr<ace::app::SdlFolderDialog> folder_dialog;
     std::unique_ptr<ace::app::SdlFileDialog> file_dialog;
+    std::unique_ptr<ace::app::SdlClipboard> clipboard;
     std::unique_ptr<ace::app::AppProjectGateway> app_gateway;
     ace::dock::ProjectGateway* project_gateway = opts.project_gateway;
     if (project_gateway == nullptr) {
@@ -488,6 +490,12 @@ int run_editor(const ShellOptions& opts, const std::function<void(commands::AppS
       // native FILE picker — the `FolderDialog` mould — and imports at the focused view centre.
       file_dialog = std::make_unique<ace::app::SdlFileDialog>();
       app_gateway->set_file_dialog(*file_dialog);
+      // The paste entry points (editor.import.paste / D-paste-3), both funnelling into
+      // `AppProjectGateway::paste_image`: the Ctrl+V chord and the "Paste image" affordance read
+      // the clipboard through the `SdlClipboard` seam (the `SdlFileDialog` mould) and mint an OWNED
+      // image.
+      clipboard = std::make_unique<ace::app::SdlClipboard>();
+      app_gateway->set_clipboard(*clipboard);
       // (2) An OS file-drop: map the drop's window point onto the focused canvas pane and place
       // there, falling back to the focused centre for an out-of-pane drop (Constraint 6). Thin
       // SDL glue; the testable verb + the mapping (`drop_device_point`) are covered directly.
