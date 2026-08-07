@@ -34,6 +34,21 @@ closer transcribes it. So each pass should re-run that grep over refinements add
 since the last triage, and treat "the refinement says it parked this" as a claim
 to verify rather than a fact.
 
+*Sweep boundary:* the 2026-08-07 pass swept **all 94** refinements, not just those
+added since the previous triage — which is how it caught
+`nested_composition_binding.md`, a file older than the last triage whose parked
+item had been missed by it too. 50 files route something here; every one was
+resolved as **represented**, **closed at a prior triage**, or **superseded by a
+later design row**. Three of the supersessions are worth naming so they are not
+re-opened as apparent gaps: Save-As overwrite-confirm (`save_as.md` D-save_as-4) is
+void under **D27**, which refuses any target that exists at all; the ImGui Test
+Engine licence question (`app_shell.md`) was answered as **A10**; and the
+canonical-floor / autosave suggestion (`workspace_reopen_slab.md` D-slab-3,
+`reopen_slab_adopt.md`) lost its motivation when `editor.project.reconstructing_reopen`
+made the map path reconstruct content, leaving only the residual already carried
+below as the camera mutable-state item. **A future pass need only sweep the delta
+since 2026-08-07.**
+
 ---
 
 # Decidable now
