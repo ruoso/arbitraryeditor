@@ -292,7 +292,8 @@ driving `###ov_cell_<id>` by raw mouse position):
 
 The e2e follows the overview e2e's inline-pool convention for its live-canvas scaffolding
 (`WorkerPoolConfig{}`) to sidestep the pinned libarbc nested-render worker-detach race (parking lot,
-`tasks/parking-lot.md` "arbc v0.4.0 nested-render worker-detach race").
+`tasks/parking-lot.md` "arbc nested-render worker-detach race" — retitled at the 2026-08-07
+triage, which re-verified the race survives the v0.4.1 pin and filed it upstream as arbc#29).
 
 **Threading (ASan/TSan).** The gizmo session state is UI-thread-only (Constraint 10), so no new
 cross-thread surface is added. A case appended to `tests/canvas_host_test.cpp` repeats overview gizmo

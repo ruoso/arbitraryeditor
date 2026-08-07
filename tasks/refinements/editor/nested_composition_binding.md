@@ -410,5 +410,25 @@ in-place. No human-judgment item blocks *this* leaf.
 - `src/render/ace/render/canvas_host.hpp` / `src/render/canvas_host.cpp` — `add` and `Entry`/`PendingAdd` carry the optional `const arbc::Registry*`, forwarded to each entry's renderer.
 - `src/app/canvas_view.cpp` — wires `&state_.registry()` into `host_.add(...)`.
 - `tests/canvas_host_test.cpp` — three Catch2 L2 unit cases (ace_tests) via a `DeferringAssetSource` double: (1) wired binding drains `pending_external_loads` 1→0 and composites the child, byte-exact vs a settled reference; (2) empty binding leaves it blank (pending stays 1, sequence 0); (3) ref-free doc renders byte-identically through wired vs empty binding.
-- Scoped-test deviation (justified): `render_document_srgb8` offline reference is unattainable — `render_offline` never calls `bind_operators`, so it composites no nested-composition operator. Convergence proved instead against an independent copy pre-settled to quiescence rendered through an empty-binding interactive host (byte-exact).
+- Scoped-test deviation (justified **as written, on pre-v0.4.0 facts**): `render_document_srgb8` offline reference was unattainable — `render_offline` never called `bind_operators`, so it composited no nested-composition operator. Convergence proved instead against an independent copy pre-settled to quiescence rendered through an empty-binding interactive host (byte-exact).
 - Parking lot: `render_offline` cannot render nor settle nested compositions at all (binds no operators) — broader than the noted "doesn't settle external loads." Surfaced for whoever builds the export path (`packaging`).
+
+> **STALE IN PART — corrected at the 2026-08-07 parking-lot triage.** The
+> operator-binding half of both bullets above is **no longer true** and must not be
+> relied on. The v0.4.0 render-path unification (`editor.canvas.arbc_v040`) gave
+> `render_offline` the same tiled driver the interactive loop uses, and at the
+> current pin it **does** bind operators: `src/runtime/offline.cpp:52` calls
+> `bind_operators(document, pull, backend, state)` after
+> `register_builtin_operator_binders()`. `tasks/refinements/editor.panels/color_eyedrop_nested.md:257-269`
+> flagged this independently and routed it to a closer, who did not act on it —
+> hence this note. The claim was never added to `tasks/parking-lot.md`, which is
+> the right outcome for a false claim, but it survived here and in a test comment
+> and misled two subsequent readers.
+>
+> **What remains true** is the narrower half: `render_offline` still does not
+> settle deferred external loads (`offline.cpp:78-82` passes `pending=nullptr` at
+> the current pin), so exporting a project with an unsettled external nested
+> composition renders it blank. That gap is real, its "whoever builds the export
+> path" trigger has now fired (`editor.cameras.export` / `export_pinned` shipped),
+> and it is carried as a live item under **Decidable now** in
+> `tasks/parking-lot.md` — where the return summary intended it to go.

@@ -1673,16 +1673,27 @@ TEST_CASE("canvas_host: the wired binding settles a deferred external nested chi
   REQUIRE(host.consume("canvas#1", s, frame));
   CHECK(ace::render::frame_has_content(frame)); // the child's straight-alpha coverage
 
-  // Byte-exact vs the settled reference. NOTE the reference is NOT render_document_srgb8:
-  // render_offline never binds operators (offline.cpp — no bind_operators/OperatorBindingScope),
-  // so it composites NO nested-composition operator at all, settled or not, and yields a blank
-  // frame for this document. The convergence claim is therefore proved against a MATCHED
-  // compositor: an INDEPENDENT copy pre-settled to quiescence (loop settle_external_loads to 0),
-  // then rendered through an EMPTY-binding interactive host — once the child is installed the
-  // empty binding composites it via bind_operators (the settle hook is what an empty binding
-  // lacks, not the compositor). The wired settle must converge to that fully-settled render
-  // byte-for-byte. (render_offline's inability to render — or settle — nested compositions is a
-  // separate offline/export-path gap, surfaced to the parking lot.)
+  // Byte-exact vs the settled reference. NOTE the reference is NOT render_document_srgb8.
+  //
+  // The ORIGINAL reason given here was that render_offline binds no operators and so composites
+  // no nested-composition operator at all. That is STALE and was corrected at the 2026-08-07
+  // parking-lot triage: since the v0.4.0 render-path unification, render_offline runs the same
+  // tiled driver as the interactive loop and DOES bind operators (arbc offline.cpp:52 calls
+  // bind_operators after register_builtin_operator_binders). Do not propagate the old claim.
+  //
+  // The reference construction below is nonetheless still CORRECT, for the narrower reason that
+  // survives: render_offline does not SETTLE deferred external loads (offline.cpp:78-82 passes
+  // pending=nullptr), and this document's child arrives via a DeferringAssetSource — so an
+  // offline render of it would still be blank here, for want of the settle rather than for want
+  // of the binding. The convergence claim is proved against a MATCHED compositor: an INDEPENDENT
+  // copy pre-settled to quiescence (loop settle_external_loads to 0), then rendered through an
+  // EMPTY-binding interactive host — once the child is installed the empty binding composites it
+  // via bind_operators (the settle hook is what an empty binding lacks, not the compositor). The
+  // wired settle must converge to that fully-settled render byte-for-byte.
+  //
+  // (render_offline's inability to settle deferred external loads is a live offline/export-path
+  // gap — an export of an unsettled external nested composition renders blank. It is carried in
+  // tasks/parking-lot.md under "Decidable now", its export-path trigger having fired.)
   DeferringAssetSource ref_source;
   arbc::KindBridge ref_bridge;
   std::unique_ptr<arbc::Document> ref_doc = load_pending_nested(ref_source, ref_bridge, registry);

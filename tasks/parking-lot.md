@@ -23,18 +23,66 @@ filed and closed; an unfiled item is not waiting on evidence, it is stalled. So:
 an item whose trigger is "a new libarbc release that…" is **not** correctly
 parked until it carries an issue number. File first, park second.
 
+**A triage must also look for what is missing, not only re-check what is here**
+(added at the 2026-08-07 triage). Walking the 26 existing items validated all of
+them and found one fired trigger. Walking the *refinements* instead — every one
+landed since the previous triage, grepped for text routing an item to this file —
+found **three items that refinements explicitly said belonged here and that no
+closer ever added**, one of them with a trigger that had already fired. A
+refinement's return summary is not a delivery mechanism; nothing enforces that the
+closer transcribes it. So each pass should re-run that grep over refinements added
+since the last triage, and treat "the refinement says it parked this" as a claim
+to verify rather than a fact.
+
 ---
 
 # Decidable now
 
-*Empty.* The 2026-07-28 triage decided the three items that stood here (bundled
-font, welcome-window treatment, worker-backed tile dispatch), and the 2026-08-07
-triage decided the two that had arrived since — the **Assets view real-body
-owner** (subsumed by the shipped Layers panel; no asset-browser leaf) and the
-**camera frame gizmo chrome unification** (declined for v1). Git history is the
-record of each; the reasoning that survives is carried in the leaf note and in
-the architecture rows the decisions touch, not here. A new item lands here only
-if it is genuinely waiting on a human choice rather than on evidence.
+The 2026-07-28 triage decided the three items that stood here (bundled font,
+welcome-window treatment, worker-backed tile dispatch), and the 2026-08-07 triage
+decided two more — the **Assets view real-body owner** (subsumed by the shipped
+Layers panel; no asset-browser leaf) and the **camera frame gizmo chrome
+unification** (declined for v1). Git history is the record of each; the reasoning
+that survives is carried in the leaf note and in the architecture rows the
+decisions touch, not here.
+
+## Export of an unsettled external nested composition renders blank
+
+**Source:** `tasks/refinements/editor/nested_composition_binding.md` (`:318-325`,
+`:396-402`) — surfaced to the parking lot in the return summary, but **never
+added**; recovered by the 2026-08-07 triage's gap check.
+
+**Its trigger has fired.** The refinement deferred this "for whoever builds the
+export path (`packaging` area)" — and that path now exists:
+`editor.cameras.export` and `editor.cameras.export_pinned` have both shipped. It
+is listed here rather than under *Waiting on evidence* because every input exists
+and only the call is outstanding.
+
+`arbc::render_offline` renders a pinned in-memory snapshot and does **not** settle
+deferred external loads — verified at the current pin, `offline.cpp:78-82` passes
+`pending=nullptr`. So exporting a project whose external nested composition has
+not been settled in-session renders that cell blank, with no warning.
+
+`editor.import.nested` makes this reachable rather than theoretical. A freshly
+placed `org.arbc.nested` cell does not resolve until the next reopen (see the
+live-resolution entry below, arbc#32) — so the exact sequence *place a nested
+composition → export a camera* produces a silently blank region in the PNG, in the
+one session where the user is most likely to try it.
+
+**The decision.** This looks **editor-side implementable**, which is why it is a
+decision rather than another upstream issue: the export path could drive
+`settle_external_loads` to quiescence on the writer thread *before* pinning the
+revision it exports, leaving `render_offline`'s byte-exact-reference contract
+untouched (the refinement's stated objection was to the *library* silently gaining
+settle semantics — not to a host settling first). If that holds, this is a small
+WBS leaf, roughly `editor.cameras.export_settle` (~1d), gathered into
+`editor.packaging.package` like its siblings. The alternatives are to warn on
+export instead of settling, or to accept the limitation and document it.
+
+Someone should confirm the pre-settle is actually reachable from the export path's
+threading before the leaf is minted — that check is the only open input, and it is
+a half-hour read of `export_pinned`'s writer interaction, not evidence that has to
+accumulate.
 
 ---
 
@@ -76,6 +124,62 @@ rebindable — the panel body for Layers, `OverviewPanel` for the overview, and
 eyedropper. The scope model (`AppState::entered_composition`), the breadcrumb
 derivation, the L1 path and geometry helpers, and the navigator seam all stay put
 when the bindings move. Human design call gated on the input map.
+
+---
+
+## Own-colour sampling for operator cells
+
+**Source:** `tasks/refinements/editor.panels/color_eyedrop_nested.md`
+(panels.color_eyedrop_nested, 2026-07-30) — D-eyedrop_nested-3. The refinement
+states in three places that this belongs here; the closer never added it.
+Recovered by the 2026-08-07 triage's gap check.
+
+**Trigger:** the still-image editor gains an operator-cell authoring surface.
+
+The Alt-modifier eyedropper's isolation gate returns `std::nullopt` for operator
+cells, so an Alt-sample over one falls back gracefully to the composited colour —
+a strict superset of prior behaviour, not a regression. Making an operator report
+its *own* colour would mean rebuilding the operator plus its input closure into an
+anonymous `Document` via the registry codec `deserialize` (`registry.hpp:76-78`),
+anchoring it, and calling `render_offline`. That mechanism is understood and ready.
+
+It is not scheduled because there would be **nothing to schedule it against**: the
+still-image editor authors only leaves (solid / raster / image), cameras (excluded
+from `cells()`), and nested compositions. The library's `fade` / `crossfade` /
+`tone` operators are time- and audio-domain, with no still-image surface. An
+isolation leaf would be built and gated with zero authorable fixtures to validate
+it and nothing to close it cleanly.
+
+The genuine question underneath — *should* the editor ever author operator cells —
+is a product call, and this item resolves as a side effect of answering it.
+
+---
+
+## Full camera gizmo on overview frames
+
+**Source:** `tasks/refinements/editor.panels/overview_gizmo.md`
+(editor.panels.overview_gizmo, 2026-07-30) — D-overview_gizmo-4, which routes it
+here explicitly ("it belongs in the parking lot as an aesthetic call beside
+D-gizmo-6, never a self-perpetuating 'revisit' WBS leaf"). Never added; recovered
+by the 2026-08-07 triage's gap check.
+
+**Trigger:** real use showing users reach for camera recrop from the overview
+rather than climbing to the canvas.
+
+`editor.panels.overview_gizmo` ships the full scale/rotate/shear gizmo on
+schematic **cell** boxes, reusing the cell-gizmo math. Camera frames on the
+overview get no manipulation handles: the charter scopes the leaf to "schematic
+overview boxes", and `editor.cells.gizmo` likewise left the canvas camera frame
+chrome as-is (D-gizmo-6).
+
+*Distinguished from the D-gizmo-6 item the 2026-08-07 triage closed.* That one was
+a pure chrome **refactor** — redrawing already-shipped camera frame handles over
+shared helpers, no behaviour change — and was declined for v1 as churn. This one
+adds a **capability** the editor does not have anywhere: aspect-locked recrop and
+dutch on a camera, driven from the overview. The two look alike and are not; do
+not read the closure of that as having decided this.
+
+If wanted, it is a small reuse of the canvas camera-gizmo path, not new geometry.
 
 ---
 
@@ -316,6 +420,8 @@ libarbc has a data race in its threaded interactive render path: `NestedContent:
 **Trigger:** a design pass after the overview has been used in real compositions.
 
 The overview ships provisional defaults for the three §5:204-206 open polish items: the exact hatch style and semi-opacity level (currently a defensible visual default); the pattern-count threshold before color must carry the load (the `overview_pattern` fallback is parameterized but the threshold is provisional); and the camera visual language (frame outline + label, no affordance chrome beyond the look-through click target). All three are human/design-taste calls that retune without touching the model or geometry. No WBS task — retune the L4 draw constants when a design pass produces a preferred value.
+
+*A fourth item folded in at the 2026-08-07 triage:* the overview **gizmo handle chrome** — the weight and colour of the drag handles on schematic boxes, which `editor.panels.overview_gizmo` ships by reusing the canvas gizmo's existing palette rather than choosing its own. Its refinement routes it here and explicitly groups it with these items ("minor visual polish… not a design question, and does not gate the leaf"). Same trigger, same one-pass fix, same L4 constants — it was never added separately, and it should not be.
 
 ---
 
