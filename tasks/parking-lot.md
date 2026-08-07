@@ -13,50 +13,69 @@ re-read the whole list as open):
   yet: real use, profiling data, or a leaf that has not shipped. Each names its
   own trigger. Do not re-litigate these until the trigger fires.
 
+**A trigger that names an upstream fix must also name the issue that asks for
+it** (added at the 2026-08-07 triage). That triage found that *none* of the six
+"Human action: file an upstream issue" items had ever been filed — the highest
+issue on `ruoso/arbitrarycomposer` was still `#27`, from the pre-v0.4.0 batch, so
+every library-gated item was waiting on a release that nobody had requested. The
+v0.4.0 triage collapsed 22 items to 6 precisely *because* eleven issues had been
+filed and closed; an unfiled item is not waiting on evidence, it is stalled. So:
+an item whose trigger is "a new libarbc release that…" is **not** correctly
+parked until it carries an issue number. File first, park second.
+
 ---
 
 # Decidable now
 
-*Empty.* The 2026-07-28 triage decided all three items that stood here — the
-bundled font (adopted, scheduled as `editor.cameras.truetype_captions`), the
-welcome-window visual treatment (declined for v1) and the worker-backed tile
-dispatch (inline decode accepted for v1). Git history is the record of each; the
-reasoning that survives is carried in the leaf note and in the architecture rows
-the decisions touch, not here. A new item lands here only if it is genuinely
-waiting on a human choice rather than on evidence.
+*Empty.* The 2026-07-28 triage decided the three items that stood here (bundled
+font, welcome-window treatment, worker-backed tile dispatch), and the 2026-08-07
+triage decided the two that had arrived since — the **Assets view real-body
+owner** (subsumed by the shipped Layers panel; no asset-browser leaf) and the
+**camera frame gizmo chrome unification** (declined for v1). Git history is the
+record of each; the reasoning that survives is carried in the leaf note and in
+the architecture rows the decisions touch, not here. A new item lands here only
+if it is genuinely waiting on a human choice rather than on evidence.
 
 ---
 
 # Waiting on evidence
 
-## Layers panel — enter/expand keyboard and double-click bindings
+## Provisional input bindings across three shipped panels (§11 input map)
 
-**Source:** `tasks/refinements/editor.panels/layers.md` (editor.panels.layers, 2026-07-29) — Open questions.
+**Source:** `tasks/refinements/editor.panels/layers.md` (editor.panels.layers,
+2026-07-29); `tasks/refinements/editor/overview.md` (editor.panels.overview,
+2026-07-30); `tasks/refinements/editor.panels/color_eyedrop_cell.md`
+(panels.color_eyedrop_cell, 2026-07-30) — D-eyedrop_cell-4.
 
-**Trigger:** §11 input map settled in `docs/00-design.md`.
+**Trigger:** §11 input map settled in `docs/00-design.md` (still listed under
+*Not yet designed* → "Full input map", verified 2026-08-07).
 
-`editor.panels.layers` ships the shipped-idiom gestures: single-click select, disclosure-triangle expand, double-click enter, crumb-click climb. These bindings are provisional — §11 of `docs/00-design.md` (the input map) is still open, and the input-map owner may want to remap expand to a key chord or change the double-click-vs-modifier boundary. The scope model (`AppState::entered_composition`), the breadcrumb derivation, and all three L1 path helpers are independent of the bindings and need no change when they move; only the L4 dispatch in the panel body is rebindable. No WBS task — this is a human design call gated on the input map.
+*Consolidated at the 2026-08-07 triage* from three separate entries. They shared
+one trigger, will be answered in one input-map pass, and re-reading them as three
+open items each cycle overstated how much was outstanding. The three sets of
+provisional bindings:
 
----
+- **Layers panel** (`editor.panels.layers`) — single-click select,
+  disclosure-triangle expand, double-click enter, crumb-click climb. The
+  input-map owner may want expand on a key chord, or a different
+  double-click-vs-modifier boundary.
+- **Overview panel** (`editor.panels.overview`) — double-click-to-enter,
+  zoom-control chord, fit-to-camera click.
+- **Eyedropper modifier** (`editor.panels.color_eyedrop_cell`) — **Alt** for the
+  active-cell isolated sample, read from `CanvasInput.alt`
+  (`src/views/ace/views/views.hpp:69`). Alt is free in the Eyedropper context and
+  is the conventional "sample this specific thing" modifier, so it is a
+  defensible v1 binding; the chord may be confirmed, remapped, or given a
+  dedicated modifier. (D24's deep-zoom navigation bindings carry the same
+  provisional status, stated in the design row itself rather than here.)
 
-## Assets view real-body owner
-
-**Source:** `tasks/refinements/editor/view_registry.md` (view_registry, 2026-07-17)
-
-**Trigger:** `editor.panels.layers` ships.
-
-The Assets view type is registered and draws a labeled placeholder. Its real
-body is a design judgment call: does it warrant a dedicated asset-browser leaf,
-or is it subsumed by the Layers list's referenced-vs-painted surface
-(`editor.panels.layers`, per D11)? No new WBS leaf was created; the choice is
-parked here for human review before a downstream panel-content task is
-scheduled.
-
-*Sharpened at the v0.4.0 triage (2026-07-28):* this is not an open-ended design
-call — it has a named gate that has not opened. `editor.panels.layers` is still
-**incomplete**, so the referenced-vs-painted surface the "is it subsumed?"
-question compares against does not exist yet to be looked at. Nothing here is
-answerable until that leaf lands; revisit then, not before.
+All three are **cheap to move**, which is why none is a WBS task: in each case
+the model is independent of the binding and only one L4 dispatch site is
+rebindable — the panel body for Layers, `OverviewPanel` for the overview, and
+`in.alt` in `dispatch_eyedropper` (`src/app/canvas_view.cpp`) for the
+eyedropper. The scope model (`AppState::entered_composition`), the breadcrumb
+derivation, the L1 path and geometry helpers, and the navigator seam all stay put
+when the bindings move. Human design call gated on the input map.
 
 ---
 
@@ -109,6 +128,13 @@ that warrants real use before deciding.
 
 `editor.canvas.writer_thread` ships all-sync for result-carrying verbs (D-3). A streamed gesture burst could build a queue depth that makes a subsequent sync `undo` wait. The coalescing key bounds the *commit* cost, not the queue depth. Whether this is observable in practice is unknown; if it bites, adding a bounded depth or a gesture-drop policy would be the fix. Measure on the real pool with a realistic workload before designing anything — this is a data-gated decision, not implementable work today. No WBS task until profiling data exists.
 
+*Re-checked at the 2026-08-07 triage:* the trigger has moved **further** out, not
+closer. `editor.canvas.settler_attach_split` is blocked on
+`arbc_router_attach_split`, which is blocked on `arbc_router_split_pin`, which now
+waits on upstream **#28**. So the measurement this item asks for is gated on an
+upstream release. Nothing to do here until that chain clears; the amendment below
+still governs *why* it must wait.
+
 *Amended at the v0.4.0 triage (2026-07-28):* do not measure yet — the queue shape
 is about to change. `editor.canvas.settler_attach_split` (consuming libarbc
 v0.4.0's arbc#25 `attach_settler`/`detach_settler`) removes a **known** contributor
@@ -140,7 +166,7 @@ remains hypothetical and `instance()` remains a faithful proxy. Unchanged.
 
 ---
 
-## DamageRouter registrant split — libarbc arbc#25 successor needed to unblock settler_attach_split
+## DamageRouter registrant split — arbc#25 successor **filed as arbc#28**; unblocks settler_attach_split
 
 **Source:** `tasks/refinements/canvas/settler_attach_split.md` (re-defer 2026-07-28);
 confirmed by `tasks/refinements/canvas/arbc_router_split_pin.md` (re-defer 2026-07-28 —
@@ -154,14 +180,26 @@ re-confirmed again by `tasks/refinements/editor.canvas/arbc_router_split_pin.md`
 latest tag still `v0.4.0`, no `attach_router`/`detach_router`/`install_router` symbol on any
 branch or in any commit in history, all refs grepped).
 
-**Trigger:** a new libarbc release that moves `DamageRouter::register_sink` (and `Document::set_damage_sink`) out of `HostViewport` ctor/dtor into the `attach_settler()`/`detach_settler()` pair (or a dedicated `attach_router`/`detach_router()` pair), gated by an `install_settler`-style flag.
+**Filed upstream:** [`ruoso/arbitrarycomposer#28`](https://github.com/ruoso/arbitrarycomposer/issues/28) (2026-08-07).
+
+**Trigger:** a new libarbc release closing **#28** — moving `DamageRouter::register_sink` (and `Document::set_damage_sink`) out of `HostViewport` ctor/dtor into the `attach_settler()`/`detach_settler()` pair (or a dedicated `attach_router`/`detach_router()` pair), gated by an `install_settler`-style flag.
 
 `editor.canvas.settler_attach_split` was found unimplementable against libarbc v0.4.0: arbc#25 split only the settler slot (`set_external_load_settler`), NOT the `DamageRouter::register_sink` call, out of `HostViewport` ctor/dtor. The `DamageRouter` registration is welded unconditionally to the ctor (`host_viewport.cpp:66-68`) and has no internal synchronization (`damage_router.hpp:29-34`), so render-thread construction with `install_settler=false` still races the router's registrant vector against concurrent writer-thread damage flushes. That is exactly the race the `:1639` TSan anchor's guard note (`canvas_host_test.cpp:1636-1638`) names; the hermetic gcc-tsan lane would report it.
 
-**Human action:** file a libarbc issue (successor to arbc#25) requesting the DamageRouter split — that `register_sink` (and the single-canvas `set_damage_sink`) be deferred to `attach_settler()`/`detach_settler()` or a new `attach_router()`/`detach_router()` pair, gated by a new flag analogous to `install_settler`.
+*Filed at the 2026-08-07 triage.* The fourth verification pass (2026-08-07:
+`git fetch --all --tags` pulls nothing, latest tag still `v0.4.1`, no
+`attach_router`/`detach_router`/`install_router` symbol on any ref) finally
+established **why** three passes had found nothing: the successor issue this
+entry had been asking a human to file since 2026-07-28 had never been filed. It
+now is — **#28**. The re-verification loop is closed: the watch is
+`gh issue view 28 --repo ruoso/arbitrarycomposer`, and while it is open there is
+nothing to check. `editor.canvas.arbc_router_split_pin` carries
+`flags upstream_blocked` so `scripts/unblocked.py` lists it under **WAITING ON
+UPSTREAM** rather than READY, which is what let it be picked up and re-deferred
+three times (`a7d473c`, `4b7f5b7`, `7f84756`).
 
 **When the trigger fires:**
-1. Mark `editor.canvas.arbc_router_split_pin` complete once the pin bump to that release lands.
+1. Drop the `upstream_blocked` flag and mark `editor.canvas.arbc_router_split_pin` complete once the pin bump to that release lands.
 2. Implement `editor.canvas.arbc_router_attach_split` (the editor consumer leaf that wires the deferred router registration into the render-thread construction path).
 3. `editor.canvas.settler_attach_split` unblocks automatically once `arbc_router_attach_split` is done.
 
@@ -191,9 +229,11 @@ The no-allowlist enumeration lists `org.arbc.camera` in the insert dialog (it di
 
 **Source:** `tasks/refinements/editor.cells/insert_schema.md` (cells.insert_schema, 2026-07-28) — Open question 2.
 
-**Trigger:** a new libarbc release that adds a `KindInsertSchema` for `org.arbc.nested` (with a labelled `ObjectId` field).
+**Filed upstream:** [`ruoso/arbitrarycomposer#33`](https://github.com/ruoso/arbitrarycomposer/issues/33) (2026-08-07).
 
-libarbc v0.4.0 registers `org.arbc.nested` with **no** schema, so nested inserts fall to the editor's raw-config box (a decimal `ObjectId` text box), losing `editor.cells.model`'s labelled "Child composition (ObjectId)" field. The correct fix is a cross-repo change to `arbitrarycomposer` to advertise a named field for the nested ObjectId. Once that ships in a future pin, no editor code is needed — the field appears automatically through the no-allowlist enumeration. File upstream and resolve when the pin lands.
+**Trigger:** a new libarbc release closing **#33** — adding a `KindInsertSchema` for `org.arbc.nested` (with a labelled `ObjectId` field).
+
+libarbc registers `org.arbc.nested` with **no** schema (still true at v0.4.1: `builtin_kinds.cpp:245,255,259` register schemas for the solid, tone and raster kinds; nested's factory grammar parses a bare decimal `ObjectId` at `:184` with no schema beside it), so nested inserts fall to the editor's raw-config box (a decimal `ObjectId` text box), losing `editor.cells.model`'s labelled "Child composition (ObjectId)" field. The correct fix is a cross-repo change to `arbitrarycomposer` to advertise a named field for the nested ObjectId. Once that ships in a future pin, **no editor code is needed** — the field appears automatically through the no-allowlist enumeration, which is exactly what `Registry::insert_schema` (arbc#21) was for. The issue also asks whether the schema field type can be an `ObjectId`/reference variant rather than a plain integer, which would let a host offer a composition picker instead of a number box; either answer closes the editor's gap.
 
 ---
 
@@ -201,23 +241,15 @@ libarbc v0.4.0 registers `org.arbc.nested` with **no** schema, so nested inserts
 
 **Source:** `tasks/refinements/editor/resolution.md` (cells.resolution, 2026-07-28) — Open questions / D-resolution-5.
 
-**Trigger:** a new libarbc release adding a generic `Resampleable` content facet (or equivalent verb).
+**Filed upstream:** [`ruoso/arbitrarycomposer#31`](https://github.com/ruoso/arbitrarycomposer/issues/31) (2026-08-07).
+
+**Trigger:** a new libarbc release closing **#31** — adding a generic `Resampleable` content facet (or equivalent verb).
 
 `arbc::RasterContent` exposes construction + `paint` only (`raster_content.hpp:297-362`); there is no in-place resize verb. Implementing "resample to crisp" (grow a raster's working grid to match or exceed the camera's pixel density) editor-side would require naming the concrete `RasterContent` type (A16 no-allowlist) and owning kind-specific upsampling (levelization — `arbc::media`'s resampler is the kind's floor, not the editor's). The clean fix is an **upstream generic content-resample facet** — a `Resampleable` a kind opts into and the host discovers via a `Content` virtual (a referenced `org.arbc.image` returns `nullptr` → "source-limited"; a raster implements it to resize its grid to a new version via `set_content_state`) — so the host offers "resample to crisp" without naming any kind.
 
-**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting that `Resampleable` facet / content-resize verb.
+*Filed at the 2026-08-07 triage as **#31**.* Re-verified against v0.4.1 first: `RasterContent`'s public surface is still construction (`raster_content.hpp:299`) plus the two `paint` overloads (`:339,341`) — no in-place resize verb, and nothing on `Content` a host could call generically.
 
 **When the trigger fires** (a libarbc release adding it): bump the pin, then implement the editor-consumer leaf **`editor.cells.resample_apply`** (~1.5d) — wire a "resample to crisp" action in the Inspector through a `commands::Command` + the new verb (one journal entry, undoable, `ObjectId` preserved), gated on `DetailSource::PaintedRaster`, with the `bounds()`-read/write TSan case `selection.md` Open question 2 anticipated. That consumer is genuine agent-implementable work *once the API exists*, so it becomes a WBS leaf then, not now.
-
----
-
-## Camera frame gizmo chrome unification with cell handle helpers
-
-**Source:** `tasks/refinements/editor/gizmo.md` (cells.gizmo, 2026-07-29) — Open questions / D-gizmo-6.
-
-**Trigger:** a decision to refactor the camera frame chrome for aesthetic/consistency reasons after the cell gizmo and camera gizmo have both shipped and been used.
-
-`editor.cells.gizmo` ships the richer cell handle set and the reusable `interact::placed_quad` anchor both gizmos already share, but leaves the shipped, working camera frame chrome (`draw_frame_gizmos`, `src/app/canvas_view.cpp`) as-is (D-gizmo-6). Whether to later refactor the camera frame to draw over the same handle helpers is an aesthetic/consistency call a human should weigh against the churn of touching a shipped, tested gizmo with no behavioural change — it is not a feature and cannot be closed by an implementer, so it is not a WBS leaf.
 
 ---
 
@@ -239,7 +271,9 @@ With remove-pre-empts-add (D-pending_removes_order-1), a UI sequence of `add(X)`
 
 D10 (`docs/00-design.md:477`) forbids a v1 blend-space toggle; libarbc v0.4.0 has no per-layer blend-mode facet at all (grep of `arbc/model` records/model confirms none; the compositor is fixed source-over). The inspector's appearance block therefore shows opacity + visibility only (D-inspector-5). A per-layer blend mode would require: (a) an upstream `arbitrarycomposer` change adding the facet; (b) a human decision to reverse D10 for v1 scope. Neither is agent-implementable. If both conditions are met, the inspector appearance block is the natural place to surface it, and the existing `set_cell_opacity`/`set_cell_visible` pattern is the implementation mould.
 
-**Human action:** file upstream issue if blend modes are wanted; then revise D10 in `docs/00-design.md`.
+**Human action:** file upstream issue **if blend modes are wanted**; then revise D10 in `docs/00-design.md`.
+
+*Deliberately NOT filed at the 2026-08-07 triage*, and this is the one library-gated item that stays that way. The other six were filed because the editor wants the capability and only upstream can supply it. This one is different: condition (b) — reversing D10's v1 no-blend-space-toggle constraint — has **not** been decided, and D10 currently says no. Filing a feature request for something the design forbids would ask upstream to build against a decision that has not been made. The ordering is therefore fixed: **decide D10 first, file second.** If D10 is reversed, file the upstream issue then and this entry converts to the same shape as the other six.
 
 ---
 
@@ -253,17 +287,25 @@ D10 (`docs/00-design.md:477`) forbids a v1 blend-space toggle; libarbc v0.4.0 ha
 
 **Human action:** assign to a threading / architecture review once the canvas threading work is complete enough to mandate the migration policy.
 
+*Re-checked at the 2026-08-07 triage:* not yet — the canvas threading work is not
+complete. Its three open leaves (`arbc_router_split_pin` →
+`arbc_router_attach_split` → `settler_attach_split`) all wait on upstream **#28**,
+so the threading owner does not yet have a settled model to mandate a policy from.
+Revisit after that chain lands.
+
 ---
 
-## arbc v0.4.0 nested-render worker-detach race
+## arbc nested-render worker-detach race — **survives the v0.4.1 pin**
 
 **Source:** `tasks/refinements/editor/overview.md` (editor.panels.overview, 2026-07-30) — fixer sub-agent return summary (attempts 1–5).
 
-**Trigger:** a new libarbc release that fixes the `NestedContent::d_doc` detach race in the `WorkerPool` render path, OR a libarbc API that lets the interactive render join deferred worker tasks before the per-frame `OperatorBindingScope` destructor runs.
+**Filed upstream:** [`ruoso/arbitrarycomposer#29`](https://github.com/ruoso/arbitrarycomposer/issues/29) (2026-08-07).
 
-arbc v0.4.0 has a data race in its threaded interactive render path: `NestedContent::render` reads `d_doc` (`nested_content.cpp:515`) unsynchronized while the frame's `OperatorBindingScope` destructor nulls it (`:133`) on a worker thread. This fires only when the canvas renders nested compositions (`org.arbc.nested`) through the threaded interactive pool (`default_interactive_pool_config`); the inline pool (`WorkerPoolConfig{}`) is race-free. The editor's overview e2e works around this by using the inline pool for its canvas scaffolding. All live-canvas e2es that render `org.arbc.nested` (isolation_scope e2e, cells_scoped_edit e2e, others) are latently affected. No editor-side fix is appropriate — the race is inside the pinned dep.
+**Trigger:** a new libarbc release closing **#29** — fixing the `NestedContent::d_doc` detach race in the `WorkerPool` render path, OR adding a libarbc API that lets the interactive render join deferred worker tasks before the per-frame `OperatorBindingScope` destructor runs.
 
-**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting that `NestedContent` either joins its deferred worker task before `detach()` nulls `d_doc`, or that the `OperatorBindingScope` detach is deferred until all in-flight worker tasks referencing the scope have completed.
+libarbc has a data race in its threaded interactive render path: `NestedContent::render` reads `d_doc` unsynchronized while the frame's `OperatorBindingScope` destructor nulls it (`nested_content.cpp:128-134`) on a worker thread. This fires only when the canvas renders nested compositions (`org.arbc.nested`) through the threaded interactive pool (`default_interactive_pool_config`); the inline pool (`WorkerPoolConfig{}`) is race-free. The editor's overview e2e works around this by using the inline pool for its canvas scaffolding. All live-canvas e2es that render `org.arbc.nested` (isolation_scope e2e, cells_scoped_edit e2e, others) are latently affected. No editor-side fix is appropriate — the race is inside the pinned dep.
+
+*Retitled and re-verified at the 2026-08-07 triage.* This entry read "arbc v0.4.0" while the editor had already moved to the v0.4.1 pin, which invited the assumption that the bump had carried a fix. It had not. Checked directly against `v0.4.1` (`352bc6d`, the file having moved to `src/kind_nested/nested_content.cpp`): `detach()` still nulls `d_doc` at `:133`, and the render path still dereferences it without a barrier at `:528`, `:538`, `:599` and on the deferred worker-task path at `:876`, `:889`, `:905`. v0.4.1's `Content::visit_inputs` work fixed the *adjacent* nested-sample-vs-render conflict (that entry is closed) but not this one — do not read the one as having resolved the other.
 
 ---
 
@@ -277,21 +319,13 @@ The overview ships provisional defaults for the three §5:204-206 open polish it
 
 ---
 
-## Overview keyboard/gesture bindings
-
-**Source:** `tasks/refinements/editor/overview.md` (editor.panels.overview, 2026-07-30) — Open questions.
-
-**Trigger:** §11 input map settled in `docs/00-design.md`.
-
-The overview ships provisional idiom gestures (double-click-to-enter, zoom-control chord, fit-to-camera click). These bindings are provisional — §11 of `docs/00-design.md` (the input map) is still open, and the input-map owner may want to remap them without touching the navigator seam. The scope model, breadcrumb derivation, and all L1 geometry helpers are independent of the bindings and need no change when they move; only the L4 dispatch in `OverviewPanel` is rebindable. No WBS task — this is a human design call gated on the input map, mirroring the same note for the layers panel bindings.
-
----
-
 ## Active color foreground/background slot + fg↔bg swap
 
 **Source:** `tasks/refinements/panels/color.md` (editor.panels.color, 2026-07-30) — D-color-5.
 
 **Trigger:** a paint tool that reads a background color is scheduled (e.g. an eraser or fill tool that needs a distinct background value), or a design row in `docs/00-design.md` explicitly materalizes the foreground/background pair.
+
+*Verified not fired at the 2026-08-07 triage:* no eraser and no fill tool appears anywhere in `tasks/00-editor.tji` or `docs/00-design.md`, so no consumer of a background slot exists or is scheduled.
 
 `editor.panels.color` ships a single foreground active color on `commands::AppState`. D-color-5 explicitly defers a foreground/background pair + swap: the v1 modal set is closed (`{Select, Brush, Eyedropper, Pan}`) with no eraser or fill that reads a background, so materializing the pair now is machinery ahead of a requirement. When a consumer exists, adding a background slot is a small, edge-free extension. No WBS task — enter the WBS when a concrete product need exists.
 
@@ -321,11 +355,15 @@ The shipped brush paints an isotropic circular `round_dab` (circular in content 
 
 **Source:** `tasks/refinements/editor/paste.md` (editor.import.paste, 2026-07-31) — GC-roots-owned-blob acceptance criterion escape clause.
 
-**Trigger:** a new libarbc release whose GC mark walk visits `params.source` refs on the image codec, or a reaper pass that scans `assets/images/` in addition to `assets/tiles/`.
+**Filed upstream:** [`ruoso/arbitrarycomposer#30`](https://github.com/ruoso/arbitrarycomposer/issues/30) (2026-08-07).
 
-libarbc v0.4.1's `gc_project_directory` reaper scans only `assets/tiles/` (not `assets/images/`), and the GC mark walk harvests only `params.blobs`, never `params.source` (which is where `mint_owned_asset` stores the owned-image URI). Consequence: (a) the GC-roots-owned-blob Catch2 test case from the acceptance criteria was NOT landed — neither half is satisfiable against the current library; (b) a paste→undo→save→Clean-Up cycle does NOT reclaim the orphaned owned image blob in practice, even though the design (D13/A23) expects it to. The owned blob is also never leaked (the reaper ignores `assets/images/` entirely), so no spurious deletion occurs. This is a structural library gap, not an editor-side issue.
+**Trigger:** a new libarbc release closing **#30** — a GC mark walk that visits `params.source` refs on the image codec, **and** a reaper pass that scans `assets/images/` in addition to `assets/tiles/`.
 
-**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting that (a) the reaper scans `assets/images/` in addition to `assets/tiles/`, and (b) the GC mark walk harvests image-codec `params.source` URIs alongside `params.blobs`. When the trigger fires: bump the pin and land the GC-roots-owned-blob test that the paste acceptance criteria deferred.
+libarbc v0.4.1's `gc_project_directory` reaper scans only `assets/tiles/` (`asset_gc.cpp:36`, with the same scope stated in the contract at `asset_gc.hpp:38,44,108`), and the GC mark walk harvests only `params.blobs` (`asset_gc.cpp:65-82`), never `params.source` — which is where the image codec keeps its asset URI (`codec_image.cpp:91-93` writes it, `:98,124` read it) and therefore where `mint_owned_asset` stores the owned-image URI. Consequence: (a) the GC-roots-owned-blob Catch2 test case from the acceptance criteria was NOT landed — neither half is satisfiable against the current library; (b) a paste→undo→save→Clean-Up cycle does NOT reclaim the orphaned owned image blob in practice, even though the design (D13/A23) expects it to. The owned blob is also never leaked (the reaper ignores `assets/images/` entirely), so no spurious deletion occurs. This is a structural library gap, not an editor-side issue.
+
+**The two halves must land together, and the issue says so.** Fixing the reaper *alone* would turn today's benign leak into data loss: every owned image would enumerate as unrooted and be swept. Gap (1) currently masks gap (2), which is the only reason the present state is safe. When the trigger fires, confirm the release carries both before bumping the pin.
+
+**When the trigger fires:** bump the pin and land the GC-roots-owned-blob test that the paste acceptance criteria deferred.
 
 ---
 
@@ -339,22 +377,16 @@ libarbc v0.4.1's `gc_project_directory` reaper scans only `assets/tiles/` (not `
 
 ---
 
-## Eyedropper modifier final key chord (Alt provisional)
-
-**Source:** `tasks/refinements/editor.panels/color_eyedrop_cell.md` (panels.color_eyedrop_cell, 2026-07-30) — D-eyedrop_cell-4.
-
-**Trigger:** §11 input map settled in `docs/00-design.md`.
-
-`editor.panels.color_eyedrop_cell` ships Alt as the modifier key for the active-cell isolated eyedropper, read from `CanvasInput.alt` (`src/views/ace/views/views.hpp:69`). Alt is free in the Eyedropper context and is the conventional "sample this specific thing" modifier, so it is a defensible v1 binding. The binding is **provisional** pending the full input map (`docs/00-design.md:507` §11), the same provisional status D24's keyboard bindings carry. When the input map is written, the chord may be confirmed, remapped, or given a dedicated modifier; the L4 dispatch in `dispatch_eyedropper` (`src/app/canvas_view.cpp`) reads `in.alt` in one place and requires no other change when the binding moves. No WBS task — this is a human design call gated on the input map.
-
----
-
 ## Live in-session resolution of a freshly-placed `org.arbc.nested` external reference
 
 **Source:** `tasks/refinements/editor/nested.md` (editor.import.nested, 2026-07-31) — D-nested-3.
 
-**Trigger:** a new libarbc release exposing a public seam to install an external composition into an open `Document` post-deserialize (i.e. a live `ExternalCompositionLoader` path callable by a host at runtime, not just at `load_document` / `open_document` time).
+**Filed upstream:** [`ruoso/arbitrarycomposer#32`](https://github.com/ruoso/arbitrarycomposer/issues/32) (2026-08-07).
+
+**Trigger:** a new libarbc release closing **#32** — exposing a public seam to install an external composition into an open `Document` post-deserialize (i.e. a live `ExternalCompositionLoader` path callable by a host at runtime, not just at `load_document` / `open_document` time).
 
 `editor.import.nested` ships the defensible v1: a freshly-placed `org.arbc.nested` cell renders the doc-05 placeholder in the placing session and resolves on the next reopen (inline via the editor's `FilesystemAssetSource`, §4:140-149). libarbc's `ExternalCompositionLoader` is scoped to deserialize time (`LoadContext`-scoped, single-writer, one-load-one-thread); there is no public API to install an external composition into an already-open `Document`. No editor-side fix is possible — the seam must be supplied by the library. The shipped reopen-path is fully testable (save→reopen round-trip golden, `import_nested_64x64.rgba8`) and documents the live case as an honest limitation, not a bug.
 
-**Human action:** file an upstream issue against `ruoso/arbitrarycomposer` requesting a host-callable live external-composition install seam (e.g. `Document::install_external_composition(ref_uri, document)` or equivalent). When the trigger fires: bump the pin and implement a new editor leaf (approximately `editor.import.nested_live_resolve`, ~1d) that calls the seam from the writer thread after a nested cell is placed, wiring it through the existing `FilesystemAssetSource` path.
+*Filed at the 2026-08-07 triage as **#32**.* Re-verified against v0.4.1 first: the loader is still `LoadContext`-scoped throughout — a `LoadContext` owns one and exposes it as `loader()` (`document_serialize.cpp:691,746`), the nested codec receives it and drives it through that context (`codec_nested.cpp:25,105,139`), and `seed()` remains the only entry (`external_composition_loader.cpp:13,18`). No post-load install seam exists on any ref.
+
+**When the trigger fires:** bump the pin and implement a new editor leaf (approximately `editor.import.nested_live_resolve`, ~1d) that calls the seam from the writer thread after a nested cell is placed, wiring it through the existing `FilesystemAssetSource` path.

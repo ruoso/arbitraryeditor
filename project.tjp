@@ -25,6 +25,8 @@ taskreport gantt "Gantt Chart" {
 }
 
 # Single placeholder resource; effort-based tasks need one to be valid.
+flags upstream_blocked
+
 resource team "Team"
 
 include "tasks/00-editor.tji"
