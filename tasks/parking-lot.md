@@ -167,6 +167,45 @@ settling first.
 
 ---
 
+## No in-place content-config update — Consolidate/relink cannot preserve `ObjectId`
+
+**Source:** `tasks/refinements/editor/import.consolidate.md` — Open questions,
+parking-lot item (1). Added by the 2026-08-07 triage as the refinement landed, so
+it is parked *before* its leaf ships rather than after a closer forgets it.
+
+**Filed upstream:** [`ruoso/arbitrarycomposer#34`](https://github.com/ruoso/arbitrarycomposer/issues/34) (2026-08-07).
+
+**Trigger:** a new libarbc release closing **#34** — a versioned, journalled,
+in-place content-config update that preserves the `ObjectId`.
+
+Consolidate rewrites one string (`params.source`, borrowed → owned) on each
+affected cell; relink is the same shape. Nothing else about the content is meant
+to change. But `Document` has no verb for it: its whole public mutator surface at
+v0.4.1 is `add_content` / `create_content_and_attach` / `remove_content(s)` /
+`rebind_content` plus the layer and composition setters, and none rewrites a
+content record's config.
+
+`rebind_content` is the near miss, and its own contract rules it out
+(`document.hpp:214-218`): *"Nothing about the RECORD changes… This publishes no
+version and appends no journal entry."* It swaps the live object behind an id —
+correct for its purpose, the arbc#19 reopen repair — while leaving the persisted
+record alone, so a save still writes the old config, and it is not undoable.
+
+So `editor.import.consolidate` will ship **delete + re-insert in one transaction**
+(D-consolidate-2, the shipped batch pattern). That is correct and reversible, and
+it mints a **new `ObjectId`** per consolidated cell — which means selection, any
+`org.arbc.nested` reference from another composition, and per-cell UI state all
+point at a dead id and must be found and rewritten, and the host cannot reach
+inside a nested reference to fix it. An operation whose entire user-facing meaning
+is *"same picture, different file location"* does not actually preserve identity.
+
+**Not blocking.** The workaround ships and works; this is the difference between
+preserving identity and preserving appearance. When the trigger fires, the
+consolidate and relink verbs each collapse to one call and the id-rewrite
+bookkeeping goes away.
+
+---
+
 ## Own-colour sampling for operator cells
 
 **Source:** `tasks/refinements/editor.panels/color_eyedrop_nested.md`
@@ -519,6 +558,8 @@ The overview ships provisional defaults for the three §5:204-206 open polish it
 **Trigger:** a design row in `docs/00-design.md` demanding affine-correct (anisotropic) dabs, **or** the ring-vs-mark mismatch observed in real use on a non-uniformly-scaled cell.
 
 The shipped brush paints an isotropic circular `round_dab` (circular in content px). Under a non-uniform placement scale (an edge-dragged cell, D8 edges are 1D) a screen-circular brush ring maps to an ellipse in content px, so the painted mark does not exactly match the on-screen ring. The detail-floor cue is already worst-axis-correct (`placement.max_scale()`, D-paint_res-3), so the *floor verdict* is honest regardless; only the *mark shape* is approximate. This is agent-implementable when wanted — build an affine-correct `CoverageSampler` in L1 `interact` (map each content pixel back through the composed `camera∘placement` to evaluate the screen-space radial falloff) and add a `scene::brush_dab` overload taking that sampler — but no design row demands elliptical marks and the isotropic dab is exact under the common uniform placement. When the trigger fires, this becomes WBS leaf **`editor.paint.anisotropic_dab`** (~1.5d) wired into the `editor.packaging.package` gather.
+
+*Feasibility confirmed at the 2026-08-07 triage* — worth recording, because "agent-implementable when wanted" is the load-bearing claim here and it was previously only asserted. The seam the fix needs already exists at the pin: `RasterContent::paint` has a `coverage` overload taking a **caller-supplied** `CoverageSampler` (`raster_content.hpp:339-340`), and `CoverageSampler` is a plain `std::function<float(int gx, int gy)>` (`:92`) — so an affine-correct sampler is an ordinary lambda the editor can build in L1 `interact`, with no library change and no new kind knowledge. The library's own comment names "an explicit alpha mask" as an intended use. This item can be scheduled as written whenever a design row asks for it.
 
 ---
 
