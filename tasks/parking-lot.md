@@ -183,12 +183,34 @@ its *own* colour would mean rebuilding the operator plus its input closure into 
 anonymous `Document` via the registry codec `deserialize` (`registry.hpp:76-78`),
 anchoring it, and calling `render_offline`. That mechanism is understood and ready.
 
-It is not scheduled because there would be **nothing to schedule it against**: the
-still-image editor authors only leaves (solid / raster / image), cameras (excluded
-from `cells()`), and nested compositions. The library's `fade` / `crossfade` /
-`tone` operators are time- and audio-domain, with no still-image surface. An
-isolation leaf would be built and gated with zero authorable fixtures to validate
-it and nothing to close it cleanly.
+It is not scheduled because there would be **nothing to schedule it against** — no
+authorable fixture exists to validate it and nothing to close it cleanly.
+
+*Re-derived at the 2026-08-07 triage, because the refinement's own reason for this
+is imprecise and would not survive a check.* It says the editor authors "only
+leaves", the library's `fade` / `crossfade` / `tone` being time/audio-domain
+operators with no still-image surface. But the editor holds **no kind allowlist**:
+`scene::insert_schemas` emits one entry per `arbc::Registry::ids()` entry with no
+filter by id, metadata, or "is it visual" (`cell.hpp:36-42,85-88` — the same
+property that puts `org.arbc.camera` in the dialog, its own entry below). So
+whatever is registered *is* insertable, and `org.arbc.tone` is in fact registered
+by `register_builtin_kinds` and does appear in the dialog, with a labelled
+frequency (Hz) field.
+
+The conclusion survives on the **structural** gate instead, which is stronger than
+the domain argument: `arbc::is_operator(content)` is just `!content->inputs().empty()`
+(`operator_graph.hpp:84-86`), and of the four kinds `register_builtin_kinds`
+registers, three — `solid`, `raster`, `tone` — are sources with no inputs, so they
+are leaves however audio-domain they sound. The fourth, `org.arbc.nested`, *is* an
+operator, and the eyedropper gate already carves it out by
+`composition_ref().valid()` and routes it to the anchored render
+(`color.cpp:94-100`). No registered kind can therefore produce the
+non-nested-operator cell this item is about.
+
+That is also what makes the trigger real rather than rhetorical: `register_extra_kinds`
+is a live hook (`project_open.cpp:136,310`), so a plugin host or an editor-authored
+kind with non-empty `inputs()` would surface in the dialog automatically and create
+the first consumer overnight.
 
 The genuine question underneath — *should* the editor ever author operator cells —
 is a product call, and this item resolves as a side effect of answering it.
@@ -207,10 +229,13 @@ by the 2026-08-07 triage's gap check.
 rather than climbing to the canvas.
 
 `editor.panels.overview_gizmo` ships the full scale/rotate/shear gizmo on
-schematic **cell** boxes, reusing the cell-gizmo math. Camera frames on the
-overview get no manipulation handles: the charter scopes the leaf to "schematic
-overview boxes", and `editor.cells.gizmo` likewise left the canvas camera frame
-chrome as-is (D-gizmo-6).
+schematic **cell** boxes, reusing the cell-gizmo math. Camera frames stay
+**move-only** — they are draggable, but carry no scale/rotate/shear handles
+(`overview_panel.cpp:303`, D-overview_gizmo-4/7). The charter scopes the leaf to
+"schematic overview boxes", and `editor.cells.gizmo` likewise left the canvas
+camera frame chrome as-is (D-gizmo-6). So what is missing is specifically
+**aspect-locked recrop and dutch on a camera from the overview**, not camera
+manipulation as such.
 
 *Distinguished from the D-gizmo-6 item the 2026-08-07 triage closed.* That one was
 a pure chrome **refactor** — redrawing already-shipped camera frame handles over
