@@ -1691,9 +1691,12 @@ TEST_CASE("canvas_host: the wired binding settles a deferred external nested chi
   // via bind_operators (the settle hook is what an empty binding lacks, not the compositor). The
   // wired settle must converge to that fully-settled render byte-for-byte.
   //
-  // (render_offline's inability to settle deferred external loads is a live offline/export-path
-  // gap — an export of an unsettled external nested composition renders blank. It is carried in
-  // tasks/parking-lot.md under "Decidable now", its export-path trigger having fired.)
+  // (render_offline's inability to settle deferred external loads is carried in
+  // tasks/parking-lot.md under "Waiting on evidence". It is LATENT, not live: the shipped
+  // arbc::FilesystemAssetSource answers every request inline before request() returns, so no
+  // external load is ever outstanding in production — the deferral here comes from this file's
+  // DeferringAssetSource test double. The trigger is the editor gaining a genuinely deferring
+  // asset source, e.g. a WASM/network one under A3's swappable platform seam.)
   DeferringAssetSource ref_source;
   arbc::KindBridge ref_bridge;
   std::unique_ptr<arbc::Document> ref_doc = load_pending_nested(ref_source, ref_bridge, registry);

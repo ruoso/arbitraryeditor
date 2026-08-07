@@ -28,11 +28,20 @@ parked until it carries an issue number. File first, park second.
 them and found one fired trigger. Walking the *refinements* instead — every one
 landed since the previous triage, grepped for text routing an item to this file —
 found **three items that refinements explicitly said belonged here and that no
-closer ever added**, one of them with a trigger that had already fired. A
+closer ever added**. A
 refinement's return summary is not a delivery mechanism; nothing enforces that the
 closer transcribes it. So each pass should re-run that grep over refinements added
 since the last triage, and treat "the refinement says it parked this" as a claim
 to verify rather than a fact.
+
+**Verify the claim, not the reasoning** (added at the 2026-08-07 triage, which
+learned it the hard way). That pass promoted one recovered item to *Decidable now*
+because its stated trigger — "whoever builds the export path" — had demonstrably
+fired. The trigger had fired and the item was still latent: the exposure it
+described needs a deferring asset source, and the shipped one answers inline. A
+fired trigger licenses a **look**, not a conclusion. Before promoting anything
+here, read the code path that would actually be exercised and confirm the failure
+is reachable; a chain of correct-sounding inferences is not evidence.
 
 *Sweep boundary:* the 2026-08-07 pass swept **all 94** refinements, not just those
 added since the previous triage — which is how it caught
@@ -61,43 +70,11 @@ unification** (declined for v1). Git history is the record of each; the reasonin
 that survives is carried in the leaf note and in the architecture rows the
 decisions touch, not here.
 
-## Export of an unsettled external nested composition renders blank
-
-**Source:** `tasks/refinements/editor/nested_composition_binding.md` (`:318-325`,
-`:396-402`) — surfaced to the parking lot in the return summary, but **never
-added**; recovered by the 2026-08-07 triage's gap check.
-
-**Its trigger has fired.** The refinement deferred this "for whoever builds the
-export path (`packaging` area)" — and that path now exists:
-`editor.cameras.export` and `editor.cameras.export_pinned` have both shipped. It
-is listed here rather than under *Waiting on evidence* because every input exists
-and only the call is outstanding.
-
-`arbc::render_offline` renders a pinned in-memory snapshot and does **not** settle
-deferred external loads — verified at the current pin, `offline.cpp:78-82` passes
-`pending=nullptr`. So exporting a project whose external nested composition has
-not been settled in-session renders that cell blank, with no warning.
-
-`editor.import.nested` makes this reachable rather than theoretical. A freshly
-placed `org.arbc.nested` cell does not resolve until the next reopen (see the
-live-resolution entry below, arbc#32) — so the exact sequence *place a nested
-composition → export a camera* produces a silently blank region in the PNG, in the
-one session where the user is most likely to try it.
-
-**The decision.** This looks **editor-side implementable**, which is why it is a
-decision rather than another upstream issue: the export path could drive
-`settle_external_loads` to quiescence on the writer thread *before* pinning the
-revision it exports, leaving `render_offline`'s byte-exact-reference contract
-untouched (the refinement's stated objection was to the *library* silently gaining
-settle semantics — not to a host settling first). If that holds, this is a small
-WBS leaf, roughly `editor.cameras.export_settle` (~1d), gathered into
-`editor.packaging.package` like its siblings. The alternatives are to warn on
-export instead of settling, or to accept the limitation and document it.
-
-Someone should confirm the pre-settle is actually reachable from the export path's
-threading before the leaf is minted — that check is the only open input, and it is
-a half-hour read of `export_pinned`'s writer interaction, not evidence that has to
-accumulate.
+*Empty as of 2026-08-07.* One item was briefly promoted here during that triage —
+the export of an unsettled external nested composition — and then **withdrawn the
+same day** when the claim behind it did not survive checking. It is carried under
+*Waiting on evidence* below in its corrected, much narrower form. A new item lands
+here only if it is genuinely waiting on a human choice rather than on evidence.
 
 ---
 
@@ -139,6 +116,54 @@ rebindable — the panel body for Layers, `OverviewPanel` for the overview, and
 eyedropper. The scope model (`AppState::entered_composition`), the breadcrumb
 derivation, the L1 path and geometry helpers, and the navigator seam all stay put
 when the bindings move. Human design call gated on the input map.
+
+---
+
+## `render_offline` does not settle deferred external loads (export path)
+
+**Source:** `tasks/refinements/editor/nested_composition_binding.md` (`:318-325`,
+`:396-402`) — surfaced to the parking lot in the return summary, but **never
+added**; recovered by the 2026-08-07 triage's gap check.
+
+**Trigger:** the editor gains an asset source that **actually defers** — a WASM /
+network / content-store source under A3's swappable `platform` seam. Not the
+shipped filesystem one.
+
+`arbc::render_offline` renders a pinned in-memory snapshot and does not settle
+deferred external loads (`offline.cpp:78-82` passes `pending=nullptr` at the
+current pin). The export path takes one `DocStatePtr` before its first item and
+posts nothing to the writer thread (`export.hpp:26-27`, D-pinned-1), so it has no
+opportunity to settle anything either. An external load still outstanding when the
+pin is taken therefore exports blank, silently.
+
+**Why this is latent rather than live, and why it was demoted.** The 2026-08-07
+triage first filed this under *Decidable now*, claiming the trigger had fired
+because the export path had shipped. Checking the claim rather than the reasoning
+retired it the same day, on two counts:
+
+- **The shipped asset source never defers.** `arbc::FilesystemAssetSource::request`
+  calls `on_ready` **inline on every path** — absent file, unreadable file, bad
+  read, and success alike — and the source comments the guarantee explicitly
+  ("Inline, before `request` returns"). So in the shipped editor no external asset
+  load is ever outstanding to be missed. The deferral in the tests comes from
+  `DeferringAssetSource`, a test double.
+- **The writer already settles proactively anyway.** It polls `external_loads_ready()`
+  whenever its queue drains and consumes arrivals with no submission from anywhere,
+  even on a completely idle app (`shell.cpp:342-355`, D-writer_thread-10). So even
+  a deferring source would have to still be in flight *at the instant of pinning*.
+
+**Do not conflate this with the nested-placement case.** A freshly placed
+`org.arbc.nested` cell does export as a placeholder — but for a different reason
+entirely: no load is ever *initiated* for it, because libarbc has no live external
+composition install seam (arbc#32, its own entry below). Settling cannot fix what
+was never requested. The first draft of this entry cited that sequence as proof
+this gap was reachable; it is not proof, it is the other gap.
+
+**If the trigger fires**, the fix is editor-side and does not touch the library:
+wait for quiescence on the writer thread before taking the export pin, leaving
+`render_offline`'s byte-exact-reference contract alone. The refinement's stated
+objection was to the *library* silently gaining settle semantics, not to a host
+settling first.
 
 ---
 

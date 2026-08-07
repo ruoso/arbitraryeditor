@@ -427,8 +427,21 @@ in-place. No human-judgment item blocks *this* leaf.
 >
 > **What remains true** is the narrower half: `render_offline` still does not
 > settle deferred external loads (`offline.cpp:78-82` passes `pending=nullptr` at
-> the current pin), so exporting a project with an unsettled external nested
-> composition renders it blank. That gap is real, its "whoever builds the export
-> path" trigger has now fired (`editor.cameras.export` / `export_pinned` shipped),
-> and it is carried as a live item under **Decidable now** in
-> `tasks/parking-lot.md` — where the return summary intended it to go.
+> the current pin). It is carried in `tasks/parking-lot.md` under **Waiting on
+> evidence** — where the return summary intended it to go.
+>
+> That entry is **latent, not live**, and the same triage corrected its own first
+> draft on this point. The draft promoted it to *Decidable now* on the grounds that
+> the "whoever builds the export path" trigger had fired (`editor.cameras.export` /
+> `export_pinned` shipped). It had — but the exposure it would create does not
+> exist: `arbc::FilesystemAssetSource::request` calls `on_ready` **inline on every
+> path**, so the shipped editor never has an outstanding external load to miss, and
+> the writer settles proactively at every queue drain besides
+> (`shell.cpp:342-355`). The deferral in this leaf's tests is `DeferringAssetSource`,
+> a double. The real trigger is the editor gaining a genuinely deferring asset
+> source (WASM / network, A3's swappable `platform` seam).
+>
+> Also do not read the `editor.import.nested` place-then-export sequence as
+> evidence for this gap. That cell exports as a placeholder because no load is ever
+> *initiated* for it — libarbc has no live external-composition install seam
+> (arbc#32) — and settling cannot fix what was never requested.
