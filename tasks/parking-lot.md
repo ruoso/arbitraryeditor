@@ -23,6 +23,19 @@ filed and closed; an unfiled item is not waiting on evidence, it is stalled. So:
 an item whose trigger is "a new libarbc release that…" is **not** correctly
 parked until it carries an issue number. File first, park second.
 
+**Strengthened at the 2026-08-08 triage:** this applies to **any specific feature
+missing from the library**, not only to items whose trigger already names a
+release, and *not only when something here is blocked on it*. "Nothing is waiting
+on this" is a reason to say so in the issue and let the maintainer prioritise it —
+never a reason to leave the library unaware. Two entries had been reframed into
+editor-side questions and so escaped the rule: the per-layer blend facet (held back
+because D10 forbids the *editor* from exposing it — but whether the *library* should
+model blend is an independent question) and `org.arbc.camera` insertability (read as
+a D7/A14 allowlist call — but the reason no exception is possible is that `Registry`
+cannot express "registered, not host-insertable"). Both are now filed. When an entry
+says "the editor cannot fix this from here", that is the tell: write the issue.
+Every library-gated item in this file now carries an issue number.
+
 **A triage must also look for what is missing, not only re-check what is here**
 (added at the 2026-08-07 triage). Walking the 26 existing items validated all of
 them and found one fired trigger. Walking the *refinements* instead — every one
@@ -42,6 +55,19 @@ described needs a deferring asset source, and the shipped one answers inline. A
 fired trigger licenses a **look**, not a conclusion. Before promoting anything
 here, read the code path that would actually be exercised and confirm the failure
 is reachable; a chain of correct-sounding inferences is not evidence.
+
+**The 2026-08-08 triage: seven items closed at once, and the rule that produced
+them.** libarbc tagged **v0.5.0** on 2026-08-08 closing every one of the seven
+issues the 2026-08-07 triage filed (`#28`–`#34`) — so seven library-gated items
+left this file in a single pass, one day after being filed. That is the "file
+first, park second" rule paying out, and it is worth stating plainly for the next
+reader: those items had sat here for **up to eleven days doing nothing** because
+nobody had asked upstream for the fix. The asking, not the waiting, was the
+bottleneck. Closed: the DamageRouter split (#28), the nested worker-detach race
+(#29), the GC's blindness to owned images (#30), the missing resample verb (#31),
+live nested resolution (#32), the nested insert schema (#33), and in-place
+content-config update (#34). Each became a WBS leaf under `editor.canvas.arbc_v050`
+rather than a note here; git history and those leaf notes are the record.
 
 *Sweep boundary:* the 2026-08-07 pass swept **all 94** refinements, not just those
 added since the previous triage — which is how it caught
@@ -125,6 +151,8 @@ when the bindings move. Human design call gated on the input map.
 `:396-402`) — surfaced to the parking lot in the return summary, but **never
 added**; recovered by the 2026-08-07 triage's gap check.
 
+**Filed upstream:** [`ruoso/arbitrarycomposer#35`](https://github.com/ruoso/arbitrarycomposer/issues/35) (2026-08-08) — re-verified at v0.5.0 first (`offline.cpp:82` still passes `pending=nullptr`). Filed even though the item is latent here, because the gap is the library's regardless of which `AssetSource` a host happens to use, and the failure mode is silent wrong output rather than an error. The issue offers three shapes and states a preference for the smallest — report the unresolved count rather than have `render_offline` gain settle semantics, which would compromise its byte-exact-reference role.
+
 **Trigger:** the editor gains an asset source that **actually defers** — a WASM /
 network / content-store source under A3's swappable `platform` seam. Not the
 shipped filesystem one.
@@ -164,45 +192,6 @@ wait for quiescence on the writer thread before taking the export pin, leaving
 `render_offline`'s byte-exact-reference contract alone. The refinement's stated
 objection was to the *library* silently gaining settle semantics, not to a host
 settling first.
-
----
-
-## No in-place content-config update — Consolidate/relink cannot preserve `ObjectId`
-
-**Source:** `tasks/refinements/editor/import.consolidate.md` — Open questions,
-parking-lot item (1). Added by the 2026-08-07 triage as the refinement landed, so
-it is parked *before* its leaf ships rather than after a closer forgets it.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#34`](https://github.com/ruoso/arbitrarycomposer/issues/34) (2026-08-07).
-
-**Trigger:** a new libarbc release closing **#34** — a versioned, journalled,
-in-place content-config update that preserves the `ObjectId`.
-
-Consolidate rewrites one string (`params.source`, borrowed → owned) on each
-affected cell; relink is the same shape. Nothing else about the content is meant
-to change. But `Document` has no verb for it: its whole public mutator surface at
-v0.4.1 is `add_content` / `create_content_and_attach` / `remove_content(s)` /
-`rebind_content` plus the layer and composition setters, and none rewrites a
-content record's config.
-
-`rebind_content` is the near miss, and its own contract rules it out
-(`document.hpp:214-218`): *"Nothing about the RECORD changes… This publishes no
-version and appends no journal entry."* It swaps the live object behind an id —
-correct for its purpose, the arbc#19 reopen repair — while leaving the persisted
-record alone, so a save still writes the old config, and it is not undoable.
-
-So `editor.import.consolidate` will ship **delete + re-insert in one transaction**
-(D-consolidate-2, the shipped batch pattern). That is correct and reversible, and
-it mints a **new `ObjectId`** per consolidated cell — which means selection, any
-`org.arbc.nested` reference from another composition, and per-cell UI state all
-point at a dead id and must be found and rewritten, and the host cannot reach
-inside a nested reference to fix it. An operation whose entire user-facing meaning
-is *"same picture, different file location"* does not actually preserve identity.
-
-**Not blocking.** The workaround ships and works; this is the difference between
-preserving identity and preserving appearance. When the trigger fires, the
-consolidate and relink verbs each collapse to one call and the id-rewrite
-bookkeeping goes away.
 
 ---
 
@@ -336,12 +325,14 @@ that warrants real use before deciding.
 
 `editor.canvas.writer_thread` ships all-sync for result-carrying verbs (D-3). A streamed gesture burst could build a queue depth that makes a subsequent sync `undo` wait. The coalescing key bounds the *commit* cost, not the queue depth. Whether this is observable in practice is unknown; if it bites, adding a bounded depth or a gesture-drop policy would be the fix. Measure on the real pool with a realistic workload before designing anything — this is a data-gated decision, not implementable work today. No WBS task until profiling data exists.
 
-*Re-checked at the 2026-08-07 triage:* the trigger has moved **further** out, not
-closer. `editor.canvas.settler_attach_split` is blocked on
-`arbc_router_attach_split`, which is blocked on `arbc_router_split_pin`, which now
-waits on upstream **#28**. So the measurement this item asks for is gated on an
-upstream release. Nothing to do here until that chain clears; the amendment below
-still governs *why* it must wait.
+*Re-checked at the 2026-08-08 triage: the chain now has a path.* One day earlier
+this was gated on an upstream release that did not exist; **#28 shipped in
+v0.5.0**, so the blocking chain is now ordinary scheduled work —
+`editor.canvas.arbc_v050` → `arbc_router_attach_split` → `settler_attach_split`.
+This item stays parked until that chain lands, but it is no longer waiting on
+anyone outside this repo. The amendment below still governs *why* it must wait:
+measuring before the split retires the posted ctor/dtor would characterise a queue
+shape that is about to be retired.
 
 *Amended at the v0.4.0 triage (2026-07-28):* do not measure yet — the queue shape
 is about to change. `editor.canvas.settler_attach_split` (consuming libarbc
@@ -374,52 +365,24 @@ remains hypothetical and `instance()` remains a faithful proxy. Unchanged.
 
 ---
 
-## DamageRouter registrant split — arbc#25 successor **filed as arbc#28**; unblocks settler_attach_split
-
-**Source:** `tasks/refinements/canvas/settler_attach_split.md` (re-defer 2026-07-28);
-confirmed by `tasks/refinements/canvas/arbc_router_split_pin.md` (re-defer 2026-07-28 —
-`arbc_router_split_pin` was picked up and verified the upstream state independently: no
-successor tag exists, `DamageRouter::register_sink` still welded to ctor at v0.4.0);
-re-confirmed by `tasks/refinements/editor.canvas/arbc_router_split_pin.md` (re-defer
-2026-07-29 — second independent verification: latest tag still `v0.4.0`, no
-`install_router` flag and no `attach_router`/`detach_router` pair on any branch);
-re-confirmed again by `tasks/refinements/editor.canvas/arbc_router_split_pin.md` (re-defer
-2026-07-30 — third independent verification: `git fetch --all --tags` pulled nothing newer,
-latest tag still `v0.4.0`, no `attach_router`/`detach_router`/`install_router` symbol on any
-branch or in any commit in history, all refs grepped).
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#28`](https://github.com/ruoso/arbitrarycomposer/issues/28) (2026-08-07).
-
-**Trigger:** a new libarbc release closing **#28** — moving `DamageRouter::register_sink` (and `Document::set_damage_sink`) out of `HostViewport` ctor/dtor into the `attach_settler()`/`detach_settler()` pair (or a dedicated `attach_router`/`detach_router()` pair), gated by an `install_settler`-style flag.
-
-`editor.canvas.settler_attach_split` was found unimplementable against libarbc v0.4.0: arbc#25 split only the settler slot (`set_external_load_settler`), NOT the `DamageRouter::register_sink` call, out of `HostViewport` ctor/dtor. The `DamageRouter` registration is welded unconditionally to the ctor (`host_viewport.cpp:66-68`) and has no internal synchronization (`damage_router.hpp:29-34`), so render-thread construction with `install_settler=false` still races the router's registrant vector against concurrent writer-thread damage flushes. That is exactly the race the `:1639` TSan anchor's guard note (`canvas_host_test.cpp:1636-1638`) names; the hermetic gcc-tsan lane would report it.
-
-*Filed at the 2026-08-07 triage.* The fourth verification pass (2026-08-07:
-`git fetch --all --tags` pulls nothing, latest tag still `v0.4.1`, no
-`attach_router`/`detach_router`/`install_router` symbol on any ref) finally
-established **why** three passes had found nothing: the successor issue this
-entry had been asking a human to file since 2026-07-28 had never been filed. It
-now is — **#28**. The re-verification loop is closed: the watch is
-`gh issue view 28 --repo ruoso/arbitrarycomposer`, and while it is open there is
-nothing to check. `editor.canvas.arbc_router_split_pin` carries
-`flags upstream_blocked` so `scripts/unblocked.py` lists it under **WAITING ON
-UPSTREAM** rather than READY, which is what let it be picked up and re-deferred
-three times (`a7d473c`, `4b7f5b7`, `7f84756`).
-
-**When the trigger fires:**
-1. Drop the `upstream_blocked` flag and mark `editor.canvas.arbc_router_split_pin` complete once the pin bump to that release lands.
-2. Implement `editor.canvas.arbc_router_attach_split` (the editor consumer leaf that wires the deferred router registration into the render-thread construction path).
-3. `editor.canvas.settler_attach_split` unblocks automatically once `arbc_router_attach_split` is done.
-
----
-
 ## Camera mutable-state round-trip through the workspace arena on mapped reconstruct reopen
 
 **Source:** `tasks/refinements/editor.project/reconstructing_reopen.md` (project.reconstructing_reopen, 2026-07-28) — Open questions.
 
+**Filed upstream:** [`ruoso/arbitrarycomposer#38`](https://github.com/ruoso/arbitrarycomposer/issues/38) (2026-08-08), as a **question** rather than a bug — there is no reproduction, only an inability to prove the property from this side. The tripwire test passes; what cannot be established from the host is *why*, and that distinction decides whether the guarantee holds by construction or incidentally for this one mutation path. The issue also asks whether `update_content_config` (#34) now makes a difference, since an asymmetry there would make it the required path for any kind wanting durable param edits.
+
 **Trigger:** a mapped reconstruct reopen observed reverting an unsaved camera edit.
 
 arbc#19's identity capture snapshots construction identity **at `add_content`** (creation time). A camera re-cropped or renamed *after creation but not yet Saved* should reconstruct to its last-checkpointed state on a mapped reopen, not to its construction defaults. Whether arbc#19's capture-plus-replay actually round-trips a codec-persisted kind's post-creation mutable state **through the workspace arena** (vs only through the canonical `project.arbc`, which a mapped reopen never reads) is a library-side property the editor cannot settle from this side. The `open_project reconstructs cells and cameras live` test (added by `reconstructing_reopen`) encodes the requirement as a tripwire: an edited-then-checkpointed camera must reopen with its edit intact. Constraint 4's reconstruct-or-leave-unbound invariant means the safe failure mode is an unbound, reported record — never a silent revert. If a future mapped reopen is observed to revert an unsaved camera edit, this is a cross-repo library gap implementable only against a future libarbc release; not a WBS leaf.
+
+*Checked at the 2026-08-08 triage: v0.5.0 does **not** move this trigger,* and the
+`set_content_reconstruct` / `reconcile_content_bindings` machinery arriving with
+arbc#34 should not be read as having done so. That machinery keeps the live
+`Content` consistent with a record whose *persisted params* changed under an
+in-place config rewrite. This item is about whether a camera's post-creation
+mutable state round-trips through the **workspace arena** on a mapped reopen —
+a different question about a different store, and one arbc#34 neither asks nor
+answers. The tripwire test remains the way this gets found. Unchanged.
 
 ---
 
@@ -427,37 +390,11 @@ arbc#19's identity capture snapshots construction identity **at `add_content`** 
 
 **Source:** `tasks/refinements/editor.cells/insert_schema.md` (cells.insert_schema, 2026-07-28) — Open question 1.
 
+**Filed upstream:** [`ruoso/arbitrarycomposer#37`](https://github.com/ruoso/arbitrarycomposer/issues/37) (2026-08-08). *Reframed from an editor policy call into the library gap underneath it.* This entry read as a D7/A14 amendment — should the editor carve out an allowlist exception? — but the reason it cannot is that `Registry` has no way to say **"registered, but not host-insertable"**: `KindMetadata` is `{human_name, version}` (`registry.hpp:34-37`) and a `nullptr` `insert_schema` already means "no schema, but *do* offer it" (the raw-config fallback #21 made first-class). So a kind registered purely so its documents round-trip is indistinguishable from one a user should mint. An editor-side exception would reintroduce the allowlist the no-allowlist rule exists to prevent and would fix only this editor's own kind — a plugin with the same shape would hit it again with no recourse. If #37 ships, the fix is upstream metadata and no editor code.
+
 **Trigger:** a dialog-inserted camera observed in real use causing initialisation problems (missing `scene::add_camera` state setup).
 
 The no-allowlist enumeration lists `org.arbc.camera` in the insert dialog (it did before this leaf too), and `editor.cells.insert_schema` makes its entry honest (zero fields → a default placeholder camera). But a camera minted via `add_cell` skips the identity/state setup `scene::add_camera` performs (D7 / A14 make cells and cameras one shape), so a dialog-inserted camera may be a subtly under-initialised camera. This is a pre-existing property of the no-allowlist model and a genuine design judgment about the cells-vs-cameras seam — not a mechanical fix. If an allowlist exclusion for `org.arbc.camera` is wanted, it is a D7/A14 amendment, not agent-implementable work.
-
----
-
-## org.arbc.nested insert schema (cross-repo)
-
-**Source:** `tasks/refinements/editor.cells/insert_schema.md` (cells.insert_schema, 2026-07-28) — Open question 2.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#33`](https://github.com/ruoso/arbitrarycomposer/issues/33) (2026-08-07).
-
-**Trigger:** a new libarbc release closing **#33** — adding a `KindInsertSchema` for `org.arbc.nested` (with a labelled `ObjectId` field).
-
-libarbc registers `org.arbc.nested` with **no** schema (still true at v0.4.1: `builtin_kinds.cpp:245,255,259` register schemas for the solid, tone and raster kinds; nested's factory grammar parses a bare decimal `ObjectId` at `:184` with no schema beside it), so nested inserts fall to the editor's raw-config box (a decimal `ObjectId` text box), losing `editor.cells.model`'s labelled "Child composition (ObjectId)" field. The correct fix is a cross-repo change to `arbitrarycomposer` to advertise a named field for the nested ObjectId. Once that ships in a future pin, **no editor code is needed** — the field appears automatically through the no-allowlist enumeration, which is exactly what `Registry::insert_schema` (arbc#21) was for. The issue also asks whether the schema field type can be an `ObjectId`/reference variant rather than a plain integer, which would let a host offer a composition picker instead of a number box; either answer closes the editor's gap.
-
----
-
-## libarbc has no content-resample verb — "resample to crisp" blocked on upstream
-
-**Source:** `tasks/refinements/editor/resolution.md` (cells.resolution, 2026-07-28) — Open questions / D-resolution-5.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#31`](https://github.com/ruoso/arbitrarycomposer/issues/31) (2026-08-07).
-
-**Trigger:** a new libarbc release closing **#31** — adding a generic `Resampleable` content facet (or equivalent verb).
-
-`arbc::RasterContent` exposes construction + `paint` only (`raster_content.hpp:297-362`); there is no in-place resize verb. Implementing "resample to crisp" (grow a raster's working grid to match or exceed the camera's pixel density) editor-side would require naming the concrete `RasterContent` type (A16 no-allowlist) and owning kind-specific upsampling (levelization — `arbc::media`'s resampler is the kind's floor, not the editor's). The clean fix is an **upstream generic content-resample facet** — a `Resampleable` a kind opts into and the host discovers via a `Content` virtual (a referenced `org.arbc.image` returns `nullptr` → "source-limited"; a raster implements it to resize its grid to a new version via `set_content_state`) — so the host offers "resample to crisp" without naming any kind.
-
-*Filed at the 2026-08-07 triage as **#31**.* Re-verified against v0.4.1 first: `RasterContent`'s public surface is still construction (`raster_content.hpp:299`) plus the two `paint` overloads (`:339,341`) — no in-place resize verb, and nothing on `Content` a host could call generically.
-
-**When the trigger fires** (a libarbc release adding it): bump the pin, then implement the editor-consumer leaf **`editor.cells.resample_apply`** (~1.5d) — wire a "resample to crisp" action in the Inspector through a `commands::Command` + the new verb (one journal entry, undoable, `ObjectId` preserved), gated on `DetailSource::PaintedRaster`, with the `bounds()`-read/write TSan case `selection.md` Open question 2 anticipated. That consumer is genuine agent-implementable work *once the API exists*, so it becomes a WBS leaf then, not now.
 
 ---
 
@@ -474,6 +411,8 @@ With remove-pre-empts-add (D-pending_removes_order-1), a UI sequence of `add(X)`
 ## Per-layer blend facet — upstream arbc change + D10 scope reversal required
 
 **Source:** `tasks/refinements/panels/inspector.md` (panels.inspector, 2026-07-29) — D-inspector-5; implementer return summary parking-lot item (a).
+
+**Filed upstream:** [`ruoso/arbitrarycomposer#36`](https://github.com/ruoso/arbitrarycomposer/issues/36) (2026-08-08). *The 2026-08-07 triage deliberately held this back*, reasoning that filing a request for something D10 forbids would ask upstream to build against an undecided scope call. **Reversed on 2026-08-08:** the two halves are independent. Whether the *library* should model per-layer blend is a real and specific gap in a compositing model regardless of what any host does with it; whether *this editor* exposes it in v1 is D10's question and stays open. Holding the filing conflated them and meant the library never heard about it at all. The issue says plainly that nothing here is blocked on it and that it should be prioritised as "the model is missing a thing compositors have", not as a host being stuck.
 
 **Trigger:** a new libarbc release adding a per-layer blend-mode facet AND a human decision to reverse D10's v1 no-blend-space-toggle constraint.
 
@@ -500,20 +439,6 @@ complete. Its three open leaves (`arbc_router_split_pin` →
 `arbc_router_attach_split` → `settler_attach_split`) all wait on upstream **#28**,
 so the threading owner does not yet have a settled model to mandate a policy from.
 Revisit after that chain lands.
-
----
-
-## arbc nested-render worker-detach race — **survives the v0.4.1 pin**
-
-**Source:** `tasks/refinements/editor/overview.md` (editor.panels.overview, 2026-07-30) — fixer sub-agent return summary (attempts 1–5).
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#29`](https://github.com/ruoso/arbitrarycomposer/issues/29) (2026-08-07).
-
-**Trigger:** a new libarbc release closing **#29** — fixing the `NestedContent::d_doc` detach race in the `WorkerPool` render path, OR adding a libarbc API that lets the interactive render join deferred worker tasks before the per-frame `OperatorBindingScope` destructor runs.
-
-libarbc has a data race in its threaded interactive render path: `NestedContent::render` reads `d_doc` unsynchronized while the frame's `OperatorBindingScope` destructor nulls it (`nested_content.cpp:128-134`) on a worker thread. This fires only when the canvas renders nested compositions (`org.arbc.nested`) through the threaded interactive pool (`default_interactive_pool_config`); the inline pool (`WorkerPoolConfig{}`) is race-free. The editor's overview e2e works around this by using the inline pool for its canvas scaffolding. All live-canvas e2es that render `org.arbc.nested` (isolation_scope e2e, cells_scoped_edit e2e, others) are latently affected. No editor-side fix is appropriate — the race is inside the pinned dep.
-
-*Retitled and re-verified at the 2026-08-07 triage.* This entry read "arbc v0.4.0" while the editor had already moved to the v0.4.1 pin, which invited the assumption that the bump had carried a fix. It had not. Checked directly against `v0.4.1` (`352bc6d`, the file having moved to `src/kind_nested/nested_content.cpp`): `detach()` still nulls `d_doc` at `:133`, and the render path still dereferences it without a barrier at `:528`, `:538`, `:599` and on the deferred worker-task path at `:876`, `:889`, `:905`. v0.4.1's `Content::visit_inputs` work fixed the *adjacent* nested-sample-vs-render conflict (that entry is closed) but not this one — do not read the one as having resolved the other.
 
 ---
 
@@ -563,22 +488,6 @@ The shipped brush paints an isotropic circular `round_dab` (circular in content 
 
 ---
 
-## libarbc GC blind to owned image blobs — `assets/images/` never rooted or reclaimed
-
-**Source:** `tasks/refinements/editor/paste.md` (editor.import.paste, 2026-07-31) — GC-roots-owned-blob acceptance criterion escape clause.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#30`](https://github.com/ruoso/arbitrarycomposer/issues/30) (2026-08-07).
-
-**Trigger:** a new libarbc release closing **#30** — a GC mark walk that visits `params.source` refs on the image codec, **and** a reaper pass that scans `assets/images/` in addition to `assets/tiles/`.
-
-libarbc v0.4.1's `gc_project_directory` reaper scans only `assets/tiles/` (`asset_gc.cpp:36`, with the same scope stated in the contract at `asset_gc.hpp:38,44,108`), and the GC mark walk harvests only `params.blobs` (`asset_gc.cpp:65-82`), never `params.source` — which is where the image codec keeps its asset URI (`codec_image.cpp:91-93` writes it, `:98,124` read it) and therefore where `mint_owned_asset` stores the owned-image URI. Consequence: (a) the GC-roots-owned-blob Catch2 test case from the acceptance criteria was NOT landed — neither half is satisfiable against the current library; (b) a paste→undo→save→Clean-Up cycle does NOT reclaim the orphaned owned image blob in practice, even though the design (D13/A23) expects it to. The owned blob is also never leaked (the reaper ignores `assets/images/` entirely), so no spurious deletion occurs. This is a structural library gap, not an editor-side issue.
-
-**The two halves must land together, and the issue says so.** Fixing the reaper *alone* would turn today's benign leak into data loss: every owned image would enumerate as unrooted and be swept. Gap (1) currently masks gap (2), which is the only reason the present state is safe. When the trigger fires, confirm the release carries both before bumping the pin.
-
-**When the trigger fires:** bump the pin and land the GC-roots-owned-blob test that the paste acceptance criteria deferred.
-
----
-
 ## Raw-RGBA clipboard scope and image encoder choice
 
 **Source:** `tasks/refinements/editor/paste.md` (editor.import.paste, 2026-07-31) — D-paste-4 / Open questions.
@@ -588,17 +497,3 @@ libarbc v0.4.1's `gc_project_directory` reaper scans only `assets/tiles/` (`asse
 `editor.import.paste` ships encoded-clipboard-only (prefer `image/png`, then any imdec-decodable mime); a clipboard with only raw pixels (no encoded form) is a graceful no-op. Extending v1 to accept raw RGBA would require vendoring an image encoder — imdec is decode-only, so a new dependency (e.g. `stb_image_write.h`, already adjacent to the existing `stb_image_write.h` vendored for export, or `libpng`) would be needed. The correct encoder choice is a dependency/product call, and the limitation is only observable on applications that place raw RGBA on the clipboard without also placing a PNG form (uncommon in practice). No WBS task until the limitation is confirmed painful in real use and an encoder is chosen.
 
 ---
-
-## Live in-session resolution of a freshly-placed `org.arbc.nested` external reference
-
-**Source:** `tasks/refinements/editor/nested.md` (editor.import.nested, 2026-07-31) — D-nested-3.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#32`](https://github.com/ruoso/arbitrarycomposer/issues/32) (2026-08-07).
-
-**Trigger:** a new libarbc release closing **#32** — exposing a public seam to install an external composition into an open `Document` post-deserialize (i.e. a live `ExternalCompositionLoader` path callable by a host at runtime, not just at `load_document` / `open_document` time).
-
-`editor.import.nested` ships the defensible v1: a freshly-placed `org.arbc.nested` cell renders the doc-05 placeholder in the placing session and resolves on the next reopen (inline via the editor's `FilesystemAssetSource`, §4:140-149). libarbc's `ExternalCompositionLoader` is scoped to deserialize time (`LoadContext`-scoped, single-writer, one-load-one-thread); there is no public API to install an external composition into an already-open `Document`. No editor-side fix is possible — the seam must be supplied by the library. The shipped reopen-path is fully testable (save→reopen round-trip golden, `import_nested_64x64.rgba8`) and documents the live case as an honest limitation, not a bug.
-
-*Filed at the 2026-08-07 triage as **#32**.* Re-verified against v0.4.1 first: the loader is still `LoadContext`-scoped throughout — a `LoadContext` owns one and exposes it as `loader()` (`document_serialize.cpp:691,746`), the nested codec receives it and drives it through that context (`codec_nested.cpp:25,105,139`), and `seed()` remains the only entry (`external_composition_loader.cpp:13,18`). No post-load install seam exists on any ref.
-
-**When the trigger fires:** bump the pin and implement a new editor leaf (approximately `editor.import.nested_live_resolve`, ~1d) that calls the seam from the writer thread after a nested cell is placed, wiring it through the existing `FilesystemAssetSource` path.
