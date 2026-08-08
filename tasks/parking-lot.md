@@ -69,6 +69,27 @@ live nested resolution (#32), the nested insert schema (#33), and in-place
 content-config update (#34). Each became a WBS leaf under `editor.canvas.arbc_v050`
 rather than a note here; git history and those leaf notes are the record.
 
+**The 2026-08-08 v0.6.0 triage: four more closed, one promoted, and a claim
+corrected twice.** libarbc tagged **v0.6.0** closing all four issues the same day's
+earlier pass had filed (`#35`–`#38`). Closed here: the offline-render silence (#35,
+answered as a *report* rather than as settling — upstream kept `render_offline`
+byte-exact and fixed the silence instead, which is the better answer), registry
+insertability (#37, which turned the `org.arbc.camera` item from a D7/A14 allowlist
+amendment into one field on the editor's own registration), and the workspace-arena
+question (#38). **#36** did not close the blend item so much as halve it — the
+library half shipped, so it moved to *Decidable now* with only D10 left to answer.
+
+**#38's answer is worth reading rather than filing away:** the arena replays the
+params a content was **captured** with and never re-captures, so a kind that mutates
+its own *params* reverts on a mapped reopen. Upstream answered it as documentation
+and tests — the rule held by construction and was written down nowhere — and changed
+no behaviour. It is benign here only because `CameraContent` keeps its mutable
+`{name, resolution}` in versioned **content state** through the `Editable` facet
+(`scene/camera.hpp:35,42,55-68`), not in params, which is why the tripwire passed and
+why it passed for a reason nobody had stated. Any future editor kind that keeps
+mutable state in params must route edits through `update_content_config` (#34) or it
+will silently revert.
+
 *Sweep boundary:* the 2026-08-07 pass swept **all 94** refinements, not just those
 added since the previous triage — which is how it caught
 `nested_composition_binding.md`, a file older than the last triage whose parked
@@ -96,11 +117,50 @@ unification** (declined for v1). Git history is the record of each; the reasonin
 that survives is carried in the leaf note and in the architecture rows the
 decisions touch, not here.
 
-*Empty as of 2026-08-07.* One item was briefly promoted here during that triage —
-the export of an unsettled external nested composition — and then **withdrawn the
-same day** when the claim behind it did not survive checking. It is carried under
-*Waiting on evidence* below in its corrected, much narrower form. A new item lands
-here only if it is genuinely waiting on a human choice rather than on evidence.
+It was empty on 2026-08-07 (one item was promoted there and **withdrawn the same
+day** when the claim behind it did not survive checking). The 2026-08-08 v0.6.0
+triage put one item here — per-layer blend, whose upstream half shipped, leaving
+only a D10 scope call. **That is what this section is for: the evidence arrived, so
+the item stopped waiting and started needing an answer.**
+
+---
+
+## Per-layer blend mode — the library half shipped; D10 is now the only question
+
+**Source:** `tasks/refinements/panels/inspector.md` (panels.inspector, 2026-07-29) — D-inspector-5.
+
+**Upstream:** [`arbc#36`](https://github.com/ruoso/arbitrarycomposer/issues/36) **shipped in v0.6.0.**
+
+*Promoted from Waiting on evidence at the 2026-08-08 v0.6.0 triage.* This item's
+trigger had two halves — an upstream facet **and** a human decision to reverse
+D10's v1 no-blend constraint. The upstream half is done, so the only thing left is
+the decision, which is what *Decidable now* is for.
+
+`LayerRecord` now carries a `BlendMode` (`arbc/media/blend_mode.hpp`), set through
+`Model::Transaction::set_blend` and read through `LayerRecord::blend()`. The
+vocabulary is the **separable** modes of PDF 1.4 / CSS Compositing Level 1 —
+multiply, screen, overlay, darken, lighten, colour-dodge, colour-burn, hard-light,
+soft-light, difference, exclusion — taken as a reference rather than invented, so a
+document's `multiply` means what every other tool means. It is evaluated in the
+composition's working space on unpremultiplied values, rides the **layer** rather
+than the kind (no facet, no capability virtual), persists by name and is omitted
+when normal, and `BlendMode::Normal` is premultiplied source-over exactly.
+
+**The decision is D10's, and it is narrow.** D10 (`docs/00-design.md:477`) forbids
+a v1 blend-space toggle. Note what the shipped design does to that objection: the
+mode is evaluated in the composition's own working space, so exposing blend modes
+does **not** require exposing a blend *space* toggle. Those were plausibly the same
+question when D10 was written and they are not the same question now. So the call
+is specifically: **does v1 offer per-layer blend modes in the Inspector's appearance
+block?** — not "does v1 open the blend-space can of worms."
+
+If yes, it is a small leaf: the appearance block already ships opacity + visibility,
+and `set_cell_opacity` / `set_cell_visible` are the implementation mould. If no, the
+editor writes no blend and nothing else changes — **but note the round-trip
+obligation either way**, which `editor.canvas.arbc_v060` owns: a document authored
+elsewhere may carry a mode, an unknown name is preserved verbatim and rendered
+source-over, and the save path must not drop the field. Declining to *author* blend
+is not licence to *discard* it.
 
 ---
 
@@ -145,56 +205,6 @@ when the bindings move. Human design call gated on the input map.
 
 ---
 
-## `render_offline` does not settle deferred external loads (export path)
-
-**Source:** `tasks/refinements/editor/nested_composition_binding.md` (`:318-325`,
-`:396-402`) — surfaced to the parking lot in the return summary, but **never
-added**; recovered by the 2026-08-07 triage's gap check.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#35`](https://github.com/ruoso/arbitrarycomposer/issues/35) (2026-08-08) — re-verified at v0.5.0 first (`offline.cpp:82` still passes `pending=nullptr`). Filed even though the item is latent here, because the gap is the library's regardless of which `AssetSource` a host happens to use, and the failure mode is silent wrong output rather than an error. The issue offers three shapes and states a preference for the smallest — report the unresolved count rather than have `render_offline` gain settle semantics, which would compromise its byte-exact-reference role.
-
-**Trigger:** the editor gains an asset source that **actually defers** — a WASM /
-network / content-store source under A3's swappable `platform` seam. Not the
-shipped filesystem one.
-
-`arbc::render_offline` renders a pinned in-memory snapshot and does not settle
-deferred external loads (`offline.cpp:78-82` passes `pending=nullptr` at the
-current pin). The export path takes one `DocStatePtr` before its first item and
-posts nothing to the writer thread (`export.hpp:26-27`, D-pinned-1), so it has no
-opportunity to settle anything either. An external load still outstanding when the
-pin is taken therefore exports blank, silently.
-
-**Why this is latent rather than live, and why it was demoted.** The 2026-08-07
-triage first filed this under *Decidable now*, claiming the trigger had fired
-because the export path had shipped. Checking the claim rather than the reasoning
-retired it the same day, on two counts:
-
-- **The shipped asset source never defers.** `arbc::FilesystemAssetSource::request`
-  calls `on_ready` **inline on every path** — absent file, unreadable file, bad
-  read, and success alike — and the source comments the guarantee explicitly
-  ("Inline, before `request` returns"). So in the shipped editor no external asset
-  load is ever outstanding to be missed. The deferral in the tests comes from
-  `DeferringAssetSource`, a test double.
-- **The writer already settles proactively anyway.** It polls `external_loads_ready()`
-  whenever its queue drains and consumes arrivals with no submission from anywhere,
-  even on a completely idle app (`shell.cpp:342-355`, D-writer_thread-10). So even
-  a deferring source would have to still be in flight *at the instant of pinning*.
-
-**Do not conflate this with the nested-placement case.** A freshly placed
-`org.arbc.nested` cell does export as a placeholder — but for a different reason
-entirely: no load is ever *initiated* for it, because libarbc has no live external
-composition install seam (arbc#32, its own entry below). Settling cannot fix what
-was never requested. The first draft of this entry cited that sequence as proof
-this gap was reachable; it is not proof, it is the other gap.
-
-**If the trigger fires**, the fix is editor-side and does not touch the library:
-wait for quiescence on the writer thread before taking the export pin, leaving
-`render_offline`'s byte-exact-reference contract alone. The refinement's stated
-objection was to the *library* silently gaining settle semantics, not to a host
-settling first.
-
----
-
 ## Own-colour sampling for operator cells
 
 **Source:** `tasks/refinements/editor.panels/color_eyedrop_nested.md`
@@ -225,15 +235,27 @@ whatever is registered *is* insertable, and `org.arbc.tone` is in fact registere
 by `register_builtin_kinds` and does appear in the dialog, with a labelled
 frequency (Hz) field.
 
-The conclusion survives on the **structural** gate instead, which is stronger than
-the domain argument: `arbc::is_operator(content)` is just `!content->inputs().empty()`
-(`operator_graph.hpp:84-86`), and of the four kinds `register_builtin_kinds`
-registers, three — `solid`, `raster`, `tone` — are sources with no inputs, so they
-are leaves however audio-domain they sound. The fourth, `org.arbc.nested`, *is* an
-operator, and the eyedropper gate already carves it out by
-`composition_ref().valid()` and routes it to the anchored render
-(`color.cpp:94-100`). No registered kind can therefore produce the
-non-nested-operator cell this item is about.
+**That re-derivation was itself wrong on its facts, and the v0.6.0 triage caught
+it.** It claimed `register_builtin_kinds` registers **four** kinds. It registers
+**six**: `org.arbc.fade` and `org.arbc.crossfade` go in too, via
+`FadeContent::kind_id` / `CrossfadeContent::kind_id` constants rather than string
+literals — which is exactly why a grep for `org.arbc.` in `builtin_kinds.cpp`
+misses them, and why two passes in a row got this wrong by grepping instead of
+reading. Both **are** operators, and both have been listed in this editor's insert
+dialog all along.
+
+The conclusion still holds, now for the reason that actually obtains rather than the
+third guess at it. `arbc::is_operator(content)` is just `!content->inputs().empty()`
+(`operator_graph.hpp:84-86`). Of the six: `solid`, `raster` and `tone` are sources
+with no inputs, so they are leaves however audio-domain they sound; `org.arbc.nested`
+*is* an operator, and the eyedropper gate already carves it out by
+`composition_ref().valid()`, routing it to the anchored render (`color.cpp:94-100`);
+and `fade`/`crossfade` are operators whose factories **refuse every `ContentConfig`
+there is** — an operator's input edges cannot travel one — so no string a user types
+can mint them. v0.6.0 marks both `KindInsertability::Internal` and
+`editor.cells.insert_offer` stops offering them. So there is still no way for a user
+to author the non-nested operator cell this item is about; what changed is that the
+reason is *impossible construction*, not *absent registration*.
 
 That is also what makes the trigger real rather than rhetorical: `register_extra_kinds`
 is a live hook (`project_open.cpp:136,310`), so a plugin host or an editor-authored
@@ -365,39 +387,6 @@ remains hypothetical and `instance()` remains a faithful proxy. Unchanged.
 
 ---
 
-## Camera mutable-state round-trip through the workspace arena on mapped reconstruct reopen
-
-**Source:** `tasks/refinements/editor.project/reconstructing_reopen.md` (project.reconstructing_reopen, 2026-07-28) — Open questions.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#38`](https://github.com/ruoso/arbitrarycomposer/issues/38) (2026-08-08), as a **question** rather than a bug — there is no reproduction, only an inability to prove the property from this side. The tripwire test passes; what cannot be established from the host is *why*, and that distinction decides whether the guarantee holds by construction or incidentally for this one mutation path. The issue also asks whether `update_content_config` (#34) now makes a difference, since an asymmetry there would make it the required path for any kind wanting durable param edits.
-
-**Trigger:** a mapped reconstruct reopen observed reverting an unsaved camera edit.
-
-arbc#19's identity capture snapshots construction identity **at `add_content`** (creation time). A camera re-cropped or renamed *after creation but not yet Saved* should reconstruct to its last-checkpointed state on a mapped reopen, not to its construction defaults. Whether arbc#19's capture-plus-replay actually round-trips a codec-persisted kind's post-creation mutable state **through the workspace arena** (vs only through the canonical `project.arbc`, which a mapped reopen never reads) is a library-side property the editor cannot settle from this side. The `open_project reconstructs cells and cameras live` test (added by `reconstructing_reopen`) encodes the requirement as a tripwire: an edited-then-checkpointed camera must reopen with its edit intact. Constraint 4's reconstruct-or-leave-unbound invariant means the safe failure mode is an unbound, reported record — never a silent revert. If a future mapped reopen is observed to revert an unsaved camera edit, this is a cross-repo library gap implementable only against a future libarbc release; not a WBS leaf.
-
-*Checked at the 2026-08-08 triage: v0.5.0 does **not** move this trigger,* and the
-`set_content_reconstruct` / `reconcile_content_bindings` machinery arriving with
-arbc#34 should not be read as having done so. That machinery keeps the live
-`Content` consistent with a record whose *persisted params* changed under an
-in-place config rewrite. This item is about whether a camera's post-creation
-mutable state round-trips through the **workspace arena** on a mapped reopen —
-a different question about a different store, and one arbc#34 neither asks nor
-answers. The tripwire test remains the way this gets found. Unchanged.
-
----
-
-## org.arbc.camera insertability via the cell-insert dialog
-
-**Source:** `tasks/refinements/editor.cells/insert_schema.md` (cells.insert_schema, 2026-07-28) — Open question 1.
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#37`](https://github.com/ruoso/arbitrarycomposer/issues/37) (2026-08-08). *Reframed from an editor policy call into the library gap underneath it.* This entry read as a D7/A14 amendment — should the editor carve out an allowlist exception? — but the reason it cannot is that `Registry` has no way to say **"registered, but not host-insertable"**: `KindMetadata` is `{human_name, version}` (`registry.hpp:34-37`) and a `nullptr` `insert_schema` already means "no schema, but *do* offer it" (the raw-config fallback #21 made first-class). So a kind registered purely so its documents round-trip is indistinguishable from one a user should mint. An editor-side exception would reintroduce the allowlist the no-allowlist rule exists to prevent and would fix only this editor's own kind — a plugin with the same shape would hit it again with no recourse. If #37 ships, the fix is upstream metadata and no editor code.
-
-**Trigger:** a dialog-inserted camera observed in real use causing initialisation problems (missing `scene::add_camera` state setup).
-
-The no-allowlist enumeration lists `org.arbc.camera` in the insert dialog (it did before this leaf too), and `editor.cells.insert_schema` makes its entry honest (zero fields → a default placeholder camera). But a camera minted via `add_cell` skips the identity/state setup `scene::add_camera` performs (D7 / A14 make cells and cameras one shape), so a dialog-inserted camera may be a subtly under-initialised camera. This is a pre-existing property of the no-allowlist model and a genuine design judgment about the cells-vs-cameras seam — not a mechanical fix. If an allowlist exclusion for `org.arbc.camera` is wanted, it is a D7/A14 amendment, not agent-implementable work.
-
----
-
 ## add(X)→remove(X)→add(X) collapsing in one drive iteration
 
 **Source:** `tasks/refinements/canvas/pending_removes_order.md` (canvas.pending_removes_order, 2026-07-28) — Open questions / D-pending_removes_order-1 accepted consequence.
@@ -405,22 +394,6 @@ The no-allowlist enumeration lists `org.arbc.camera` in the insert dialog (it di
 **Trigger:** real multi-canvas use where a caller posts a rapid add→remove→add triple that collapses into one `drive_once` iteration.
 
 With remove-pre-empts-add (D-pending_removes_order-1), a UI sequence of `add(X)` → `remove(X)` → `add(X)` whose three calls collapse into one drive iteration cancels the final re-add: `pending_removes` erases the queued add from `pending_adds`, and the second `add(X)` lands in the freshly-cleared `pending_adds` before the next swap, so X does not surface until the following iteration. This follows directly from the fact that `pending_adds`/`pending_removes` are unsequenced vectors — the host cannot reconstruct sub-iteration ordering — and matches the triaged "remove pre-empts" rule. No agent-implementable fix exists that preserves the pre-emption rule without adding per-call ordering metadata (a sequenced queue, not a set of unordered vectors). Surface this only if the rapid triple is observed in practice causing a user-visible missed canvas; if it is, the fix would require a sequenced submission model, which is an A5/D-pending_removes_order-1 amendment, not a narrow bug fix.
-
----
-
-## Per-layer blend facet — upstream arbc change + D10 scope reversal required
-
-**Source:** `tasks/refinements/panels/inspector.md` (panels.inspector, 2026-07-29) — D-inspector-5; implementer return summary parking-lot item (a).
-
-**Filed upstream:** [`ruoso/arbitrarycomposer#36`](https://github.com/ruoso/arbitrarycomposer/issues/36) (2026-08-08). *The 2026-08-07 triage deliberately held this back*, reasoning that filing a request for something D10 forbids would ask upstream to build against an undecided scope call. **Reversed on 2026-08-08:** the two halves are independent. Whether the *library* should model per-layer blend is a real and specific gap in a compositing model regardless of what any host does with it; whether *this editor* exposes it in v1 is D10's question and stays open. Holding the filing conflated them and meant the library never heard about it at all. The issue says plainly that nothing here is blocked on it and that it should be prioritised as "the model is missing a thing compositors have", not as a host being stuck.
-
-**Trigger:** a new libarbc release adding a per-layer blend-mode facet AND a human decision to reverse D10's v1 no-blend-space-toggle constraint.
-
-D10 (`docs/00-design.md:477`) forbids a v1 blend-space toggle; libarbc v0.4.0 has no per-layer blend-mode facet at all (grep of `arbc/model` records/model confirms none; the compositor is fixed source-over). The inspector's appearance block therefore shows opacity + visibility only (D-inspector-5). A per-layer blend mode would require: (a) an upstream `arbitrarycomposer` change adding the facet; (b) a human decision to reverse D10 for v1 scope. Neither is agent-implementable. If both conditions are met, the inspector appearance block is the natural place to surface it, and the existing `set_cell_opacity`/`set_cell_visible` pattern is the implementation mould.
-
-**Human action:** file upstream issue **if blend modes are wanted**; then revise D10 in `docs/00-design.md`.
-
-*Deliberately NOT filed at the 2026-08-07 triage*, and this is the one library-gated item that stays that way. The other six were filed because the editor wants the capability and only upstream can supply it. This one is different: condition (b) — reversing D10's v1 no-blend-space-toggle constraint — has **not** been decided, and D10 currently says no. Filing a feature request for something the design forbids would ask upstream to build against a decision that has not been made. The ordering is therefore fixed: **decide D10 first, file second.** If D10 is reversed, file the upstream issue then and this entry converts to the same shape as the other six.
 
 ---
 
