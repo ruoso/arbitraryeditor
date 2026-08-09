@@ -1,11 +1,21 @@
 # 99 — Milestones
 #
 # Zero-duration milestone(s) marking when the editor's capability is in place.
+#
+# M9E is v1. M10 is everything decided as wanted-but-later; it depends on M9E, so
+# its work is sequenced after v1 rather than competing with it, and M9E does not
+# depend on `editor.postv1`, so nothing under M10 can gate v1 or surface as
+# v1-ready work.
 
 task milestones "Milestones" {
   task m9_editor "M9E: Editor — host GUI over libarbc" {
     milestone
     depends editor.foundation, editor.dock, editor.project, editor.canvas, editor.cameras, editor.cells, editor.panels, editor.panels.color_eyedrop_nested, editor.paint, editor.import, editor.packaging
     note "The Arbitrary Composer Editor: a native C++ desktop GUI (Dear ImGui docking + SDL3 + OpenGL) that uses libarbc (v0.1+, consumed via CMake FetchContent from a git ref) as a still-image compositor — cells placed by arbitrary affine, observed by cameras, each camera owning a resolution and a framing. Fully specified in docs/00-design.md (D1-D19) and docs/01-architecture.md (A1-A7): a fully-uniform dockspace, the two-canvas split (paint through Viewport | look through Hero), the % of view brush over cell-fixed resolution, the patterned-fill overview, borrowed/owned assets, project-as-a-directory with the in-project mmap workspace, process-per-project, undo = library transactions, and multi-canvas as N HostViewport/InteractiveRenderer over one Document sharing one WorkerPool. Native first; the WASM target is kept reachable by construction (self-rendered UI, platform seam, GLES3/WebGL2 subset) but is not scoped here."
+  }
+  task m10_postv1 "M10: Post-v1 — decided, deliberately out of v1 scope" {
+    milestone
+    depends editor.postv1, milestones.m9_editor
+    note "Work a human has DECIDED is wanted and has equally decided is not v1. It is a milestone rather than a parking-lot section because these items are settled: the parking lot holds questions, and a question with an answer recorded against it stops being one. Depending on m9_editor sequences this after v1 rather than alongside it, and M9E deliberately does NOT depend on `editor.postv1`, so nothing here gates v1 or appears in `scripts/unblocked.py m9_editor`. Landing a leaf here is the alternative to two worse options a triage otherwise faces: deleting the item (losing the reasoning that produced the answer) or leaving it in the parking lot (where a decided item invites the decision to be relitigated every pass). Each leaf's note carries WHY it was deferred, including arguments that were considered and rejected, so the next reader inherits the conclusion rather than the debate."
   }
 }
