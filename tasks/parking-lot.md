@@ -285,3 +285,13 @@ A malformed `params.source` URI now yields `GcError(MarkFailed)` → `ran=false`
 **Trigger:** real use showing raw-RGBA-only clipboards are a common source of paste failures, **and** a decision on which image encoder to vendor (imdec is decode-only).
 
 `editor.import.paste` ships encoded-clipboard-only (prefer `image/png`, then any imdec-decodable mime); a clipboard with only raw pixels is a graceful no-op. Extending v1 to accept raw RGBA needs an image encoder — imdec is decode-only, so a new dependency (`stb_image_write.h`, already vendored for export, or `libpng`) would be required. The encoder choice is a dependency/product call, and the limitation is only observable on applications that place raw RGBA on the clipboard without also placing a PNG form (uncommon in practice).
+
+---
+
+## libarbc: nestable/cycle-free compositions query for the ObjectId picker
+
+**Source:** `tasks/refinements/editor.cells/objectid_field_picker.md` (editor.cells.objectid_field_picker, 2026-08-09) — Open questions.
+
+**Trigger:** a human decision to file against `ruoso/arbitrarycomposer` and a subsequent arbc release that exposes the query.
+
+`editor.cells.objectid_field_picker` ships with `composition_options` returning all compositions reachable from Root (via `Content::composition_ref()`), excluding Root itself. A deeper cycle (A nests B nests A) is left to the library to refuse at `add_cell` as a value error. Whether libarbc should expose a *nestable / cycle-free compositions* query — so the picker can pre-filter legal targets and spare the user a round-trip failure — is a cross-repo API judgment. The editor side requires no change once the library provides the query; the filter would be a one-line predicate inside `composition_options`. Decide whether to file `ruoso/arbitrarycomposer#<N>` for this; if filed, cite the number here and in the follow-up leaf.

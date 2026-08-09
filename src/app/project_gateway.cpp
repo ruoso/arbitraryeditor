@@ -299,6 +299,14 @@ std::vector<ace::dock::InsertKindSpec> AppProjectGateway::insert_kinds() const {
   // is a `for` over what `scene::insert_schemas` returned, never a filter.
   const std::vector<ace::scene::KindInsertSchema> schemas =
       ace::scene::insert_schemas(app_state_.registry());
+  // Pre-resolve the in-document composition candidates ONCE for this modal build
+  // (editor.cells.objectid_field_picker / D-objectid_field_picker-2). L4 is the level that sees
+  // both `scene` and `dock`, so the `ObjectId` -> canonical-decimal resolution happens HERE, off
+  // the L1 enumerator: `dock` receives only pre-resolved `std::string` label/value pairs and names
+  // no `arbc`/`scene` type (Constraint 2/5). Keyed on the declared field TYPE, never a kind id
+  // (A16 / Constraint 1) — any `ObjectId` field any kind advertises gets the same picker.
+  const std::vector<ace::scene::CompositionOption> options =
+      ace::scene::composition_options(app_state_.document(), app_state_.registry());
   std::vector<ace::dock::InsertKindSpec> specs;
   specs.reserve(schemas.size());
   for (const ace::scene::KindInsertSchema& schema : schemas) {
@@ -307,7 +315,18 @@ std::vector<ace::dock::InsertKindSpec> AppProjectGateway::insert_kinds() const {
     spec.human_name = schema.human_name;
     spec.fields.reserve(schema.fields.size());
     for (const ace::scene::InsertField& field : schema.fields) {
-      spec.fields.push_back(ace::dock::InsertFieldSpec{field.id, field.label, field.initial});
+      ace::dock::InsertFieldSpec fs{field.id, field.label, field.initial};
+      if (field.type == ace::scene::InsertFieldType::ObjectId) {
+        // An ObjectId field renders as a composition picker, not free text: pre-fill its
+        // choices from the shared candidate set (an empty set is a disabled placeholder,
+        // never a text fallback — D-objectid_field_picker-5).
+        fs.picker = true;
+        fs.choices.reserve(options.size());
+        for (const ace::scene::CompositionOption& option : options) {
+          fs.choices.push_back(ace::dock::FieldChoice{option.label, option.value});
+        }
+      }
+      spec.fields.push_back(std::move(fs));
     }
     specs.push_back(std::move(spec));
   }

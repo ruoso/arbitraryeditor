@@ -348,6 +348,7 @@ add_executable(ace_shell_test tests/app_loop_test.cpp tests/shell_smoke_test.cpp
                               tests/grid_e2e_test.cpp
                               tests/group_transform_e2e_test.cpp
                               tests/cells_insert_e2e_test.cpp
+                              tests/objectid_field_picker_e2e_test.cpp
                               tests/image_import_e2e_test.cpp
                               tests/paste_image_e2e_test.cpp
                               tests/nested_import_e2e_test.cpp

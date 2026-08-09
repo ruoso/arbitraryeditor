@@ -44,11 +44,28 @@ struct GcSummary {
 //
 // There is deliberately NO field *type* here. The modal renders every field as free
 // text, so the L3 layer structurally cannot branch on a kind — the no-allowlist
-// property (Constraint 2) is enforced by what this struct omits.
+// property (Constraint 2) is enforced by what this struct omits. The one exception is
+// PRESENTATION-only: a field the gateway pre-resolved into a fixed set of choices (an
+// ObjectId composition picker, editor.cells.objectid_field_picker) carries `picker=true`
+// and its `choices`, which drives RENDERING (a combo vs an InputText), never
+// insertability — every kind still yields exactly one entry per id, and the choices are
+// pre-resolved `std::string`s, so `dock` still names no `arbc`/`scene` type
+// (D-objectid_field_picker-3).
+struct FieldChoice {
+  std::string label; // what the combo shows for this option — display only (A16)
+  std::string value; // the exact string written into the field buffer when picked
+};
 struct InsertFieldSpec {
   std::string id;      // stable field id the confirm marshals values back by
   std::string label;   // human label
   std::string initial; // prefilled value (a raster's resolution, Constraint 8)
+  // When true, the modal renders this field as a COMBO over `choices` rather than an
+  // InputText; picking a choice writes its `value` into the field buffer. Presentation
+  // only — the gateway sets it for an `ObjectId` field whose composition candidates it
+  // pre-resolved (D-objectid_field_picker-3). Empty `choices` with `picker=true` renders
+  // a disabled placeholder (no compositions to nest, D-objectid_field_picker-5).
+  bool picker = false;
+  std::vector<FieldChoice> choices;
 };
 
 // One insertable kind. The gateway returns exactly one of these per

@@ -158,11 +158,55 @@ void draw_insert_cell_modal(Dockspace& dockspace, ProjectGateway& gateway) {
   if (selected < kinds.size()) {
     const InsertKindSpec& kind = kinds[selected];
     for (std::size_t f = 0; f < kind.fields.size(); ++f) {
-      std::string label = kind.fields[f].label;
+      const InsertFieldSpec& field = kind.fields[f];
+      std::string label = field.label;
       label += "###insert_field";
       label += std::to_string(f);
-      ImGui::InputText(label.c_str(), dockspace.insert_field_buffer(f),
-                       static_cast<std::size_t>(dockspace.insert_field_buffer_size()));
+      if (field.picker) {
+        // An ObjectId composition picker (editor.cells.objectid_field_picker): render a
+        // combo over the gateway's PRE-RESOLVED choices, never free text. Picking a choice
+        // writes its `value` (a decimal ObjectId string) into the SAME field buffer the
+        // confirm marshals from, so downstream is byte-identical to a typed decimal. An
+        // empty choice set renders a disabled placeholder — never a text fallback, which
+        // would reintroduce the exact failure mode this leaf removes (D-objectid_field_picker-5).
+        const std::string current = dockspace.insert_field_value(f);
+        const char* preview = "(no compositions to nest)";
+        if (!field.choices.empty()) {
+          preview = current.empty() ? "Select a composition\xE2\x80\xA6" : current.c_str();
+          for (const FieldChoice& choice : field.choices) {
+            if (choice.value == current) {
+              preview = choice.label.c_str();
+              break;
+            }
+          }
+        }
+        ImGui::BeginDisabled(field.choices.empty());
+        if (ImGui::BeginCombo(label.c_str(), preview)) {
+          for (std::size_t c = 0; c < field.choices.size(); ++c) {
+            const FieldChoice& choice = field.choices[c];
+            std::string choice_label = choice.label;
+            choice_label += "###insert_choice";
+            choice_label += std::to_string(f);
+            choice_label += '_';
+            choice_label += std::to_string(c);
+            if (ImGui::Selectable(choice_label.c_str(), choice.value == current)) {
+              // Write the chosen decimal into the field buffer (bounded — a prefill
+              // longer than the buffer truncates, mirroring select_insert_kind's copy).
+              char* buffer = dockspace.insert_field_buffer(f);
+              const std::size_t cap =
+                  static_cast<std::size_t>(dockspace.insert_field_buffer_size());
+              const std::size_t copied = std::min(choice.value.size(), cap - 1);
+              std::copy_n(choice.value.begin(), copied, buffer);
+              buffer[copied] = '\0';
+            }
+          }
+          ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+      } else {
+        ImGui::InputText(label.c_str(), dockspace.insert_field_buffer(f),
+                         static_cast<std::size_t>(dockspace.insert_field_buffer_size()));
+      }
     }
     // Say out loud that the placement is provisional (Constraint 7): the
     // overview-wireframe placement gesture is editor.panels.overview's, and the user

@@ -49,10 +49,11 @@ enum class InsertFieldType {
   Integer,  // a whole number (a raster's width/height)
   Number,   // a real number (a solid's channels and extent)
   Text,     // free text — the raw-config fallback, and any string field
-  ObjectId, // an in-document object reference (a nested cell's `child`) — carried through
-            // as a labelled field here; the composition picker over it is a later leaf
-            // (editor.cells.objectid_field_picker). Kept distinct so the hint the library's
-            // `KindInsertField::Type::ObjectId` carries is not lost to `Text`.
+  ObjectId, // an in-document object reference (a nested cell's `child`). The modal renders such a
+            // field as a composition PICKER over `composition_options`, not free text
+            // (editor.cells.objectid_field_picker): the marshalling reads this type to decide, so
+            // the hint the library's `KindInsertField::Type::ObjectId` carries stays distinct from
+            // `Text` and is never lost.
 };
 
 // One input the caller must collect before a kind's factory can be called.
@@ -303,6 +304,38 @@ std::vector<Cell> cells(const arbc::Document& document, const arbc::Registry& re
 // triangle and where expand/enter descend (Constraint 7). PINNED read over `resolve()`.
 std::optional<arbc::ObjectId> nested_composition_of(const arbc::Document& document,
                                                     arbc::ObjectId cell);
+
+// One option the Insert Cell modal's ObjectId-field picker offers: a composition that already
+// exists in the document, presented as a display `label` and the exact decimal `value` string the
+// kind's factory consumes (editor.cells.objectid_field_picker / D-objectid_field_picker-1/-2).
+//
+// `value` is `std::to_string(id.value)` — the CANONICAL decimal string form of ANY `arbc::ObjectId`
+// (`ids.hpp:11-16`), not `org.arbc.nested`-specific grammar — so feeding it through
+// `build_config` -> the kind's `assemble` -> the factory is BYTE-IDENTICAL to a hand-typed decimal
+// (Constraint 3). Resolving the id to its string HERE, in L1, keeps the convention in one place and
+// lets `dock` handle only pre-resolved strings, so `dock` never names an `arbc` type (Constraint
+// 5).
+//
+// `label` is DISPLAY-ONLY (A16): the wrapping cell's kind id (via the `KindBridge`, the
+// `Breadcrumb`/`PathBuilder::descend` convention at `cell.hpp:315-321`) plus the composition's
+// decimal id for disambiguation, or "Nested" when unresolvable. It is never branched on.
+struct CompositionOption {
+  std::string value; // the composition's `ObjectId` as canonical decimal — what the field collects
+  std::string label; // the display label the combo shows — never load-bearing (A16)
+};
+
+// Every composition the document holds that a nested cell could name, discovered GENERICALLY by
+// descending `arbc::Content::composition_ref()` from Root — never a `kind_id` switch (A16 /
+// Constraint 1 / D-objectid_field_picker-1), the same discipline `nested_composition_of` holds, so
+// any kind that exposes a composition ref (including an editor-unknown one) is enumerated. Modelled
+// on `PathBuilder::descend` (`src/scene/cell.cpp`). Deduped by composition id; the ROOT composition
+// is EXCLUDED (descending from Root naturally reaches only its sub-compositions —
+// D-objectid_field_picker-4, the one trivial self-cycle the editor cheaply avoids). Empty for a
+// single-composition document (D-objectid_field_picker-5 renders that as an empty/disabled picker).
+// PINNED read over `pin()` (A18), lock-free — safe on the modal-build path while the driver
+// renders.
+std::vector<CompositionOption> composition_options(const arbc::Document& document,
+                                                   const arbc::Registry& registry);
 
 // The composition the Layers panel's reads and its reorder verb currently TARGET: the entered
 // composition when it names a live composition, else the root (Constraint 8's fail-safe — a

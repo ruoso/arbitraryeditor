@@ -39,6 +39,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -192,6 +193,44 @@ void register_editable_probe_kind(arbc::Registry& registry) {
   };
   (void)registry.add(k_editable_probe_kind, std::move(factory),
                      arbc::KindMetadata{"Editable Probe", "1"});
+}
+
+// A composition-WRAPPING kind the EDITOR has never heard of (editor.cells.objectid_field_picker /
+// D-objectid_field_picker-1): it overrides the generic `composition_ref()` facet to name a child
+// composition, exactly as `org.arbc.nested` does, but under a foreign kind id. So
+// `composition_options` must reach it through the FACET, never a `kind_id == "org.arbc.nested"`
+// switch (A16 witness) — the same discipline `nested_composition_of` holds. Its config grammar is a
+// bare decimal child ObjectId, mirroring `make_nested`.
+class CompositionProbe final : public arbc::Content {
+public:
+  explicit CompositionProbe(arbc::ObjectId child) : d_child(child) {}
+  std::optional<arbc::Rect> bounds() const override { return std::nullopt; }
+  arbc::Stability stability() const override { return arbc::Stability::Static; }
+  std::optional<arbc::TimeRange> time_extent() const override { return std::nullopt; }
+  std::optional<arbc::RenderResult> render(const arbc::RenderRequest&,
+                                           std::shared_ptr<arbc::RenderCompletion>) override {
+    return std::nullopt;
+  }
+  arbc::ObjectId composition_ref() const override { return d_child; }
+
+private:
+  arbc::ObjectId d_child;
+};
+
+constexpr const char* k_composition_probe_kind = "org.example.wrapper";
+
+void register_composition_probe_kind(arbc::Registry& registry) {
+  arbc::ContentFactory factory = [](arbc::ContentConfig config)
+      -> arbc::expected<std::unique_ptr<arbc::Content>, std::string> {
+    std::uint64_t id = 0;
+    const auto [ptr, ec] = std::from_chars(config.data(), config.data() + config.size(), id);
+    if (ec != std::errc{} || id == 0) {
+      return arbc::unexpected<std::string>("org.example.wrapper: expected a decimal ObjectId");
+    }
+    return std::unique_ptr<arbc::Content>(std::make_unique<CompositionProbe>(arbc::ObjectId{id}));
+  };
+  (void)registry.add(k_composition_probe_kind, std::move(factory),
+                     arbc::KindMetadata{"Wrapper Probe", "1"});
 }
 
 // The editor's own registry seeding (mirrors `commands::register_editor_kinds`).
@@ -501,6 +540,120 @@ TEST_CASE("add_cell mints solid, raster and nested cells that cells() reads back
     CHECK(cell.layer.valid());
     CHECK(cell.id != cell.layer);
   }
+}
+
+// --- ObjectId field picker: composition enumeration (editor.cells.objectid_field_picker) --------
+
+TEST_CASE("composition_options enumerates sub-compositions and excludes the root") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "options");
+
+  // A single-composition document has NOTHING to nest — an empty picker, never a text fallback
+  // (D-objectid_field_picker-5).
+  CHECK(ace::scene::composition_options(state.document(), state.registry()).empty());
+
+  // Add one sub-composition and a nested cell in Root that wraps it.
+  arbc::ObjectId child;
+  dispatch(state, Command{"add_child", [&child](arbc::Document& doc) {
+                            child = doc.add_composition(32.0, 32.0);
+                          }});
+  REQUIRE(child.valid());
+  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.nested",
+                               std::to_string(child.value), arbc::Affine::identity())
+              .has_value());
+
+  const std::vector<ace::scene::CompositionOption> options =
+      ace::scene::composition_options(state.document(), state.registry());
+  // Exactly the ONE sub-composition — Root itself is excluded (D-objectid_field_picker-4) — with
+  // the child's canonical decimal as the collected value and a non-empty display label (A16,
+  // display only). The value is EXACTLY what a hand-typed decimal produces (Constraint 3).
+  REQUIRE(options.size() == 1);
+  CHECK(options[0].value == std::to_string(child.value));
+  CHECK_FALSE(options[0].label.empty());
+}
+
+TEST_CASE("composition_options deduplicates when two cells wrap the same sub-composition") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "dedup");
+
+  arbc::ObjectId child;
+  dispatch(state, Command{"add_child", [&child](arbc::Document& doc) {
+                            child = doc.add_composition(32.0, 32.0);
+                          }});
+  REQUIRE(child.valid());
+  // TWO nested cells naming the SAME child composition.
+  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.nested",
+                               std::to_string(child.value), arbc::Affine::identity())
+              .has_value());
+  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.nested",
+                               std::to_string(child.value), arbc::Affine::translation(4.0, 4.0))
+              .has_value());
+
+  // Deduped by composition id: ONE option for the one distinct sub-composition.
+  const std::vector<ace::scene::CompositionOption> options =
+      ace::scene::composition_options(state.document(), state.registry());
+  REQUIRE(options.size() == 1);
+  CHECK(options[0].value == std::to_string(child.value));
+}
+
+TEST_CASE("composition_options discovers an editor-unknown wrapping kind (A16 witness)") {
+  arbc::Registry registry = cell_registry();
+  register_composition_probe_kind(registry);
+  arbc::Document doc;
+  doc.add_composition(64.0, 64.0);                              // Root
+  const arbc::ObjectId child = doc.add_composition(32.0, 32.0); // the sub-composition to enumerate
+  REQUIRE(child.valid());
+
+  // Wrap the child with a cell of the FOREIGN kind whose only claim to nestedness is its generic
+  // `composition_ref()` override — no `org.arbc.nested` involved. Discovery branches on the facet,
+  // not the kind id, so the foreign wrapper is enumerated all the same.
+  REQUIRE(ace::scene::add_cell(doc, registry, k_composition_probe_kind, std::to_string(child.value),
+                               arbc::Affine::identity())
+              .has_value());
+
+  const std::vector<ace::scene::CompositionOption> options =
+      ace::scene::composition_options(doc, registry);
+  REQUIRE(options.size() == 1);
+  CHECK(options[0].value == std::to_string(child.value));
+}
+
+TEST_CASE(
+    "a composition_options value round-trips into a nested cell that names that composition") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  AppState state = session_with_composition(scratch, fs, "roundtrip_opt");
+  const std::vector<KindInsertSchema> schemas = ace::scene::insert_schemas(state.registry());
+
+  arbc::ObjectId child;
+  dispatch(state, Command{"add_child", [&child](arbc::Document& doc) {
+                            child = doc.add_composition(32.0, 32.0);
+                          }});
+  REQUIRE(child.valid());
+  // Seed the enumeration with an existing wrapper so the option set is non-empty.
+  REQUIRE(ace::scene::add_cell(state.document(), state.registry(), "org.arbc.nested",
+                               std::to_string(child.value), arbc::Affine::identity())
+              .has_value());
+
+  const std::vector<ace::scene::CompositionOption> options =
+      ace::scene::composition_options(state.document(), state.registry());
+  REQUIRE(options.size() == 1);
+
+  // The picker's `value` string, fed positionally through the kind's OWN assemble via build_config
+  // and add_cell, mints a nested cell whose composition_ref() equals the chosen composition —
+  // proving the resolved decimal is BYTE-IDENTICAL to what the kind consumes (Constraint 3).
+  const std::string config =
+      config_for(schemas, "org.arbc.nested", InsertValues{{"child", options[0].value}});
+  CHECK(config == options[0].value);
+  const arbc::expected<arbc::ObjectId, std::string> minted =
+      ace::scene::add_cell(state.document(), state.registry(), "org.arbc.nested", config,
+                           arbc::Affine::translation(9, 9));
+  REQUIRE(minted.has_value());
+  const std::optional<arbc::ObjectId> resolved =
+      ace::scene::nested_composition_of(state.document(), *minted);
+  REQUIRE(resolved.has_value());
+  CHECK(*resolved == child);
 }
 
 // --- Provenance classification (editor.cells.resolution; D-resolution-1/-2) --------------

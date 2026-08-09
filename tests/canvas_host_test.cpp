@@ -2280,6 +2280,73 @@ TEST_CASE("canvas_host: UI-thread pick_targets reads run clean against the live 
   CHECK(ace::interact::pick_targets(*probe.document, registry).size() == last_targets);
 }
 
+TEST_CASE(
+    "canvas_host: UI-thread composition_options reads run clean against the live render walk") {
+  // editor.cells.objectid_field_picker Acceptance (Threading): the Insert Cell modal builds its
+  // ObjectId picker by enumerating the document's compositions on the UI thread — a PINNED read
+  // (`scene::composition_options` descends `composition_ref()`/layers off the lock-free `pin()`,
+  // A18) — while a render thread walks the SAME document. This is the identical shape the
+  // `pick_targets`/`cells` reads above anchor (the D-edit_render_sync-3 anchor): no new lock, no
+  // new thread, no new suppression. A TSan/ASan report here is a real contract violation.
+  ace::platform::NativeThreads threads;
+  ace::writer::WriterThread writer(threads);
+  ProbeDocument probe = build_on_writer(writer, [] { return build_probe_document(); });
+  arbc::Registry registry;
+  arbc::register_builtin_kinds(registry);
+  ace::scene::register_camera_kind(registry);
+  CanvasHost host(arbc::default_interactive_pool_config(), std::chrono::milliseconds(8));
+  host.set_writer(&writer);
+  std::unique_ptr<ace::platform::JoinHandle> handle =
+      threads.spawn([&] { host.run([] { return false; }); });
+
+  host.add("canvas#1", *probe.document, &registry);
+  host.request_resize("canvas#1", k_w, k_h);
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 1; }));
+
+  // One sub-composition wrapped by a nested cell in Root, so the enumeration has a real candidate
+  // to return while the driver renders.
+  apply_edit(writer, host, [&] {
+    const arbc::ObjectId child = probe.document->add_composition(32.0, 32.0);
+    const arbc::ObjectId content = probe.document->add_content(std::make_shared<arbc::SolidContent>(
+        arbc::Rgba{0.7F, 0.0F, 0.0F, 1.0F}, arbc::Rect{0.0, 0.0, 32.0, 32.0}));
+    const arbc::ObjectId layer = probe.document->add_layer(content, arbc::Affine::identity());
+    probe.document->attach_layer(child, layer);
+    REQUIRE(ace::scene::add_cell(*probe.document, registry, "org.arbc.nested",
+                                 std::to_string(child.value), arbc::Affine::translation(16.0, 16.0))
+                .has_value());
+  });
+
+  constexpr int k_inserts = 24;
+  std::size_t last_options = 0;
+  for (int i = 0; i < k_inserts; ++i) {
+    // A stream of PLAIN (non-wrapping) cells into Root: they never change the composition count,
+    // so the read has a stable expected answer while the document generation churns underneath it.
+    apply_edit(writer, host, [&] {
+      const bool solid = (i % 2) == 0;
+      const auto added = ace::scene::add_cell(
+          *probe.document, registry, solid ? "org.arbc.solid" : "org.arbc.raster",
+          solid ? "0.1,0.2,0.3,1" : "24x24",
+          arbc::Affine::translation(static_cast<double>(i), static_cast<double>(i)));
+      REQUIRE(added.has_value());
+    });
+    // The UI-thread read the modal-build performs every open, straight against the live render
+    // walk.
+    for (int r = 0; r < 4; ++r) {
+      const std::vector<ace::scene::CompositionOption> options =
+          ace::scene::composition_options(*probe.document, registry);
+      last_options = options.size();
+      REQUIRE(last_options == 1); // the one sub-composition, however many root cells exist
+    }
+  }
+  REQUIRE(pump_until([&] { return host.published_sequence("canvas#1") >= 2; }));
+
+  host.stop();
+  handle->join();
+
+  CHECK(last_options == 1);
+  CHECK(ace::scene::composition_options(*probe.document, registry).size() == 1);
+}
+
 TEST_CASE("canvas_host: UI-thread resolution-health reads run clean against the live render walk") {
   // editor.cells.resolution Acceptance (Threading): the inspector's cell-resolution readout adds
   // NO shared mutable state and NO mutation — it reads `scene::cells` (now also the

@@ -593,6 +593,57 @@ struct PathBuilder {
   }
 };
 
+// Descend nested-cell `composition_ref()` links from `comp`, appending each NEW sub-composition
+// reached — deduped by id against `out` — as a `CompositionOption` whose `value` is the child's
+// canonical decimal id and whose `label` is the wrapping cell's kind id (or "Nested" when
+// unresolvable) plus that decimal for disambiguation (editor.cells.objectid_field_picker /
+// D-objectid_field_picker-1). GENERIC over `composition_ref()`, never a `kind_id` switch (A16), the
+// same discipline `nested_composition_of` and `PathBuilder` hold. The dedup scan doubles as the
+// cycle guard — a composition already in `out` is neither re-appended nor re-descended — so a
+// shared sub-composition is listed once and a pathological cycle terminates. Root is never
+// appended: only its descendants are reached by descent (D-objectid_field_picker-4).
+struct OptionCollector {
+  const arbc::Document& document;
+  const arbc::DocRoot& state;
+  const arbc::KindBridge& bridge;
+  std::vector<CompositionOption>& out;
+
+  void descend(arbc::ObjectId comp) {
+    state.for_each_layer_in(comp, [&](arbc::ObjectId layer_id) {
+      const arbc::LayerRecord* layer = state.find_layer(layer_id);
+      if (layer == nullptr || !layer->content.valid()) {
+        return;
+      }
+      arbc::Content* content = document.resolve(layer->content);
+      if (content == nullptr) {
+        return;
+      }
+      const arbc::ObjectId child = content->composition_ref();
+      if (!child.valid()) {
+        return; // not a composition-wrapping cell — a plain cell has no ref
+      }
+      std::string value = std::to_string(child.value);
+      for (const CompositionOption& option : out) {
+        if (option.value == value) {
+          return; // already collected (and already descended) — dedup + cycle guard
+        }
+      }
+      std::string label = "Nested";
+      if (const arbc::ContentRecord* rec = state.find_content(layer->content); rec != nullptr) {
+        std::string_view id;
+        std::string_view version;
+        if (bridge.lookup(rec->kind, id, version) && !id.empty()) {
+          label = std::string(id);
+        }
+      }
+      label += " #";
+      label += value;
+      out.push_back(CompositionOption{value, std::move(label)});
+      descend(child); // reach sub-compositions nested deeper in the DAG
+    });
+  }
+};
+
 } // namespace
 
 bool set_cell_opacity(arbc::Document& document, const arbc::Registry& /*registry*/,
@@ -698,6 +749,30 @@ std::vector<Breadcrumb> composition_path(const arbc::Document& document,
     result.clear();
     result.push_back(Breadcrumb{root, "Root"});
   }
+  return result;
+}
+
+std::vector<CompositionOption> composition_options(const arbc::Document& document,
+                                                   const arbc::Registry& registry) {
+  std::vector<CompositionOption> result;
+  arbc::KindBridge bridge;
+  project::seed_kind_bridge(bridge, registry);
+
+  const arbc::DocStatePtr state = document.pin();
+  if (!state) {
+    return result;
+  }
+  const arbc::ObjectId root = root_composition(*state);
+  if (!root.valid()) {
+    return result; // no composition at all — nothing to nest
+  }
+  // Descend from Root collecting every sub-composition a nested cell reaches, generically over
+  // `composition_ref()` (A16 / Constraint 1): the discovery branches on the facet, not on a kind
+  // id, so an editor-unknown kind that exposes a composition ref is enumerated for free. Root is
+  // excluded because descent reaches only its descendants (D-objectid_field_picker-4). PINNED read
+  // over `pin()` (A18), lock-free — safe on the modal-build path against a concurrent render.
+  OptionCollector collector{document, *state, bridge, result};
+  collector.descend(root);
   return result;
 }
 
