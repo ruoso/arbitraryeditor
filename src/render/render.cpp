@@ -6,6 +6,7 @@
 #include <arbc/backend_cpu/cpu_backend.hpp>
 #include <arbc/base/transform.hpp>
 #include <arbc/compositor/compositor.hpp>
+#include <arbc/media/blend_mode.hpp> // arbc::BlendMode::Normal (v0.6.0 required composite arg)
 #include <arbc/media/pixel_format.hpp>
 #include <arbc/media/pixel_traits.hpp>
 #include <arbc/media/surface_format.hpp>
@@ -72,7 +73,7 @@ Srgb8Image to_srgb8_over(arbc::CpuBackend& backend, const FrameResult& frame, in
   // Source-over at identity: the CPU backend's Catmull-Rom tap is interpolating, so an
   // integer-aligned composite reproduces the incumbent texel byte-for-byte — this adds
   // a blend, not a resample.
-  backend.composite(**filled, **frame, arbc::Affine::identity(), 1.0);
+  backend.composite(**filled, **frame, arbc::Affine::identity(), 1.0, arbc::BlendMode::Normal);
 
   backend.convert(**srgb, **filled);
   const std::span<const std::uint8_t> bytes = (*srgb)->span<arbc::PixelFormat::Rgba8Srgb>();

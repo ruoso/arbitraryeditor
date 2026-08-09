@@ -13,6 +13,7 @@
 #include <arbc/backend_cpu/cpu_backend.hpp>
 #include <arbc/base/geometry.hpp>
 #include <arbc/base/transform.hpp>
+#include <arbc/media/blend_mode.hpp> // arbc::BlendMode::Normal (v0.6.0 required composite arg)
 #include <arbc/media/pixel_format.hpp>
 #include <arbc/surface/surface.hpp>
 
@@ -90,7 +91,7 @@ void composite_isolation_dim(arbc::CpuBackend& backend, arbc::Surface& frame,
   // collapses to the incumbent texel, no drift): outside pixels become frame*(1-a), the child
   // region is unchanged. The frame stays in the linear premultiplied working space; the sRGB8
   // encode is a later CpuBackend::convert step (D10).
-  backend.composite(frame, **scrim, arbc::Affine::identity(), 1.0);
+  backend.composite(frame, **scrim, arbc::Affine::identity(), 1.0, arbc::BlendMode::Normal);
 }
 
 } // namespace ace::render

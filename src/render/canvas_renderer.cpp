@@ -9,6 +9,7 @@
 #include <arbc/cache/key_shapes.hpp>
 #include <arbc/compositor/compositor.hpp>
 #include <arbc/contract/registry.hpp>
+#include <arbc/media/blend_mode.hpp> // arbc::BlendMode::Normal (v0.6.0 required composite arg)
 #include <arbc/media/pixel_format.hpp>
 #include <arbc/media/surface_format.hpp>
 #include <arbc/runtime/damage_router.hpp>
@@ -185,7 +186,8 @@ struct CanvasRenderer::Impl {
         scratch = std::move(*made);
         // Source-over the settled target onto the fresh (transparent) scratch == an exact copy at
         // integer alignment, then dim the complement of the focus quad through the current camera.
-        backend.composite(*scratch, *target, arbc::Affine::identity(), 1.0);
+        backend.composite(*scratch, *target, arbc::Affine::identity(), 1.0,
+                          arbc::BlendMode::Normal);
         composite_isolation_dim(backend, *scratch, *focus, camera);
         source = scratch.get();
       }

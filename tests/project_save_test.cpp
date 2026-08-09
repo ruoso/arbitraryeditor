@@ -19,7 +19,9 @@
 #include <arbc/builtin_kinds.hpp>
 #include <arbc/contract/registry.hpp>
 #include <arbc/kind_solid/solid_content.hpp>
+#include <arbc/media/blend_mode.hpp> // arbc::BlendMode (v0.6.0 per-layer blend round-trip)
 #include <arbc/model/model.hpp>
+#include <arbc/model/records.hpp> // arbc::LayerRecord::blend / CompositionRecord
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp>
 
@@ -87,6 +89,72 @@ arbc::Registry builtin_registry() {
 }
 
 } // namespace
+
+// editor.canvas.arbc_v070 / Constraint 5 (D-arbc_v070-3): a per-layer blend authored elsewhere
+// must round-trip through the editor's save→reopen unmodified, EVEN THOUGH the editor exposes no
+// blend control (D10 forbids a v1 blend toggle) and writes no blend field. The editor delegates
+// all record serialization to the library's `serialize_snapshot`, which persists a non-`Normal`
+// blend by name — so the value survives with ZERO editor serialization code. This is verify-only:
+// there is deliberately NO editor-side blend read/write (that would duplicate the library's fact
+// and invite drift). A serializer edit here would be the scope-boundary crossing the refinement
+// forbids.
+TEST_CASE("save_project preserves a per-layer blend the editor never authors (v0.6.0 round-trip)") {
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "blend_roundtrip";
+  auto created = ace::project::create_project(fs, root);
+  REQUIRE(created.has_value());
+  ace::project::OpenedProject& opened = *created;
+
+  // A saveable solid + placing layer (the `build_saveable_probe` mould), then author a per-layer
+  // blend the editor has NO UI for: it enters ONLY through the library transaction seam
+  // (`Model::Transaction::set_blend`, reached via the document's host-facing `transact`).
+  arbc::Document& doc = *opened.document;
+  const arbc::ObjectId composition =
+      doc.add_composition(static_cast<double>(ace::project::k_probe_width),
+                          static_cast<double>(ace::project::k_probe_height));
+  arbc::KindBridge bridge;
+  const std::uint64_t solid_kind = bridge.intern(arbc::SolidContent::kind_id, "");
+  const arbc::ObjectId content = doc.add_content(
+      std::make_shared<arbc::SolidContent>(ace::project::k_probe_color), solid_kind);
+  const arbc::ObjectId layer = doc.add_layer(content, arbc::Affine::identity());
+  doc.attach_layer(composition, layer);
+  {
+    auto txn = doc.transact("author_blend");
+    txn.set_blend(layer, arbc::BlendMode::Multiply);
+    txn.commit();
+  }
+  REQUIRE(doc.pin()->find_layer(layer)->blend() == arbc::BlendMode::Multiply);
+
+  const arbc::Registry registry = builtin_registry();
+  REQUIRE(ace::project::save_project(fs, opened.layout, doc, registry).has_value());
+
+  // Force a rebuild-from-canonical reopen so the blend travels the SERIALIZED path, not a live
+  // in-memory carry: drop the workspace and reload `project.arbc`.
+  std::error_code ec;
+  std::filesystem::remove_all(opened.layout.workspace_dir, ec);
+  auto reopened = ace::project::open_project(fs, root);
+  REQUIRE(reopened.has_value());
+  REQUIRE(reopened.value().rebuilt_from_canonical);
+
+  // Read the blend off the reconstructed layer by WALKING the reopened composition (never assuming
+  // a preserved ObjectId): the one layer's `blend()` came back non-`Normal`, exactly as authored.
+  const arbc::DocStatePtr pinned = reopened.value().document->pin();
+  REQUIRE(pinned != nullptr);
+  arbc::ObjectId root_id;
+  const arbc::CompositionRecord* comp_rec = nullptr;
+  REQUIRE(pinned->find_first_composition(root_id, comp_rec));
+  arbc::BlendMode reopened_blend = arbc::BlendMode::Normal;
+  std::size_t layer_count = 0;
+  pinned->for_each_layer_in(root_id, [&](arbc::ObjectId layer_id) {
+    if (const arbc::LayerRecord* rec = pinned->find_layer(layer_id); rec != nullptr) {
+      reopened_blend = rec->blend();
+      ++layer_count;
+    }
+  });
+  REQUIRE(layer_count == 1);
+  CHECK(reopened_blend == arbc::BlendMode::Multiply);
+}
 
 TEST_CASE("save_project publishes project.arbc and ensures assets/ for a solid document") {
   ScratchDir scratch;

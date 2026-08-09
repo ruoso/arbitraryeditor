@@ -46,9 +46,13 @@ namespace ace::scene {
 // and no code anywhere branches on this to decide WHETHER a kind is insertable — the
 // dock POD deliberately drops the type entirely.
 enum class InsertFieldType {
-  Integer, // a whole number (a raster's width/height)
-  Number,  // a real number (a solid's channels and extent)
-  Text,    // free text — the raw-config fallback, and any string field
+  Integer,  // a whole number (a raster's width/height)
+  Number,   // a real number (a solid's channels and extent)
+  Text,     // free text — the raw-config fallback, and any string field
+  ObjectId, // an in-document object reference (a nested cell's `child`) — carried through
+            // as a labelled field here; the composition picker over it is a later leaf
+            // (editor.cells.objectid_field_picker). Kept distinct so the hint the library's
+            // `KindInsertField::Type::ObjectId` carries is not lost to `Text`.
 };
 
 // One input the caller must collect before a kind's factory can be called.

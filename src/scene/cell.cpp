@@ -35,6 +35,8 @@ InsertFieldType map_field_type(arbc::KindInsertField::Type type) {
     return InsertFieldType::Integer;
   case arbc::KindInsertField::Type::Number:
     return InsertFieldType::Number;
+  case arbc::KindInsertField::Type::ObjectId:
+    return InsertFieldType::ObjectId;
   case arbc::KindInsertField::Type::Text:
     break;
   }

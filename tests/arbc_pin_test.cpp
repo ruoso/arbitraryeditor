@@ -1,5 +1,13 @@
 // editor.canvas.arbc_v040 — the libarbc pin guard, headless + GL-free
 // (docs/01-architecture.md §9; retargeted from editor.canvas.arbc_v030 at the v0.4.0 pin).
+//
+// editor.canvas.arbc_v070 retargets the PIN itself to v0.7.0 (CMakeLists.txt:25), absorbing
+// v0.5.0 + v0.6.0 + v0.7.0 in one bump. The staleness guard renews at the bottom of this file
+// (the "v0.5.0 + v0.6.0 + v0.7.0 staleness guard + surface witnesses" block): the v0.4.0-and-older
+// names below STILL resolve at v0.7.0, so they no longer discriminate — the new witness block does,
+// naming version-only surface a stale v0.4.1 tree cannot compile. The `composite_windowed` witness
+// grew a `BlendMode` parameter in the same bump (below). The three behavioural jobs are unchanged:
+//
 // Three jobs, one file:
 //
 //  1. PIN EFFECTIVENESS (D-arbc_v030-2 -> D-arbc_v040-3). `ARBC_GIT_TAG` is a `CACHE` variable
@@ -46,16 +54,22 @@
 #include <arbc/builtin_kinds.hpp>
 #include <arbc/contract/content.hpp>
 #include <arbc/contract/registry.hpp>
+#include <arbc/contract/resampleable.hpp> // arbc::Resampleable (v0.5.0 resample facet witness)
 #include <arbc/kind_solid/solid_content.hpp>
+#include <arbc/media/blend_mode.hpp> // arbc::BlendMode (v0.6.0 required composite arg)
 #include <arbc/model/journal.hpp>
 #include <arbc/model/model.hpp>
+#include <arbc/model/records.hpp>    // arbc::LayerRecord::blend (v0.6.0 per-layer blend witness)
+#include <arbc/runtime/asset_gc.hpp> // arbc::GcRoots / collect_referenced_assets (v0.5.0)
 #include <arbc/runtime/document.hpp>
 #include <arbc/runtime/document_serialize.hpp>
 #include <arbc/runtime/host_viewport.hpp>
 #include <arbc/runtime/offline.hpp>
+#include <arbc/runtime/offline_sequence.hpp> // arbc::SequenceRenderer (v0.6.0 unresolved query)
 #include <arbc/runtime/recovered_state_replay.hpp>
-#include <arbc/serialize/codec.hpp>        // arbc::CodecTable / builtin_codecs
-#include <arbc/serialize/load_context.hpp> // arbc::LoadContext (open_document's ctx)
+#include <arbc/runtime/unresolved_contents.hpp> // arbc::count_unresolved_contents + DocRoot (v0.6.0)
+#include <arbc/serialize/codec.hpp>             // arbc::CodecTable / builtin_codecs
+#include <arbc/serialize/load_context.hpp>      // arbc::LoadContext (open_document's ctx)
 #include <arbc/surface/backend.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -331,28 +345,149 @@ static_assert(std::is_same_v<decltype(&arbc::HostViewport::detach_settler),
 static_assert(std::is_same_v<decltype(arbc::HostViewport::Config::install_settler), bool>);
 
 // #27 caller-pinned batch-coherent export overload — `editor.cameras.export_pinned` (.tji:487).
-// `render_offline` is overloaded, so the cast disambiguates AND is the guard: the 4-arg overload
+// `render_offline` is overloaded, so the cast disambiguates AND is the guard: the pinned overload
 // does not exist at v0.3.0, where the cast fails to compile. The editor's own two calls
-// (src/render/render.cpp) stay on the 2-arg overload — that one now routes through the tiled
-// driver, and its byte-exact witnesses are this leaf's four re-baselined goldens (D-arbc_v040-2).
+// (src/render/render.cpp) stay on the 2-arg (now trailing-report) overload — that one routes
+// through the tiled driver, and its byte-exact witnesses are this leaf's four re-baselined goldens
+// (D-arbc_v040-2).
+// NOTE (editor.canvas.arbc_v070): v0.6.0 also grew a trailing `OfflineRenderReport* = nullptr`
+// out-param on BOTH `render_offline` overloads (the unresolved-content count,
+// `editor.cameras.export_unresolved_report`). That reshapes THIS pinned overload's type — a
+// FORCED signature update in the same bump, exactly like `composite_windowed` below — so a stale
+// v0.4.1 tree red-lights here (the old 4-arg cast no longer resolves). The editor's 2-arg calls
+// still compile because the new param is defaulted; the report surface itself is witnessed in the
+// arbc_v070 block above.
 using ArbcRenderOfflinePinned =
-    arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> (*)(const arbc::Document&,
-                                                                           const arbc::DocStatePtr&,
-                                                                           const arbc::Viewport&,
-                                                                           arbc::Backend&);
+    arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError> (*)(
+        const arbc::Document&, const arbc::DocStatePtr&, const arbc::Viewport&, arbc::Backend&,
+        arbc::OfflineRenderReport*);
 static_assert(std::is_same_v<decltype(static_cast<ArbcRenderOfflinePinned>(&arbc::render_offline)),
                              ArbcRenderOfflinePinned>);
 
 // The two new `Backend` virtuals a pixel-modelling backend must supply (D-arbc_v040-6 / A6
 // amendment). The editor implements NO `arbc::Backend` and constructs only `arbc::CpuBackend`,
 // so these are inert here — witnessed for the staleness guard and to record the seam growth.
+// NOTE (editor.canvas.arbc_v070): v0.6.0 inserted a REQUIRED `arbc::BlendMode blend` after
+// `opacity` on every `composite*` virtual — a required parameter, not a default, so backend and
+// caller cannot silently disagree. That reshapes this member-function-pointer type, so the witness
+// moves in the same bump; the v0.6.0 block below names the same growth on `composite`/
+// `composite_clipped`. A stale v0.4.1 tree fails to compile HERE (the old 6-arg type no longer
+// matches). The editor implements NO `arbc::Backend`, so the growth is inert in `src/` beyond the
+// three base-`composite` calls taking `BlendMode::Normal` (byte-exact source-over).
 static_assert(std::is_same_v<decltype(&arbc::Backend::composite_windowed),
                              void (arbc::Backend::*)(arbc::Surface&, const arbc::Surface&,
-                                                     const arbc::Affine&, double, const arbc::Rect&,
-                                                     const arbc::Rect&)>);
+                                                     const arbc::Affine&, double, arbc::BlendMode,
+                                                     const arbc::Rect&, const arbc::Rect&)>);
 static_assert(std::is_same_v<decltype(&arbc::Backend::clear_rect),
                              void (arbc::Backend::*)(arbc::Surface&, const arbc::Rect&, float,
                                                      float, float, float)>);
+
+// --- editor.canvas.arbc_v070: the v0.5.0 + v0.6.0 + v0.7.0 staleness guard + surface witnesses ---
+//
+// D-arbc_v070-1/-2. This leaf bumps the pin STRAIGHT through v0.5.0, v0.6.0 and v0.7.0 in one step
+// (CMakeLists.txt:25), absorbing all three at once. Every symbol below is version-only surface the
+// DOWNSTREAM leaves consume — pinned here by EXISTENCE AND SHAPE (unevaluated operands, no odr-use)
+// so a build tree still resolving v0.4.1 fails to COMPILE on these lines rather than passing green
+// while silently linked to the old tag (Constraint 7: no runtime version symbol exists and a CMake
+// VERSION_LESS guard cannot fire, since `ARBC_GIT_TAG` is `CACHE` without `FORCE` and `gate`
+// reconfigures in place). The ONLY src-side consumption this leaf lands is the four forced compile
+// fixes (the three base-`composite` calls + the `composite_windowed` witness above) plus the one
+// `map_field_type` `ObjectId` arm; behaviour on every other line stays with its named leaf.
+
+// v0.6.0 (breaking) — the required `arbc::BlendMode blend` after `opacity` on every `composite*`
+// virtual (`composite_windowed`'s reshaped type is witnessed above). The editor implements NO
+// `arbc::Backend`, so beyond the three base-`composite` calls passing `BlendMode::Normal` this is
+// inert. `BlendMode::Normal == 0` is premultiplied source-over EXACTLY (its own kernel arm), which
+// is why no golden may move (D-arbc_v070-2).
+static_assert(
+    std::is_same_v<decltype(&arbc::Backend::composite),
+                   void (arbc::Backend::*)(arbc::Surface&, const arbc::Surface&,
+                                           const arbc::Affine&, double, arbc::BlendMode)>);
+static_assert(std::is_same_v<decltype(&arbc::Backend::composite_clipped),
+                             void (arbc::Backend::*)(arbc::Surface&, const arbc::Surface&,
+                                                     const arbc::Affine&, double, arbc::BlendMode,
+                                                     const arbc::Rect&)>);
+static_assert(std::is_same_v<decltype(arbc::BlendMode::Normal), arbc::BlendMode>);
+
+// v0.6.0 (additive) — per-layer blend persistence. The editor writes NO blend field, so an
+// authored-elsewhere blend rides the unknown-field stash and round-trips verbatim; the project
+// round-trip test below pins that save→reopen survival (Constraint 5 / D-arbc_v070-3).
+static_assert(std::is_same_v<decltype(&arbc::LayerRecord::blend),
+                             arbc::BlendMode (arbc::LayerRecord::*)() const noexcept>);
+static_assert(std::is_same_v<decltype(&arbc::Model::Transaction::set_blend),
+                             void (arbc::Model::Transaction::*)(arbc::ObjectId, arbc::BlendMode)>);
+
+// v0.6.0 (additive) — the `render_offline` unresolved-content report out-param
+// (editor.cameras.export_unresolved_report) and the sequence/count query surface it leans on.
+static_assert(
+    std::is_same_v<decltype(arbc::OfflineRenderReport::unresolved_contents), std::size_t>);
+static_assert(
+    std::is_same_v<decltype(arbc::render_offline(
+                       std::declval<const arbc::Document&>(), std::declval<const arbc::Viewport&>(),
+                       std::declval<arbc::Backend&>(), std::declval<arbc::OfflineRenderReport*>())),
+                   arbc::expected<std::unique_ptr<arbc::Surface>, arbc::SurfaceError>>);
+static_assert(std::is_same_v<decltype(&arbc::SequenceRenderer::unresolved_contents),
+                             std::size_t (arbc::SequenceRenderer::*)() const>);
+static_assert(std::is_same_v<decltype(&arbc::count_unresolved_contents),
+                             std::size_t (*)(const arbc::DocRoot&,
+                                             const std::function<arbc::Content*(arbc::ObjectId)>&,
+                                             arbc::ObjectId)>);
+
+// v0.6.0 (additive) — insertability metadata + the `insert_offer` accessor
+// (editor.cells.insert_offer). The `presentable` default (v0.7.0, below) makes `insert_offer(id)`
+// valid off the SAME single declaration.
+static_assert(std::is_same_v<decltype(arbc::KindMetadata::insertability), arbc::KindInsertability>);
+static_assert(std::is_same_v<decltype(&arbc::Registry::insert_offer),
+                             arbc::KindInsertOffer (arbc::Registry::*)(std::string_view,
+                                                                       arbc::KindModality) const>);
+
+// v0.5.0 (additive-except-one-enumerator) — the `ObjectId` insert-field type this leaf's
+// `scene::map_field_type` arm consumes (the only behavioural src edit besides the composite fixes);
+// pinned as the LAST enumerator (index 3) so a stale enum without it fails here.
+static_assert(arbc::KindInsertField::Type::ObjectId == arbc::KindInsertField::Type{3});
+
+// v0.5.0 (additive) — the writer-thread damage-sink split (editor.canvas.arbc_router_attach_split).
+static_assert(std::is_same_v<decltype(&arbc::HostViewport::attach_damage_sink),
+                             void (arbc::HostViewport::*)()>);
+static_assert(std::is_same_v<decltype(&arbc::HostViewport::detach_damage_sink),
+                             void (arbc::HostViewport::*)() noexcept>);
+static_assert(std::is_same_v<decltype(arbc::HostViewport::Config::install_damage_sink), bool>);
+
+// v0.5.0 (additive) — the config-rewrite undo/reconcile surface (editor.project.undo_reconcile →
+// editor.import.consolidate) and the content-reconstruct hook (editor.import.nested_live_resolve).
+static_assert(
+    std::is_same_v<decltype(&arbc::Document::update_content_config),
+                   bool (arbc::Document::*)(arbc::ObjectId, std::string_view, std::string)>);
+static_assert(std::is_same_v<decltype(&arbc::Document::undo), bool (arbc::Document::*)()>);
+static_assert(std::is_same_v<decltype(&arbc::Document::redo), bool (arbc::Document::*)()>);
+static_assert(std::is_same_v<decltype(&arbc::Document::reconcile_content_bindings),
+                             std::size_t (arbc::Document::*)()>);
+static_assert(std::is_same_v<decltype(&arbc::Document::set_content_reconstruct),
+                             void (arbc::Document::*)(arbc::Document::ContentReconstruct)>);
+static_assert(
+    std::is_same_v<decltype(&arbc::codec_content_reconstruct),
+                   arbc::Document::ContentReconstruct (*)(
+                       const arbc::CodecTable&, const arbc::Registry&, arbc::LoadContext&)>);
+// `install_external_composition` (editor.import.nested_live_resolve) — pinned by existence; its
+// full arity carries `AssetSource*`/`RasterTileStore*` defaulted params whose types are only
+// forward-declared here, so naming the pointer is enough to red-light a stale tree.
+static_assert(std::is_pointer_v<decltype(&arbc::install_external_composition)>);
+
+// v0.5.0 (additive) — the resample facet (editor.cells.resample_apply) and the GC roots surface
+// (editor.project.gc_owned_images); the two-arg `gc_project_directory` this leaf keeps calling is
+// unchanged, so `src/project/gc.cpp` compiles untouched and gains the image mark/sweep for free.
+static_assert(std::is_same_v<decltype(&arbc::Content::resampleable),
+                             arbc::Resampleable* (arbc::Content::*)()>);
+static_assert(
+    std::is_same_v<decltype(&arbc::collect_referenced_assets),
+                   arbc::expected<arbc::GcRoots, arbc::ReaderError> (*)(std::string_view)>);
+
+// v0.7.0 (additive, UNCONSUMED here) — the kind-modality declaration `editor.cells.insert_offer`
+// widens onto. The editor does not call `insert_offer` yet, so v0.7.0 lands only the tag retarget
+// and these witnesses; `intersects` is a FREE function, not a member.
+static_assert(std::is_same_v<decltype(arbc::KindMetadata::modality), arbc::KindModality>);
+static_assert(arbc::KindModality::Both == (arbc::KindModality::Visual | arbc::KindModality::Audio));
+static_assert(arbc::intersects(arbc::KindModality::Visual, arbc::KindModality::Both));
 
 TEST_CASE("arbc pin: a checkpointed NON-INERT StateHandle reopens through Document::open") {
   ScratchDir scratch;

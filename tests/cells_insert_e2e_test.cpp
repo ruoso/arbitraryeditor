@@ -237,6 +237,31 @@ TEST_CASE("cells insert e2e: registry-length kind list, prefilled resolution, in
     IM_CHECK(dockspace.insert_field_value(0) == "1");   // red
     IM_CHECK(dockspace.insert_field_value(6) == "256"); // width
     IM_CHECK(dockspace.insert_field_value(7) == "256"); // height
+
+    // --- (iv-b) Nested renders ONE LABELLED `child` field, not the raw-config box (v0.5.0 #33) --
+    // Before v0.5.0 `org.arbc.nested` advertised no schema and fell to the single free-text
+    // "Config" box; it now advertises one LABELLED `child` ObjectId field. Confirm the modal
+    // renders exactly that — one field, labelled `child`, empty (no default) — which is the whole
+    // point of the #33 item. The composition PICKER over the field is a later leaf
+    // (editor.cells.objectid_field_picker); here it is a labelled field, and that is what renders.
+    ctx->ItemClick(kind_row(dockspace, "org.arbc.nested").c_str());
+    ctx->Yield(2);
+    IM_CHECK(ctx->ItemExists("Insert Cell/###insert_field0")); // the labelled field renders
+    IM_CHECK(dockspace.insert_field_value(0).empty());         // no default child id
+    // The authoritative shape: exactly ONE field, labelled `child` (not the "config"/"Config" raw
+    // box). A raw-config fallback would carry a single field id `config` labelled "Config"; the
+    // v0.5.0 schema carries the labelled `child` field instead — that is what this asserts.
+    const ace::dock::InsertKindSpec* nested_spec = nullptr;
+    for (const ace::dock::InsertKindSpec& spec : dockspace.insert_kinds()) {
+      if (spec.kind_id == "org.arbc.nested") {
+        nested_spec = &spec;
+      }
+    }
+    IM_CHECK(nested_spec != nullptr);
+    IM_CHECK(nested_spec->fields.size() == 1);
+    IM_CHECK(nested_spec->fields[0].id == "child");    // the labelled field's id, not "config"
+    IM_CHECK(nested_spec->fields[0].label == "child"); // labelled, NOT the "Config" raw box
+
     ctx->ItemClick("Insert Cell/###insert_cancel");
     IM_CHECK(pump_until(ctx, [&] { return !dockspace.insert_modal_open(); }));
     ctx->Yield(2);

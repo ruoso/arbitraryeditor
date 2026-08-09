@@ -302,6 +302,21 @@ TEST_CASE("insert_schemas emits one entry per registered kind, in registration o
   // Its own assembler builds the config — the editor never learns the '|' separator.
   CHECK(config_for(schemas, k_schema_probe_kind, InsertValues{{"label", "hi"}, {"gain", "3"}}) ==
         "hi|3");
+
+  // v0.5.0 (issue #33): `org.arbc.nested` now advertises a LIBRARY schema — a single LABELLED
+  // `child` field of type `ObjectId` (min 1, no default), no longer the raw-config box it fell to
+  // at v0.4.0. This is the property the parked item closes, and it exercises the NEW
+  // `map_field_type` `ObjectId` arm this pin adds: the library `KindInsertField::Type::ObjectId`
+  // maps to `InsertFieldType::ObjectId` rather than silently collapsing to `Text`, so the one bit
+  // the type carries survives. Rendering it as a composition picker is a later leaf
+  // (editor.cells.objectid_field_picker) — here it is a labelled field, which is the whole point.
+  const KindInsertSchema& nested = schema_for(schemas, "org.arbc.nested");
+  CHECK_FALSE(nested.raw_config);
+  REQUIRE(nested.fields.size() == 1);
+  CHECK(nested.fields[0].id == "child");
+  CHECK(nested.fields[0].label == "child"); // labelled — no unit, so the bare field name
+  CHECK(nested.fields[0].type == ace::scene::InsertFieldType::ObjectId);
+  CHECK(nested.fields[0].initial.empty()); // no default: there is no child id that is valid empty
 }
 
 TEST_CASE("a kind the editor has never seen inserts end-to-end through the fallback") {
@@ -356,10 +371,11 @@ TEST_CASE("build_config delegates to the kind's own assemble — the editor owns
   // the kind's factory, the single validator.
   CHECK(config_for(schemas, "org.arbc.raster",
                    InsertValues{{"width", " 1024 "}, {"height", " 768 "}}) == " 1024 x 768 ");
-  // Nested advertises NO upstream schema (v0.4.0), so it now travels through the
-  // raw-config fallback: its one field, verbatim.
-  CHECK(schema_for(schemas, "org.arbc.nested").raw_config);
-  CHECK(config_for(schemas, "org.arbc.nested", InsertValues{{"config", "7"}}) == "7");
+  // Nested advertises a library schema as of v0.5.0 (issue #33): its one LABELLED `child`
+  // ObjectId field is no longer the raw-config fallback, and its OWN assembler joins the single
+  // collected value verbatim (the editor never learns the ',' separator).
+  CHECK_FALSE(schema_for(schemas, "org.arbc.nested").raw_config);
+  CHECK(config_for(schemas, "org.arbc.nested", InsertValues{{"child", "7"}}) == "7");
   // The editor-unknown probe's fallback passes its one field through untouched.
   CHECK(config_for(schemas, k_probe_kind, InsertValues{{"config", "  raw , stuff "}}) ==
         "  raw , stuff ");
