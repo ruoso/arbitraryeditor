@@ -205,6 +205,41 @@ when the bindings move. Human design call gated on the input map.
 
 ---
 
+## `org.arbc.tone` is offered in a still-image editor's insert dialog
+
+**Source:** the 2026-08-08 v0.6.0 triage, while checking whether `insert_offer`
+(arbc#37) fully closes the insert-dialog question. It does not.
+
+**Filed upstream:** [`ruoso/arbitrarycomposer#39`](https://github.com/ruoso/arbitrarycomposer/issues/39) (2026-08-08).
+
+**Trigger:** a libarbc release closing **#39** — a kind-modality declaration on the
+registration, so a host can filter its insert menu to what its domain can present.
+
+arbc#37 gave a kind a way to say *whether anyone should mint it*; there is still no
+way to say *what it produces*. `org.arbc.tone` registers with no `insertability`
+argument, so it defaults to `KindInsertability::Host` — which is **correct**, a user
+genuinely can mint one, and an audio tool should offer it. It also advertises a good
+schema, so this editor's dialog renders it nicely as "Tone — frequency (Hz),
+amplitude".
+
+And then `ToneContent::bounds()` returns an empty `Rect{}` (`tone_content.cpp:18`)
+and its render is a culled stub painting transparent (`:24-35`). So a user picks
+Tone, types 440 Hz, and gets a cell that is invisible, has no extent, and can never
+show anything. Arguably worse than the fade/crossfade case #37 fixed: those at least
+*refuse*; this one succeeds and produces nothing.
+
+**The editor cannot fix this from here**, which is why it is upstream. The signals
+that would answer it — an empty `bounds()`, a non-null `audio()` — live on `Content`,
+i.e. on an **instance**, and the question has to be answered when building the menu,
+before any instance exists. The only host-side fix is hard-coding "skip
+`org.arbc.tone`", which is the per-kind allowlist A16 forbids and the registry seam
+exists to prevent — and it would fix only the kinds this editor happens to know.
+
+**Severity: a dead menu entry, not data loss.** `editor.cells.insert_offer` ships
+with this limitation and says so; nothing waits on #39.
+
+---
+
 ## Own-colour sampling for operator cells
 
 **Source:** `tasks/refinements/editor.panels/color_eyedrop_nested.md`
