@@ -5,14 +5,28 @@
 // contract (Constraint 4), the `commands` orchestrator's not-a-transaction
 // invariants (Constraint 3), and — reusing the probe golden — the
 // GC-preserves-the-canonical round-trip. Because the editor cannot yet mint owned
-// tiles (paint is not a dependency), the fixtures are HAND-AUTHORED on-disk state:
+// tiles (paint is not a dependency), the tile fixtures are HAND-AUTHORED on-disk state:
 // a minimal `project.arbc` carrying a `params.blobs` hash list plus blob files
 // written directly under `assets/tiles/` (the reaper reads the on-disk canonical's
-// TEXT, asset_gc.hpp:84-90, so no live tile-bearing Document is needed).
+// TEXT, asset_gc.cpp:83-116, so no live tile-bearing Document is needed).
+//
+// editor.project.gc_owned_images: the OWNED-IMAGE cases below pin the second key space
+// arbc#30 delivered (v0.5.0) — a pasted image is content-addressed under `assets/images/`
+// and rooted by the live cell's `params.source`, not `params.blobs`. Those blobs are NOT
+// hand-authored: they are minted through the SHIPPED paste verb `project::mint_owned_asset`
+// (Constraint 2 / D-gc_owned_images-2), reusing `paste_image_test`'s fixture bytes so the
+// on-disk key scheme is the exact one paste emits. The canonical's `params.source` carries
+// the URI that mint returned, never a hand-spelled scheme. The cases assert the safe
+// direction and presence/absence, never exact reclaim counts on colliding basenames
+// (Constraint 4 / D-gc_owned_images-3): the library roots an owned blob over-approximately
+// (a shared basename roots it) because retaining an orphan leaks while missing a live
+// reference is data loss.
 
 #include <ace/commands/app_state.hpp>
 #include <ace/platform/filesystem.hpp>
+#include <ace/platform/result.hpp>
 #include <ace/project/gc.hpp>
+#include <ace/project/import_asset.hpp>
 #include <ace/project/project.hpp>
 #include <ace/project/save.hpp>
 #include <ace/render/render.hpp>
@@ -28,6 +42,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -35,6 +50,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -67,10 +83,14 @@ struct ScratchDir {
 // distinguished without the paint pipeline that would mint real ones.
 std::string tile_hash(char fill) { return std::string(arbc::k_tile_hash_chars, fill); }
 
-// Write a minimal canonical `project.arbc` whose one content body references
-// `blobs` in `params.blobs` — the exact SHAPE the library mark walk keys on
-// (asset_gc.hpp:84-90), hand-authored as raw JSON so the L1 test pulls no JSON lib.
-void write_canonical(const std::filesystem::path& root, const std::vector<std::string>& blobs) {
+// Write a minimal canonical `project.arbc` referencing `blobs` in one raster-style
+// layer's `params.blobs` and one image-style layer per owned-image URI in `sources`'
+// `params.source` — the two key spaces the library mark walk harvests
+// (asset_gc.cpp:83-116), hand-authored as raw JSON so the L1 test pulls no JSON lib.
+// The `sources` URIs are the REAL URIs `mint_owned_asset` returned (Constraint 2 /
+// D-gc_owned_images-2), never a hand-spelled `assets/images/` scheme.
+void write_canonical(const std::filesystem::path& root, const std::vector<std::string>& blobs,
+                     const std::vector<std::string>& sources = {}) {
   std::string arr;
   for (std::size_t i = 0; i < blobs.size(); ++i) {
     if (i != 0) {
@@ -80,8 +100,11 @@ void write_canonical(const std::filesystem::path& root, const std::vector<std::s
     arr += blobs[i];
     arr += '"';
   }
-  const std::string json =
-      "{\"composition\":{\"layers\":[{\"params\":{\"blobs\":[" + arr + "]}}]}}";
+  std::string layers = "{\"params\":{\"blobs\":[" + arr + "]}}";
+  for (const std::string& source : sources) {
+    layers += ",{\"params\":{\"source\":\"" + source + "\"}}";
+  }
+  const std::string json = "{\"composition\":{\"layers\":[" + layers + "]}}";
   std::ofstream(root / "project.arbc", std::ios::binary) << json;
 }
 
@@ -97,6 +120,52 @@ void write_blob(const std::filesystem::path& root, const std::string& hash,
 
 bool blob_exists(const std::filesystem::path& root, const std::string& hash) {
   return std::filesystem::exists(root / "assets" / "tiles" / hash.substr(0, 2) / hash);
+}
+
+// The paste fixture reused as clipboard bytes (paste_image_test's `photo_12x8.ppm`): a small
+// Netpbm PPM the vendored decoder handles. Distinct byte payloads content-address to distinct
+// hashes — hence distinct owned-image basenames, so a referenced and an orphan owned image never
+// collide under the over-approximate matching policy (D-gc_owned_images-3).
+const std::filesystem::path k_image_fixture =
+    std::filesystem::path(ACE_FIXTURE_DIR) / "photo_12x8.ppm";
+
+std::string fixture_bytes(const ace::platform::FileSystem& fs) {
+  const ace::platform::Result<std::string> read = fs.read_file(k_image_fixture);
+  REQUIRE(read.has_value());
+  return *read;
+}
+
+// Mint an OWNED image through the SHIPPED paste verb (Constraint 2 / D-gc_owned_images-2):
+// content-address `bytes` and write them into `<root>/assets/images/<xx>/<hash>.ppm`, returning
+// the project-relative `params.source` URI paste authors onto the cell — the exact key scheme,
+// not a hand-authored synthetic blob.
+ace::project::OwnedAsset mint_owned_image(const ace::platform::FileSystem& fs,
+                                          const ProjectLayout& layout, std::string_view bytes) {
+  return ace::project::mint_owned_asset(fs, layout, bytes, "ppm");
+}
+
+// Does the owned-image blob named by a minted project-relative URI still exist under `assets/`?
+bool owned_blob_exists(const std::filesystem::path& root, const std::string& uri) {
+  return std::filesystem::exists(root / uri);
+}
+
+// Every regular file under `<root>/assets/`, project-relative and sorted — a byte-level snapshot
+// of the owned-asset store for "assets/ unchanged" assertions.
+std::vector<std::string> asset_tree(const std::filesystem::path& root) {
+  std::vector<std::string> files;
+  const std::filesystem::path assets = root / "assets";
+  std::error_code ec;
+  if (!std::filesystem::exists(assets, ec)) {
+    return files;
+  }
+  for (std::filesystem::recursive_directory_iterator it(assets, ec), end; it != end;
+       it.increment(ec)) {
+    if (it->is_regular_file(ec)) {
+      files.push_back(it->path().lexically_relative(root).generic_string());
+    }
+  }
+  std::sort(files.begin(), files.end());
+  return files;
 }
 
 std::string read_text(const std::filesystem::path& path) {
@@ -270,4 +339,139 @@ TEST_CASE("gc_project preserves the canonical: save -> gc -> reopen renders byte
   const std::string golden =
       "render_probe_" + std::to_string(image.width) + "x" + std::to_string(image.height) + ".rgba8";
   CHECK(ace_test::compare_golden(golden, image.pixels));
+}
+
+// --- editor.project.gc_owned_images: the arbc#30 owned-image key space (assets/images/ +
+//     params.source), minted through the real paste verb (Constraint 2). ---------------------
+
+TEST_CASE("gc_project roots a referenced owned image, leaving its assets/images/ blob untouched") {
+  // THE DATA-LOSS-CRITICAL DIRECTION: a Clean-Up over a live pasted image must not sweep its
+  // blob, or the cell points at nothing after reopen. Unsatisfiable pre-v0.5.0 (the reaper never
+  // looked under assets/images/); arbc#30 exposes the editor to the failure mode this guards.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "owned_rooted";
+  std::filesystem::create_directories(root);
+  const ProjectLayout layout = ace::project::project_layout(root);
+
+  const ace::project::OwnedAsset owned = mint_owned_image(fs, layout, fixture_bytes(fs));
+  write_canonical(root, {}, {owned.uri}); // the live cell references the owned blob
+  REQUIRE(owned_blob_exists(root, owned.uri));
+
+  // Dry-run: the owned image is rooted (referenced set is no longer tiles-only), nothing deleted.
+  const auto preview = ace::project::gc_project(layout, /*dry_run=*/true);
+  REQUIRE(preview.has_value());
+  CHECK(preview.value() == GcOutcome{1, 1, 0, 0}); // scanned 1 image, referenced 1, deleted 0
+  CHECK(owned_blob_exists(root, owned.uri));
+
+  // Commit: the identical plan, and the blob is STILL on disk (the safe direction).
+  const auto swept = ace::project::gc_project(layout, /*dry_run=*/false);
+  REQUIRE(swept.has_value());
+  CHECK(swept.value() == preview.value());
+  CHECK(swept.value().deleted == 0);
+  CHECK(owned_blob_exists(root, owned.uri));
+}
+
+TEST_CASE("gc_project reclaims an orphaned owned image after paste->undo->save->Clean-Up") {
+  // The blob is on disk (an at-paste-time mint the sink never deletes) but the saved canonical no
+  // longer references it — the undo dropped the cell before the save (A23: the sink never deletes,
+  // GC is the reaper). Assert presence/absence, not an exact byte count (Constraint 4).
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "owned_orphan";
+  std::filesystem::create_directories(root);
+  const ProjectLayout layout = ace::project::project_layout(root);
+
+  const ace::project::OwnedAsset owned = mint_owned_image(fs, layout, fixture_bytes(fs));
+  write_canonical(root, {}); // the undone cell is gone: the canonical references nothing
+  REQUIRE(owned_blob_exists(root, owned.uri));
+
+  // Dry-run and commit compute one plan; the orphan survives a preview, is gone after commit.
+  const auto preview = ace::project::gc_project(layout, /*dry_run=*/true);
+  REQUIRE(preview.has_value());
+  CHECK(preview.value().deleted == 1);
+  CHECK(owned_blob_exists(root, owned.uri)); // previewed, not touched
+
+  const auto swept = ace::project::gc_project(layout, /*dry_run=*/false);
+  REQUIRE(swept.has_value());
+  CHECK(swept.value() == preview.value());
+  CHECK_FALSE(owned_blob_exists(root, owned.uri)); // the orphan is reclaimed
+}
+
+TEST_CASE("gc_project roots owned images and tiles together in one pass") {
+  // The union arbc#30 delivered: one live tile (params.blobs) and one live owned image
+  // (params.source), plus one orphan of each kind. A regression that marked one store while
+  // sweeping the other's live blob would fail here.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "union";
+  std::filesystem::create_directories(root);
+  const ProjectLayout layout = ace::project::project_layout(root);
+
+  const std::string tile_live = tile_hash('a');
+  const std::string tile_orphan = tile_hash('b');
+  write_blob(root, tile_live, "LIVE");
+  write_blob(root, tile_orphan, "ORPHANBYTES");
+
+  const std::string bytes = fixture_bytes(fs);
+  const ace::project::OwnedAsset img_live = mint_owned_image(fs, layout, bytes);
+  const ace::project::OwnedAsset img_orphan = mint_owned_image(fs, layout, bytes + "orphan");
+  REQUIRE(img_live.uri != img_orphan.uri); // distinct bytes -> distinct basenames (no collision)
+
+  write_canonical(root, {tile_live}, {img_live.uri}); // both live refs, in the two key spaces
+
+  const auto swept = ace::project::gc_project(layout, /*dry_run=*/false);
+  REQUIRE(swept.has_value());
+  // Both live blobs survive; both orphans — one per store — are gone in the single pass.
+  CHECK(blob_exists(root, tile_live));
+  CHECK(owned_blob_exists(root, img_live.uri));
+  CHECK_FALSE(blob_exists(root, tile_orphan));
+  CHECK_FALSE(owned_blob_exists(root, img_orphan.uri));
+}
+
+TEST_CASE("gc_project never enumerates an image referenced outside the owned subtree") {
+  // An external absolute URI (the borrowed-import shape) points OUTSIDE assets/images/, so the
+  // reaper never enumerates it — it can be neither rooted nor reclaimed. The coexisting owned
+  // blob (rooted) proves assets/ is byte-unchanged, and the external reference still resolves
+  // on reopen (GC never rewrites the canonical). (Constraint 5.)
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "external_ref";
+  std::filesystem::create_directories(root);
+  const ProjectLayout layout = ace::project::project_layout(root);
+
+  const ace::project::OwnedAsset owned = mint_owned_image(fs, layout, fixture_bytes(fs));
+  const std::string external_uri = "file:///photos/holiday.png";
+  write_canonical(root, {}, {owned.uri, external_uri});
+  const std::string canonical_before = read_text(root / "project.arbc");
+  const std::vector<std::string> assets_before = asset_tree(root);
+
+  const auto swept = ace::project::gc_project(layout, /*dry_run=*/false);
+  REQUIRE(swept.has_value());
+  CHECK(swept.value().deleted == 0);                           // the external URI reclaims nothing
+  CHECK(asset_tree(root) == assets_before);                    // assets/ byte-unchanged
+  CHECK(owned_blob_exists(root, owned.uri));                   // the owned blob survived
+  CHECK(read_text(root / "project.arbc") == canonical_before); // the reference still resolves
+}
+
+TEST_CASE("gc_project fails safe on a malformed params.source, deleting nothing (Constraint 7)") {
+  // A v0.5.0 consequence: a `params.source` that is present but not a string is a MARK failure
+  // (over-preservation on any doubt) where v0.4.1 would have swept. Surfaces project::GcError
+  // (MarkFailed) with nothing deleted; the gateway maps this to ran=false / nothing reclaimed
+  // (project_gateway.cpp:197-211). Assert the safe direction only, not the message.
+  ScratchDir scratch;
+  ace::platform::NativeFileSystem fs;
+  const std::filesystem::path root = scratch.root / "malformed_source";
+  std::filesystem::create_directories(root);
+  const ProjectLayout layout = ace::project::project_layout(root);
+
+  const ace::project::OwnedAsset owned = mint_owned_image(fs, layout, fixture_bytes(fs));
+  // A non-string `params.source` — the mark walk rejects it (asset_gc.cpp:109) before any sweep.
+  std::ofstream(root / "project.arbc", std::ios::binary)
+      << "{\"composition\":{\"layers\":[{\"params\":{\"source\":123}}]}}";
+
+  const auto out = ace::project::gc_project(layout, /*dry_run=*/false);
+  REQUIRE_FALSE(out.has_value());
+  CHECK(out.error() == GcError::MarkFailed);
+  CHECK(owned_blob_exists(root, owned.uri)); // fail-safe: nothing deleted
 }

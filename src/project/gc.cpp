@@ -71,9 +71,13 @@ platform::Result<GcOutcome> gc_project(const ProjectLayout& layout, bool dry_run
     return GcOutcome{};
   }
 
-  // Drive the shipped mark-sweep against the on-disk canonical (D-gc-2): scan
-  // `<root>` for `*.arbc`, union their referenced tiles, resolve `assets/tiles/`
-  // against the root the same way save/load do, and sweep that shared store. A raw
+  // Drive the shipped mark-sweep against the on-disk canonical (D-gc-2 / arbc#30):
+  // scan `<root>` for `*.arbc`, union their referenced tiles (`params.blobs`
+  // hashes) AND their referenced owned images (`params.source` URIs), resolve both
+  // `assets/tiles/` and `assets/images/` against the root the same way save/load do,
+  // and sweep that shared store in one pass. The referenced set is no longer
+  // tiles-only: a pasted owned image is rooted by the live cell's `params.source`
+  // (editor.project.gc_owned_images pins both directions). A raw
   // `std::filesystem::path`, not the `FileSystem` seam — the library owns deletion
   // (Constraint 8). `dry_run` computes and reports the identical plan; on any error
   // nothing is deleted beyond a `RemoveFailed` partial (fail-safe).

@@ -268,6 +268,16 @@ knowledge, plus a `scene::brush_dab` overload taking it. Becomes WBS leaf
 
 ---
 
+## Clean-Up abort wording when a malformed `params.source` stops the mark walk
+
+**Source:** `tasks/refinements/editor.project/gc_owned_images.md` (editor.project.gc_owned_images, 2026-08-09) — D-gc_owned_images-4; also flagged by `tasks/refinements/canvas/arbc_v070.md`.
+
+**Trigger:** a human/UX decision that the confirm modal should surface a source-specific message rather than the current terse failure.
+
+A malformed `params.source` URI now yields `GcError(MarkFailed)` → `ran=false`/nothing-reclaimed in `project_gateway.cpp:197-211`. The confirm-modal wording the user sees is therefore a generic "couldn't clean up" rather than something like "couldn't clean up: a project image reference is malformed." Whether users need the distinction — and whether it should appear in the confirm modal vs a separate alert — is a product/UX judgment. The safe-direction behaviour (nothing deleted) is correct and pinned by the `gc_project fails safe on a malformed params.source` test. The wording is the only open question.
+
+---
+
 ## Raw-RGBA clipboard scope and image encoder choice
 
 **Source:** `tasks/refinements/editor/paste.md` (editor.import.paste, 2026-07-31) — D-paste-4.
